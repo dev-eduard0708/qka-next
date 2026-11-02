@@ -15,6 +15,7 @@ from qka_shared.config import get_settings
 from qka_shared.google_oidc import GoogleOidcIdentity
 from qka_shared.models import (
     AllowedEmail,
+    ChatAccess,
     ExternalIdentity,
     GoogleWorkspaceAccount,
     QkaUser,
@@ -47,6 +48,10 @@ GOOGLE_SUB_UNLISTED = "google-sub-unlisted"
 GOOGLE_SUB_PENDING = "google-sub-pending"
 GOOGLE_SUB_UNKNOWN = "google-sub-unknown"
 GOOGLE_SUB_ONLY = "google-sub-only"
+ALLOW_EMAIL_EDUARD = uuid.UUID("aaaaaaaa-eeee-4eee-8eee-111111111111")
+ALLOW_EMAIL_DEV = uuid.UUID("aaaaaaaa-eeee-4eee-8eee-222222222222")
+ALLOW_EMAIL_OTHER = uuid.UUID("aaaaaaaa-eeee-4eee-8eee-333333333333")
+ALLOW_EMAIL_DISABLED = uuid.UUID("aaaaaaaa-eeee-4eee-8eee-444444444444")
 
 
 @pytest.fixture
@@ -67,8 +72,9 @@ def seed_db():
     os.environ["QKA_WORKER_EMBEDDED"] = "false"
     os.environ["QKA_CREDENTIAL_KEY"] = "test-credential-key-not-for-production"
     os.environ["QKA_OPENAI_DATA_SHARING_PERMITTED"] = "false"
-    os.environ.pop("OPENAI_API_KEY", None)
-    os.environ.pop("QKA_OPENAI_API_KEY", None)
+    # Force empty so .env OpenAI keys cannot leak into "not configured" tests.
+    os.environ["OPENAI_API_KEY"] = ""
+    os.environ["QKA_OPENAI_API_KEY"] = ""
     os.environ.pop("QKA_LEGACY_PILOT_USER_ID", None)
     os.environ.pop("QKA_ACL_ALLOW_PRINCIPAL_CONTAINS", None)
     os.environ.pop("QKA_SMB_ALLOWED_HOSTS", None)
@@ -190,10 +196,13 @@ def seed_db():
                 CREATE TABLE IF NOT EXISTS qka_next_source_grant (
                     id UUID PRIMARY KEY,
                     scope_id UUID NOT NULL REFERENCES qka_next_source_scope(id) ON DELETE CASCADE,
-                    qka_user_id UUID NOT NULL,
+                    qka_user_id UUID NULL,
+                    allowed_email_id UUID NULL,
                     capability_read BOOLEAN NOT NULL DEFAULT TRUE,
                     capability_search BOOLEAN NOT NULL DEFAULT TRUE,
                     capability_preview BOOLEAN NOT NULL DEFAULT TRUE,
+                    capability_view BOOLEAN NOT NULL DEFAULT FALSE,
+                    capability_download BOOLEAN NOT NULL DEFAULT FALSE,
                     path_mode INTEGER NOT NULL DEFAULT 0,
                     include_subfolders BOOLEAN NOT NULL DEFAULT TRUE,
                     selected_paths_json TEXT NOT NULL DEFAULT '[]',
@@ -208,10 +217,38 @@ def seed_db():
                 """
             )
         )
+        session.execute(text("ALTER TABLE qka_next_source_grant ALTER COLUMN qka_user_id DROP NOT NULL"))
+        session.execute(text("ALTER TABLE qka_next_source_grant ADD COLUMN IF NOT EXISTS allowed_email_id UUID NULL"))
+        session.execute(text("ALTER TABLE qka_next_source_grant ADD COLUMN IF NOT EXISTS capability_view BOOLEAN NOT NULL DEFAULT FALSE"))
+        session.execute(text("ALTER TABLE qka_next_source_grant ADD COLUMN IF NOT EXISTS capability_download BOOLEAN NOT NULL DEFAULT FALSE"))
         session.execute(text("ALTER TABLE qka_next_source_grant ADD COLUMN IF NOT EXISTS path_mode INTEGER NOT NULL DEFAULT 0"))
         session.execute(text("ALTER TABLE qka_next_source_grant ADD COLUMN IF NOT EXISTS include_subfolders BOOLEAN NOT NULL DEFAULT TRUE"))
         session.execute(text("ALTER TABLE qka_next_source_grant ADD COLUMN IF NOT EXISTS selected_paths_json TEXT NOT NULL DEFAULT '[]'"))
         session.execute(text("ALTER TABLE qka_next_source_grant ADD COLUMN IF NOT EXISTS file_types_json TEXT NOT NULL DEFAULT '[]'"))
+        session.execute(
+            text(
+                """
+                UPDATE qka_next_source_grant
+                SET capability_view = (capability_read OR capability_search OR capability_preview),
+                    capability_download = FALSE
+                """
+            )
+        )
+        session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS qka_next_chat_access (
+                    id UUID PRIMARY KEY,
+                    allowed_email_id UUID NOT NULL UNIQUE,
+                    local_chat_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+                    mcp_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL,
+                    updated_by_user_id UUID NULL
+                )
+                """
+            )
+        )
         session.execute(
             text(
                 """
@@ -236,9 +273,54 @@ def seed_db():
         session.execute(text("ALTER TABLE qka_next_source_grant_audit ADD COLUMN IF NOT EXISTS share_name VARCHAR(256) NOT NULL DEFAULT ''"))
         session.execute(text("ALTER TABLE qka_next_source_grant_audit ADD COLUMN IF NOT EXISTS before_detail TEXT NOT NULL DEFAULT ''"))
         session.execute(text("ALTER TABLE qka_next_source_grant_audit ADD COLUMN IF NOT EXISTS after_detail TEXT NOT NULL DEFAULT ''"))
+        session.execute(text('ALTER TABLE allowed_email ADD COLUMN IF NOT EXISTS "DisplayName" VARCHAR(256) NOT NULL DEFAULT \'\''))
+        session.execute(text('ALTER TABLE allowed_email ADD COLUMN IF NOT EXISTS "GoogleProfileName" VARCHAR(256) NOT NULL DEFAULT \'\''))
+        session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS qka_next_chatgpt_membership (
+                    id UUID PRIMARY KEY,
+                    allowed_email_id UUID NOT NULL UNIQUE,
+                    status INTEGER NOT NULL DEFAULT 0,
+                    source VARCHAR(64) NOT NULL DEFAULT 'unknown',
+                    member_name VARCHAR(256) NOT NULL DEFAULT '',
+                    workspace_role VARCHAR(64) NOT NULL DEFAULT '',
+                    seat_type VARCHAR(64) NOT NULL DEFAULT '',
+                    verified_at TIMESTAMPTZ NULL,
+                    last_import_batch_id UUID NULL,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL,
+                    updated_by_user_id UUID NULL
+                )
+                """
+            )
+        )
+        session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS qka_next_membership_import_batch (
+                    id UUID PRIMARY KEY,
+                    source_label VARCHAR(256) NOT NULL DEFAULT 'csv_import',
+                    file_name VARCHAR(512) NOT NULL DEFAULT '',
+                    row_count INTEGER NOT NULL DEFAULT 0,
+                    matched_count INTEGER NOT NULL DEFAULT 0,
+                    created_count INTEGER NOT NULL DEFAULT 0,
+                    member_count INTEGER NOT NULL DEFAULT 0,
+                    nonmember_count INTEGER NOT NULL DEFAULT 0,
+                    mark_missing_nonmember BOOLEAN NOT NULL DEFAULT FALSE,
+                    notes VARCHAR(2000) NOT NULL DEFAULT '',
+                    created_at TIMESTAMPTZ NOT NULL,
+                    created_by_user_id UUID NULL
+                )
+                """
+            )
+        )
+        session.execute(text("DELETE FROM qka_next_chatgpt_membership"))
+        session.execute(text("DELETE FROM qka_next_membership_import_batch"))
         session.execute(text("DELETE FROM qka_next_source_grant_audit"))
         session.execute(text("DELETE FROM qka_next_source_grant"))
         session.execute(text("DELETE FROM qka_next_source_scope"))
+        session.execute(text("DELETE FROM qka_next_chat_access"))
         session.execute(text("DELETE FROM qka_next_ai_usage_audit"))
         session.execute(text("DELETE FROM qka_next_ai_message_attachment"))
         session.execute(text("DELETE FROM qka_next_ai_message"))
@@ -270,10 +352,14 @@ def seed_db():
                 ExternalIdentity(id=uuid.UUID("dddddddd-5555-4555-8555-555555555555"), qka_user_id=UNLISTED_USER, provider=1, stable_external_id=GOOGLE_SUB_UNLISTED, primary_email="unlisted.user@qehc.edu.sa", account_status=0, link_status=2, created_at=now, updated_at=now),
                 ExternalIdentity(id=uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), qka_user_id=GOOGLE_ONLY_USER, provider=1, stable_external_id=GOOGLE_SUB_ONLY, primary_email="eduard@qehc.edu.sa", account_status=0, link_status=2, created_at=now, updated_at=now),
                 ExternalIdentity(id=uuid.UUID("eeeeeeee-6666-4666-8666-666666666666"), qka_user_id=None, provider=1, stable_external_id=GOOGLE_SUB_PENDING, primary_email="pending.user@qehc.edu.sa", account_status=0, link_status=0, created_at=now, updated_at=now),
-                AllowedEmail(id=uuid.uuid4(), email="eduard@qehc.edu.sa", email_normalized="eduard@qehc.edu.sa", enabled=True, created_at=now, updated_at=now),
-                AllowedEmail(id=uuid.uuid4(), email="dev.eduard@qehc.edu.sa", email_normalized="dev.eduard@qehc.edu.sa", enabled=True, created_at=now, updated_at=now),
-                AllowedEmail(id=uuid.uuid4(), email="other.person@qehc.edu.sa", email_normalized="other.person@qehc.edu.sa", enabled=True, created_at=now, updated_at=now),
-                AllowedEmail(id=uuid.uuid4(), email="disabled.user@qehc.edu.sa", email_normalized="disabled.user@qehc.edu.sa", enabled=False, created_at=now, updated_at=now),
+                AllowedEmail(id=ALLOW_EMAIL_EDUARD, email="eduard@qehc.edu.sa", email_normalized="eduard@qehc.edu.sa", enabled=True, display_name="Eduard Pilot", google_profile_name="", created_at=now, updated_at=now),
+                AllowedEmail(id=ALLOW_EMAIL_DEV, email="dev.eduard@qehc.edu.sa", email_normalized="dev.eduard@qehc.edu.sa", enabled=True, display_name="Dev Eduard", google_profile_name="", created_at=now, updated_at=now),
+                AllowedEmail(id=ALLOW_EMAIL_OTHER, email="other.person@qehc.edu.sa", email_normalized="other.person@qehc.edu.sa", enabled=True, display_name="Other Person", google_profile_name="", created_at=now, updated_at=now),
+                AllowedEmail(id=ALLOW_EMAIL_DISABLED, email="disabled.user@qehc.edu.sa", email_normalized="disabled.user@qehc.edu.sa", enabled=False, display_name="Disabled User", google_profile_name="", created_at=now, updated_at=now),
+                # Default channel flags: Local AI + MCP enabled for the pilot allowlist used by AI tests.
+                ChatAccess(id=uuid.uuid4(), allowed_email_id=ALLOW_EMAIL_EDUARD, local_chat_enabled=True, mcp_enabled=True, created_at=now, updated_at=now, updated_by_user_id=None),
+                # Local chat on for ACL-denial chat tests; MCP stays off for channel isolation tests.
+                ChatAccess(id=uuid.uuid4(), allowed_email_id=ALLOW_EMAIL_OTHER, local_chat_enabled=True, mcp_enabled=False, created_at=now, updated_at=now, updated_by_user_id=None),
                 SynologyApprovedShare(id=SHARE_ID, share_name="eduard", share_name_normalized="EDUARD", folder_relative_path="", folder_relative_path_normalized="", is_active=True, acl_capture_status=1, created_at=now, updated_at=now),
                 SynologyFileInventory(
                     id=FILE_ID,

@@ -21,19 +21,44 @@ export type AllowedEmail = {
   updatedAt?: string | null;
 };
 
-export type SourceEmployee = {
+export type DirectoryUser = {
   allowlistId: string;
   qkaUserId: string | null;
   displayName: string;
+  googleProfileName?: string | null;
   primaryEmail: string;
   googleSub: string | null;
   googleLinked: boolean;
   identityStatus: "linked" | "pending" | "disabled";
+  accountStatus: "active" | "disabled" | "pending";
+  chatgptMembership: "verified_member" | "verified_nonmember" | "unknown";
+  chatgptMembershipSource?: string;
+  chatgptMembershipVerifiedAt?: string | null;
+  chatgptMemberName?: string | null;
+  localChatEnabled: boolean;
+  mcpEnabled: boolean;
   allowlisted: boolean;
   allowlistEnabled: boolean;
   canGrant: boolean;
   adIdentities: Array<{ domainUsername: string | null; sidSuffix: string | null; linked: boolean }>;
   superAdmin: boolean;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+};
+
+export type SourceEmployee = DirectoryUser;
+
+export type DirectoryUsersPage = {
+  items: DirectoryUser[];
+  total: number;
+  page: number;
+  pageSize: number;
+  membershipSync?: {
+    mode: string;
+    automaticSyncSupported: boolean;
+    note: string;
+    acceptedCsvColumns: string[];
+  };
 };
 
 export type SourceScope = {
@@ -62,6 +87,7 @@ export type SourceSource = {
   pilotFolderPrefix: string;
   isConfiguredPilotShare: boolean;
   scopes: SourceScope[];
+  accessModel?: "source_acl" | "qka_managed";
   eligibleForGrants?: boolean;
 };
 
@@ -78,10 +104,14 @@ export type SourceFolderNode = {
 export type SourceGrant = {
   id: string;
   scopeId: string;
-  qkaUserId: string;
-  capabilityRead: boolean;
-  capabilitySearch: boolean;
-  capabilityPreview: boolean;
+  qkaUserId: string | null;
+  allowedEmailId?: string | null;
+  pendingActivation?: boolean;
+  capabilityView?: boolean;
+  capabilityDownload?: boolean;
+  capabilityRead?: boolean;
+  capabilitySearch?: boolean;
+  capabilityPreview?: boolean;
   pathMode: "all" | "selected";
   includeSubfolders: boolean;
   selectedPaths: string[];
@@ -235,10 +265,10 @@ export const api = {
     window.location.assign("/api/v1/auth/google/start");
   },
   listAllowedEmails: () => request<AllowedEmail[]>("/api/v1/access/emails"),
-  addAllowedEmail: (email: string) =>
+  addAllowedEmail: (email: string, displayName?: string) =>
     request<AllowedEmail>("/api/v1/access/emails", {
       method: "POST",
-      body: JSON.stringify({ email }),
+      body: JSON.stringify({ email, displayName: displayName || "" }),
     }),
   setAllowedEmailEnabled: (id: string, enabled: boolean) =>
     request<AllowedEmail>(`/api/v1/access/emails/${id}/enabled`, {
@@ -247,6 +277,87 @@ export const api = {
     }),
   removeAllowedEmail: (id: string) =>
     request<{ ok: boolean }>(`/api/v1/access/emails/${id}/remove`, { method: "POST" }),
+  listDirectoryUsers: (params?: {
+    search?: string;
+    accountStatus?: string;
+    identityStatus?: string;
+    chatgptMembership?: string;
+    page?: number;
+    pageSize?: number;
+  }) => {
+    const q = new URLSearchParams();
+    if (params?.search) q.set("search", params.search);
+    if (params?.accountStatus) q.set("accountStatus", params.accountStatus);
+    if (params?.identityStatus) q.set("identityStatus", params.identityStatus);
+    if (params?.chatgptMembership) q.set("chatgptMembership", params.chatgptMembership);
+    if (params?.page) q.set("page", String(params.page));
+    if (params?.pageSize) q.set("pageSize", String(params.pageSize));
+    const suffix = q.toString() ? `?${q.toString()}` : "";
+    return request<DirectoryUsersPage>(`/api/v1/access/users${suffix}`);
+  },
+  createDirectoryUser: (body: {
+    displayName: string;
+    email: string;
+    localChatEnabled?: boolean;
+    mcpEnabled?: boolean;
+    enabled?: boolean;
+  }) =>
+    request<DirectoryUser>("/api/v1/access/users", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateDirectoryUser: (
+    allowlistId: string,
+    body: {
+      displayName?: string;
+      enabled?: boolean;
+      localChatEnabled?: boolean;
+      mcpEnabled?: boolean;
+    },
+  ) =>
+    request<DirectoryUser>(`/api/v1/access/users/${allowlistId}`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  membershipSyncInfo: () =>
+    request<{ mode: string; automaticSyncSupported: boolean; note: string; acceptedCsvColumns: string[] }>(
+      "/api/v1/access/users/membership-sync",
+    ),
+  importMembershipCsv: async (file: File, markMissingAsNonmember = false, notes = "") => {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("markMissingAsNonmember", markMissingAsNonmember ? "true" : "false");
+    form.append("notes", notes);
+    const headers: Record<string, string> = {};
+    const csrf = csrfToken();
+    if (csrf) headers["X-CSRF-Token"] = csrf;
+    const response = await fetch("/api/v1/access/users/membership/import", {
+      method: "POST",
+      credentials: "include",
+      headers,
+      body: form,
+    });
+    if (!response.ok) {
+      let detail = response.statusText;
+      try {
+        const body = await response.json();
+        detail = body.detail ?? detail;
+      } catch {
+        /* ignore */
+      }
+      throw new ApiError(response.status, typeof detail === "string" ? detail : JSON.stringify(detail));
+    }
+    return (await response.json()) as {
+      batchId: string;
+      mode: string;
+      rowCount: number;
+      matchedCount: number;
+      createdCount: number;
+      memberCount: number;
+      nonmemberCount: number;
+      note: string;
+    };
+  },
   sourceEmployees: () => request<SourceEmployee[]>("/api/v1/access/source/employees"),
   sourceSources: () => request<SourceSource[]>("/api/v1/access/source/sources"),
   sourceFolderTree: (approvedShareId: string, rootPrefix?: string | null) => {
@@ -257,7 +368,7 @@ export const api = {
   },
   sourceScopes: () => request<SourceScope[]>("/api/v1/access/source/scopes"),
   sourceEligibleScopes: (approvedShareId: string) =>
-    request<{ eligible: boolean; scopes: SourceScope[]; reason: string | null }>(
+    request<{ eligible: boolean; accessModel?: string; scopes: SourceScope[]; reason: string | null }>(
       `/api/v1/access/source/eligible-scopes?approvedShareId=${encodeURIComponent(approvedShareId)}`,
     ),
   registerCorporateScope: (body: {
@@ -276,6 +387,11 @@ export const api = {
     }),
   revokeSourceScope: (scopeId: string) =>
     request<SourceScope>(`/api/v1/access/source/scopes/${scopeId}/revoke`, { method: "POST" }),
+  setChatAccess: (body: { allowlistId: string; localChatEnabled: boolean; mcpEnabled: boolean }) =>
+    request<{ allowlistId: string; email: string; localChatEnabled: boolean; mcpEnabled: boolean }>(
+      "/api/v1/access/source/chat-access",
+      { method: "POST", body: JSON.stringify(body) },
+    ),
   sourceGrants: (params?: { scopeId?: string; qkaUserId?: string }) => {
     const q = new URLSearchParams();
     if (params?.scopeId) q.set("scopeId", params.scopeId);
@@ -284,11 +400,15 @@ export const api = {
     return request<SourceGrant[]>(`/api/v1/access/source/grants${suffix}`);
   },
   upsertSourceGrant: (body: {
-    scopeId: string;
-    qkaUserId: string;
-    capabilityRead: boolean;
-    capabilitySearch: boolean;
-    capabilityPreview: boolean;
+    scopeId?: string | null;
+    approvedShareId?: string | null;
+    qkaUserId?: string | null;
+    allowlistId?: string | null;
+    capabilityView?: boolean;
+    capabilityDownload?: boolean;
+    capabilityRead?: boolean;
+    capabilitySearch?: boolean;
+    capabilityPreview?: boolean;
     reason?: string;
     pathMode?: "all" | "selected";
     includeSubfolders?: boolean;

@@ -17,6 +17,7 @@ from qka_shared.models import (
     SynologyFileInventory,
 )
 from qka_shared.source_access import Capability, authorize_document as source_authorize
+from qka_shared.source_access import acl_needles as _acl_needles  # noqa: F401 — tests import this name
 from qka_shared.source_access import normalize_prefix as _prefix_normalized
 from qka_shared.source_access import under_prefix as _under_prefix
 
@@ -67,7 +68,7 @@ def authorize_document(
     inventory: SynologyFileInventory,
     content: SynologyDocumentContent,
     *,
-    capability: str = Capability.PREVIEW,
+    capability: str = Capability.VIEW,
 ) -> bool:
     _ = settings
     return source_authorize(session, user, inventory, content, capability=capability)
@@ -127,7 +128,7 @@ def search_documents(
         inventory = session.get(SynologyFileInventory, content.inventory_file_id)
         if inventory is None or not inventory.is_present:
             continue
-        if not authorize_document(session, settings, user, inventory, content, capability=Capability.SEARCH):
+        if not authorize_document(session, settings, user, inventory, content, capability=Capability.VIEW):
             continue
         hits.append(
             SearchHit(
@@ -180,7 +181,7 @@ def fetch_document(
 
     inventory = session.get(SynologyFileInventory, content.inventory_file_id)
     if inventory is None or not authorize_document(
-        session, settings, user, inventory, content, capability=Capability.PREVIEW
+        session, settings, user, inventory, content, capability=Capability.VIEW
     ):
         return {"id": document_id, "denied": True, "error": "Access denied."}
 
@@ -191,6 +192,8 @@ def fetch_document(
         "id": content.inventory_file_id.hex,
         "title": content.file_name,
         "text": chunk,
+        "previewKind": "indexed_text",
+        "previewNote": "PostgreSQL indexed text preview — not a full original-file rendering.",
         "offset": start,
         "totalChars": len(body),
         "hasMore": start + len(chunk) < len(body),
@@ -199,6 +202,51 @@ def fetch_document(
         "extension": content.extension,
         "fileType": _file_type(content.extension),
         "denied": False,
+        "error": None,
+    }
+
+
+def authorize_download(
+    session: Session,
+    settings: Settings,
+    caller_id: uuid.UUID,
+    document_id: str,
+) -> dict:
+    """Authorize original-file download. Does not open SMB; caller streams from cache/NAS separately."""
+    access = evaluate_user(session, caller_id)
+    if not access.allowed:
+        return {"id": document_id, "denied": True, "error": deny_message(access.reason)}
+    user = load_active_user(session, caller_id)
+    if user is None:
+        return {"id": document_id, "denied": True, "error": deny_message("no_verified_email")}
+    try:
+        inventory_id = uuid.UUID(document_id) if "-" in document_id else uuid.UUID(hex=document_id)
+    except ValueError:
+        return {"id": document_id, "denied": True, "error": "Document not found."}
+
+    content = session.execute(
+        select(SynologyDocumentContent).where(SynologyDocumentContent.inventory_file_id == inventory_id)
+    ).scalar_one_or_none()
+    inventory = session.get(SynologyFileInventory, inventory_id)
+    if content is None or inventory is None or not inventory.is_present:
+        return {"id": document_id, "denied": True, "error": "Document not found."}
+    if not authorize_document(session, settings, user, inventory, content, capability=Capability.DOWNLOAD):
+        return {
+            "id": document_id,
+            "denied": True,
+            "error": "Download Originals permission is required.",
+            "requiresDownloadGrant": True,
+        }
+    return {
+        "id": inventory.id.hex,
+        "denied": False,
+        "fileName": inventory.file_name,
+        "relativePath": inventory.relative_path_normalized,
+        "extension": inventory.extension,
+        "sizeBytes": inventory.size_bytes,
+        "approvedShareId": str(inventory.approved_share_id),
+        "source": "synology",
+        "note": "Original file download requires authorized Synology access when no local cache exists.",
         "error": None,
     }
 
@@ -246,7 +294,7 @@ def list_inventory(
         ).scalar_one_or_none()
         if content is None:
             continue
-        if authorize_document(session, settings, user, inventory, content, capability=Capability.READ):
+        if authorize_document(session, settings, user, inventory, content, capability=Capability.VIEW):
             authorized.append(inventory)
 
     total = len(authorized)

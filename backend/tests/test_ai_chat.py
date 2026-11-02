@@ -58,6 +58,7 @@ def test_summary_openai_flag_false_without_key(client) -> None:
 
 
 def test_unauthorized_document_acl_denied_in_chat(client, monkeypatch) -> None:
+    monkeypatch.setenv("QKA_OPENAI_API_KEY", "sk-test-not-real")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
     monkeypatch.setenv("QKA_OPENAI_DATA_SHARING_PERMITTED", "true")
     from qka_shared.config import get_settings
@@ -85,6 +86,7 @@ class _FakeStream:
 
 
 def test_streamed_text_only_chat_with_mock_openai(client, monkeypatch) -> None:
+    monkeypatch.setenv("QKA_OPENAI_API_KEY", "sk-test-not-real")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
     monkeypatch.setenv("QKA_OPENAI_DATA_SHARING_PERMITTED", "false")
     from qka_shared.config import get_settings
@@ -148,6 +150,7 @@ def test_streamed_text_only_chat_with_mock_openai(client, monkeypatch) -> None:
 
 
 def test_sample_upload_admin_and_analysis(client, monkeypatch) -> None:
+    monkeypatch.setenv("QKA_OPENAI_API_KEY", "sk-test-not-real")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
     monkeypatch.setenv("QKA_OPENAI_DATA_SHARING_PERMITTED", "true")
     from qka_shared.config import get_settings
@@ -183,6 +186,7 @@ def test_sample_upload_admin_and_analysis(client, monkeypatch) -> None:
 
 
 def test_document_chat_blocked_without_data_sharing(client, monkeypatch) -> None:
+    monkeypatch.setenv("QKA_OPENAI_API_KEY", "sk-test-not-real")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-real")
     monkeypatch.setenv("QKA_OPENAI_DATA_SHARING_PERMITTED", "false")
     from qka_shared.config import get_settings

@@ -112,10 +112,65 @@ class AllowedEmail(Base):
     email: Mapped[str] = mapped_column("Email", String(256))
     email_normalized: Mapped[str] = mapped_column("EmailNormalized", String(256))
     enabled: Mapped[bool] = mapped_column("Enabled", Boolean, default=True)
+    # Admin-provided directory name (never overwritten by Google profile).
+    display_name: Mapped[str] = mapped_column("DisplayName", String(256), default="")
+    # Google-provided profile name captured on verified bind (informational).
+    google_profile_name: Mapped[str] = mapped_column("GoogleProfileName", String(256), default="")
     created_at: Mapped[datetime] = mapped_column("CreatedAt", DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column("UpdatedAt", DateTime(timezone=True))
     created_by_user_id: Mapped[uuid.UUID | None] = mapped_column("CreatedByUserId", Uuid(as_uuid=True), nullable=True)
     updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column("UpdatedByUserId", Uuid(as_uuid=True), nullable=True)
+
+
+class ChatAccess(Base):
+    """Per-allowlist QKA chat channel flags (Local AI Chat / ChatGPT MCP). Not ChatGPT seat assignment."""
+
+    __tablename__ = "qka_next_chat_access"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    allowed_email_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), unique=True, index=True)
+    local_chat_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    mcp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+
+
+class ChatgptMembership(Base):
+    """Informational ChatGPT Business membership badge (manual CSV import for Business plan)."""
+
+    __tablename__ = "qka_next_chatgpt_membership"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    allowed_email_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), unique=True, index=True)
+    # 0=unknown, 1=verified_member, 2=verified_nonmember
+    status: Mapped[int] = mapped_column(Integer, default=0)
+    source: Mapped[str] = mapped_column(String(64), default="unknown")
+    member_name: Mapped[str] = mapped_column(String(256), default="")
+    workspace_role: Mapped[str] = mapped_column(String(64), default="")
+    seat_type: Mapped[str] = mapped_column(String(64), default="")
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_import_batch_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+
+
+class MembershipImportBatch(Base):
+    __tablename__ = "qka_next_membership_import_batch"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    source_label: Mapped[str] = mapped_column(String(256), default="csv_import")
+    file_name: Mapped[str] = mapped_column(String(512), default="")
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    matched_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_count: Mapped[int] = mapped_column(Integer, default=0)
+    member_count: Mapped[int] = mapped_column(Integer, default=0)
+    nonmember_count: Mapped[int] = mapped_column(Integer, default=0)
+    mark_missing_nonmember: Mapped[bool] = mapped_column(Boolean, default=False)
+    notes: Mapped[str] = mapped_column(String(2000), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
 
 
 class LocalLogin(Base):
@@ -168,7 +223,7 @@ class SourceScope(Base):
 
 
 class SourceGrant(Base):
-    """Per-user Read/Search/Preview grant on an approved source scope."""
+    """Per-user View Documents / Download Originals grant on a source scope."""
 
     __tablename__ = "qka_next_source_grant"
 
@@ -176,10 +231,14 @@ class SourceGrant(Base):
     scope_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("qka_next_source_scope.id", ondelete="CASCADE"), index=True
     )
-    qka_user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    qka_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), index=True, nullable=True)
+    allowed_email_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), index=True, nullable=True)
+    # Legacy columns retained for historical rows; runtime uses view/download.
     capability_read: Mapped[bool] = mapped_column(Boolean, default=True)
     capability_search: Mapped[bool] = mapped_column(Boolean, default=True)
     capability_preview: Mapped[bool] = mapped_column(Boolean, default=True)
+    capability_view: Mapped[bool] = mapped_column(Boolean, default=False)
+    capability_download: Mapped[bool] = mapped_column(Boolean, default=False)
     # 0 = entire corporate scope; 1 = selected paths only
     path_mode: Mapped[int] = mapped_column(Integer, default=0)
     include_subfolders: Mapped[bool] = mapped_column(Boolean, default=True)

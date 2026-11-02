@@ -8,6 +8,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from qka_shared.allowlist import ACCOUNT_ENABLED, LINKED, PROVIDER_GOOGLE, USER_ACTIVE
+from qka_api.services.user_directory import set_google_profile_name
+from qka_shared.chat_access import activate_pending_grants_for_email
 from qka_shared.google_oidc import GoogleOidcIdentity, accept_google_identity
 from qka_shared.models import AllowedEmail, ExternalIdentity, GoogleWorkspaceAccount, QkaUser
 
@@ -62,6 +64,7 @@ def bind_verified_google(
             existing.updated_at = datetime.now(timezone.utc)
             if existing.google is not None:
                 existing.google.primary_email = email
+            set_google_profile_name(session, email, identity.name or "")
             session.flush()
         return BindResult(True, user.id, "ok")
 
@@ -95,6 +98,8 @@ def bind_verified_google(
                 )
             )
         session.flush()
+    activate_pending_grants_for_email(session, email, user.id)
+    set_google_profile_name(session, email, identity.name or "")
     return BindResult(True, user.id, "ok")
 
 
@@ -107,7 +112,9 @@ def _email_allowlisted(session: Session, email: str) -> bool:
 
 def _create_google_login_user(session: Session, email: str, name: str | None) -> QkaUser:
     now = datetime.now(timezone.utc)
-    label = (name or "").strip() or email.split("@", 1)[0]
+    allow = session.execute(select(AllowedEmail).where(AllowedEmail.email_normalized == email)).scalar_one_or_none()
+    admin_name = (allow.display_name or "").strip() if allow is not None else ""
+    label = admin_name or (name or "").strip() or email.split("@", 1)[0]
     user = QkaUser(
         id=uuid.uuid4(),
         display_name=label[:256],

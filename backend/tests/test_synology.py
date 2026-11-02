@@ -225,7 +225,14 @@ def test_sync_resync_extraction_and_incomplete_scan_safety(client) -> None:
         assert "pineapple" in (content.extracted_text or "")
         assert content.status == 1
 
-    search = client.get("/api/v1/search", params={"q": "pineapple"}, cookies=auth_cookies(ALLOWED_USER))
+    allowed = auth_cookies(ALLOWED_USER)
+    saved_cookies = dict(client.cookies)
+    client.cookies.clear()
+    client.cookies.set("qka_next_session", allowed["qka_next_session"])
+    search = client.get("/api/v1/search", params={"q": "pineapple"})
+    client.cookies.clear()
+    for name, value in saved_cookies.items():
+        client.cookies.set(name, value)
     assert search.status_code == 200
     hits = search.json()["results"]
     assert any("notes.txt" in hit["title"] for hit in hits)

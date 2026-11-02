@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from qka_api.auth import require_csrf, require_principal
 from qka_api.deps import get_session, get_settings_dep
 from qka_api.services import source_access_admin as source_admin
+from qka_api.services import user_directory as directory
 from qka_shared.allowlist import load_active_user
 from qka_shared.config import Settings
 from qka_shared.email_address import try_normalize
@@ -22,10 +23,26 @@ router = APIRouter(prefix="/api/v1/access")
 
 class AddEmailRequest(BaseModel):
     email: str
+    displayName: str = ""
 
 
 class SetEnabledRequest(BaseModel):
     enabled: bool
+
+
+class CreateUserRequest(BaseModel):
+    displayName: str
+    email: str
+    localChatEnabled: bool = False
+    mcpEnabled: bool = False
+    enabled: bool = True
+
+
+class UpdateUserRequest(BaseModel):
+    displayName: str | None = None
+    enabled: bool | None = None
+    localChatEnabled: bool | None = None
+    mcpEnabled: bool | None = None
 
 
 class RegisterCorporateScopeRequest(BaseModel):
@@ -40,11 +57,16 @@ class RegisterCorporateScopeRequest(BaseModel):
 
 
 class UpsertGrantRequest(BaseModel):
-    scopeId: uuid.UUID
-    qkaUserId: uuid.UUID
-    capabilityRead: bool = True
-    capabilitySearch: bool = True
-    capabilityPreview: bool = True
+    scopeId: uuid.UUID | None = None
+    approvedShareId: uuid.UUID | None = None
+    qkaUserId: uuid.UUID | None = None
+    allowlistId: uuid.UUID | None = None
+    capabilityView: bool = True
+    capabilityDownload: bool = False
+    # Legacy aliases (any true → View). Download is never inferred.
+    capabilityRead: bool | None = None
+    capabilitySearch: bool | None = None
+    capabilityPreview: bool | None = None
     reason: str = ""
     pathMode: str = "all"
     includeSubfolders: bool = True
@@ -55,6 +77,12 @@ class UpsertGrantRequest(BaseModel):
 class SetGrantStatusRequest(BaseModel):
     status: str = Field(description="active | disabled | revoked")
     reason: str = ""
+
+
+class SetChatAccessRequest(BaseModel):
+    allowlistId: uuid.UUID
+    localChatEnabled: bool = False
+    mcpEnabled: bool = False
 
 
 def _require_super_admin(
@@ -101,29 +129,149 @@ def add_email(
     settings: Settings = Depends(get_settings_dep),
     session: Session = Depends(get_session),
 ) -> dict:
+    """Legacy allowlist endpoint — prefers /users. Still creates a directory user."""
     actor = _require_super_admin(request, settings, session, mutating=True)
     if settings.database_read_only:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="The database is read-only.")
-    email, error = try_normalize(body.email)
-    if email is None:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=error)
-    exists = session.execute(select(AllowedEmail).where(AllowedEmail.email_normalized == email)).scalar_one_or_none()
-    if exists is not None:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="That email is already on the allowlist.")
-    now = datetime.now(timezone.utc)
-    row = AllowedEmail(
-        id=uuid.uuid4(),
-        email=email,
-        email_normalized=email,
-        enabled=True,
-        created_at=now,
-        updated_at=now,
-        created_by_user_id=actor.id,
-        updated_by_user_id=actor.id,
-    )
-    session.add(row)
+    name = (body.displayName or "").strip() or (body.email.split("@", 1)[0] if "@" in body.email else body.email)
+    try:
+        created = directory.create_user(session, actor, display_name=name, email_raw=body.email)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     session.flush()
-    return _to_dto(row)
+    return {
+        "id": created["allowlistId"],
+        "email": created["primaryEmail"],
+        "enabled": created["allowlistEnabled"],
+        "displayName": created["displayName"],
+        "createdAt": created.get("createdAt"),
+        "updatedAt": created.get("updatedAt"),
+    }
+
+
+@router.get("/users")
+def list_directory_users(
+    request: Request,
+    search: str | None = None,
+    accountStatus: str | None = None,
+    identityStatus: str | None = None,
+    chatgptMembership: str | None = None,
+    page: int = Query(default=1, ge=1),
+    pageSize: int = Query(default=25, ge=1, le=100),
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    _require_super_admin(request, settings, session, mutating=False)
+    return directory.list_users(
+        session,
+        search=search,
+        account_status=accountStatus,
+        identity_status=identityStatus,
+        chatgpt_membership=chatgptMembership,
+        page=page,
+        page_size=pageSize,
+    )
+
+
+@router.get("/users/membership-sync")
+def membership_sync_status(
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    _require_super_admin(request, settings, session, mutating=False)
+    return directory.membership_sync_info()
+
+
+@router.post("/users")
+def create_directory_user(
+    body: CreateUserRequest,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    if settings.database_read_only:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="The database is read-only.")
+    try:
+        created = directory.create_user(
+            session,
+            actor,
+            display_name=body.displayName,
+            email_raw=body.email,
+            local_chat_enabled=body.localChatEnabled,
+            mcp_enabled=body.mcpEnabled,
+            enabled=body.enabled,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    session.flush()
+    return created
+
+
+@router.post("/users/membership/import")
+async def import_membership_csv(
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+    file: UploadFile = File(...),
+    markMissingAsNonmember: bool = Form(default=False),
+    notes: str = Form(default=""),
+) -> dict:
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    if settings.database_read_only:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="The database is read-only.")
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="CSV must be UTF-8.") from exc
+    try:
+        result = directory.import_chatgpt_membership_csv(
+            session,
+            actor,
+            csv_text=text,
+            file_name=file.filename or "",
+            mark_missing_as_nonmember=markMissingAsNonmember,
+            notes=notes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    session.flush()
+    return result
+
+
+@router.post("/users/{allowlist_id}")
+def update_directory_user(
+    allowlist_id: uuid.UUID,
+    body: UpdateUserRequest,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    if settings.database_read_only:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="The database is read-only.")
+    try:
+        updated = directory.update_user(
+            session,
+            actor,
+            allowlist_id,
+            display_name=body.displayName,
+            enabled=body.enabled,
+            local_chat_enabled=body.localChatEnabled,
+            mcp_enabled=body.mcpEnabled,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    session.flush()
+    return updated
 
 
 @router.post("/emails/{email_id}/enabled")
@@ -288,12 +436,21 @@ def upsert_source_grant(
     actor = _require_super_admin(request, settings, session, mutating=True)
     if settings.database_read_only:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="The database is read-only.")
+    if body.qkaUserId is None and body.allowlistId is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="qkaUserId or allowlistId is required.")
+    if body.scopeId is None and body.approvedShareId is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="scopeId or approvedShareId is required.")
     try:
         row = source_admin.upsert_grant(
             session,
             actor,
+            settings,
             scope_id=body.scopeId,
+            approved_share_id=body.approvedShareId,
             qka_user_id=body.qkaUserId,
+            allowlist_id=body.allowlistId,
+            capability_view=body.capabilityView,
+            capability_download=body.capabilityDownload,
             capability_read=body.capabilityRead,
             capability_search=body.capabilitySearch,
             capability_preview=body.capabilityPreview,
@@ -307,6 +464,30 @@ def upsert_source_grant(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     session.flush()
     return source_admin._grant_dto(row)
+
+
+@router.post("/source/chat-access")
+def set_source_chat_access(
+    body: SetChatAccessRequest,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    if settings.database_read_only:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="The database is read-only.")
+    try:
+        payload = source_admin.set_employee_chat_access(
+            session,
+            actor,
+            body.allowlistId,
+            local_chat_enabled=body.localChatEnabled,
+            mcp_enabled=body.mcpEnabled,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    session.flush()
+    return payload
 
 
 @router.post("/source/grants/{grant_id}/status")

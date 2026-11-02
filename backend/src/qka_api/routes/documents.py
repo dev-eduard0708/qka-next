@@ -5,7 +5,13 @@ from sqlalchemy.orm import Session
 
 from qka_api.auth import require_principal
 from qka_api.deps import get_session, get_settings_dep
-from qka_api.services.documents import fetch_document, list_inventory, search_documents, summary
+from qka_api.services.documents import (
+    authorize_download,
+    fetch_document,
+    list_inventory,
+    search_documents,
+    summary,
+)
 from qka_shared.config import Settings
 
 router = APIRouter(prefix="/api/v1")
@@ -74,3 +80,15 @@ def document_detail(
 ) -> dict:
     principal = require_principal(request, settings)
     return fetch_document(session, settings, principal.user_id, document_id, offset)
+
+
+@router.get("/documents/{document_id}/download")
+def document_download(
+    document_id: str,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    """Authorize original-file download (separate from View / indexed-text preview)."""
+    principal = require_principal(request, settings)
+    return authorize_download(session, settings, principal.user_id, document_id)

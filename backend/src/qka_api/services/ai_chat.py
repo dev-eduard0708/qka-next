@@ -858,6 +858,17 @@ def stream_chat(
     except Exception as exc:  # noqa: BLE001
         logger.exception("OpenAI chat failed")
         err_text = str(exc)[:500] or "OpenAI request failed."
+        credit = _credit_signal(err_text)
+        if credit == "exhausted":
+            code = "service_unavailable"
+            err_text = (
+                "QKA Local AI Chat is temporarily unavailable: OpenAI API billing/credits are exhausted. "
+                "This is not an access denial."
+            )
+            category = "service_unavailable"
+        else:
+            code = "openai_error"
+            category = "openai_error"
         assistant.content = assembled
         assistant.status = "error"
         assistant.error = err_text
@@ -870,7 +881,7 @@ def stream_chat(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             succeeded=False,
-            error_category="openai_error",
+            error_category=category,
             detail=err_text,
         )
-        yield _sse("error", {"code": "openai_error", "message": err_text, "partial": assembled})
+        yield _sse("error", {"code": code, "message": err_text, "partial": assembled})

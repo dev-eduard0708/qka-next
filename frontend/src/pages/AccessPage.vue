@@ -5,47 +5,137 @@
 
     <template v-if="session.user?.superAdmin">
       <q-tabs v-model="tab" dense class="text-primary q-mb-md" align="left" active-color="primary" indicator-color="primary">
-        <q-tab name="emails" :label="t('access.tabEmails')" />
+        <q-tab name="users" :label="t('access.tabUsers')" />
         <q-tab name="source" :label="t('access.tabSource')" />
+        <q-tab name="audit" :label="t('access.tabAudit')" />
       </q-tabs>
 
       <q-tab-panels v-model="tab" animated>
-        <q-tab-panel name="emails" class="q-pa-none">
+        <q-tab-panel name="users" class="q-pa-none">
+          <q-banner v-if="usersError" dense rounded class="bg-negative text-white q-mb-md">{{ usersError }}</q-banner>
           <q-card bordered flat class="qka-card">
             <q-card-section>
-              <div class="text-subtitle1 q-mb-sm">{{ t("access.allowlist") }}</div>
-              <p class="text-caption q-mb-sm">{{ t("access.domainHint") }}</p>
-              <p class="text-caption text-warning q-mb-md">{{ t("access.allowlistNoDocs") }}</p>
-              <q-banner v-if="emailError" dense class="bg-negative text-white q-mb-md">{{ emailError }}</q-banner>
-              <q-form class="row q-col-gutter-sm q-mb-md" @submit.prevent="addEmail">
-                <div class="col">
-                  <q-input v-model="email" outlined dense :label="t('access.email')" type="email" />
+              <div class="row items-center q-col-gutter-sm q-mb-md">
+                <div class="col-12 col-md-3">
+                  <q-input v-model="userSearch" outlined dense clearable debounce="300" :label="t('access.userSearch')" @update:model-value="reloadUsers" />
+                </div>
+                <div class="col-6 col-md-2">
+                  <q-select v-model="filterAccount" outlined dense clearable emit-value map-options :options="accountFilterOptions" :label="t('access.filterAccount')" @update:model-value="reloadUsers" />
+                </div>
+                <div class="col-6 col-md-2">
+                  <q-select v-model="filterIdentity" outlined dense clearable emit-value map-options :options="identityFilterOptions" :label="t('access.filterIdentity')" @update:model-value="reloadUsers" />
+                </div>
+                <div class="col-6 col-md-2">
+                  <q-select v-model="filterMembership" outlined dense clearable emit-value map-options :options="membershipFilterOptions" :label="t('access.filterMembership')" @update:model-value="reloadUsers" />
                 </div>
                 <div class="col-auto">
-                  <q-btn color="primary" unelevated type="submit" :loading="addingEmail" :label="t('access.add')" />
+                  <q-btn color="primary" unelevated no-caps :label="t('access.addUser')" @click="openAddUser" />
                 </div>
-              </q-form>
-              <q-list v-if="emails.length" bordered separator>
-                <q-item v-for="row in emails" :key="row.id">
-                  <q-item-section>
-                    <q-item-label>{{ row.email }}</q-item-label>
-                    <q-item-label caption>{{ row.enabled ? t("access.enabled") : t("access.disabled") }}</q-item-label>
-                  </q-item-section>
-                  <q-item-section side>
-                    <div class="row items-center no-wrap q-gutter-sm">
-                      <q-toggle
-                        :model-value="row.enabled"
-                        :disable="busyEmailId === row.id"
-                        @update:model-value="(value: boolean) => toggleEmail(row, value)"
+                <div class="col-auto">
+                  <q-btn outline color="primary" no-caps :label="t('access.importMembers')" @click="importDialog = true" />
+                </div>
+              </div>
+              <p class="text-caption text-grey-7 q-mb-sm">{{ membershipNote }}</p>
+              <q-table
+                flat
+                bordered
+                dense
+                row-key="allowlistId"
+                :rows="userRows"
+                :columns="userColumns"
+                :loading="usersLoading"
+                v-model:pagination="userPagination"
+                :rows-per-page-options="[10, 25, 50]"
+                @request="onUsersRequest"
+              >
+                <template #body-cell-displayName="props">
+                  <q-td :props="props">{{ props.row.displayName }}</q-td>
+                </template>
+                <template #body-cell-primaryEmail="props">
+                  <q-td :props="props">{{ props.row.primaryEmail }}</q-td>
+                </template>
+                <template #body-cell-identityStatus="props">
+                  <q-td :props="props">
+                    <q-badge :color="identityBadgeColor(props.row.identityStatus)" :label="identityStatusLabel(props.row.identityStatus)" />
+                  </q-td>
+                </template>
+                <template #body-cell-chatgptMembership="props">
+                  <q-td :props="props">
+                    <q-badge outline :color="membershipBadgeColor(props.row.chatgptMembership)" :label="membershipLabel(props.row.chatgptMembership)" />
+                  </q-td>
+                </template>
+                <template #body-cell-localChatEnabled="props">
+                  <q-td :props="props">
+                    <q-badge :color="props.row.localChatEnabled ? 'positive' : 'grey'" :label="props.row.localChatEnabled ? t('access.on') : t('access.off')" />
+                  </q-td>
+                </template>
+                <template #body-cell-mcpEnabled="props">
+                  <q-td :props="props">
+                    <q-badge :color="props.row.mcpEnabled ? 'positive' : 'grey'" :label="props.row.mcpEnabled ? t('access.on') : t('access.off')" />
+                  </q-td>
+                </template>
+                <template #body-cell-accountStatus="props">
+                  <q-td :props="props">
+                    <q-badge :color="accountBadgeColor(props.row.accountStatus)" :label="accountStatusLabel(props.row.accountStatus)" />
+                  </q-td>
+                </template>
+                <template #body-cell-actions="props">
+                  <q-td :props="props">
+                    <div class="row no-wrap q-gutter-xs">
+                      <q-btn flat dense size="sm" color="primary" no-caps :label="t('access.edit')" @click="openEditUser(props.row)" />
+                      <q-btn
+                        flat
+                        dense
+                        size="sm"
+                        :color="props.row.allowlistEnabled ? 'negative' : 'positive'"
+                        no-caps
+                        :loading="busyUserId === props.row.allowlistId"
+                        :label="props.row.allowlistEnabled ? t('access.disable') : t('access.enable')"
+                        @click="toggleUserEnabled(props.row)"
                       />
-                      <q-btn flat dense color="negative" :label="t('access.remove')" :loading="busyEmailId === row.id" @click="removeEmail(row.id)" />
                     </div>
-                  </q-item-section>
-                </q-item>
-              </q-list>
-              <div v-else class="text-body2">{{ t("access.empty") }}</div>
+                  </q-td>
+                </template>
+              </q-table>
             </q-card-section>
           </q-card>
+
+          <q-dialog v-model="userDialog">
+            <q-card style="min-width: 420px; max-width: 92vw">
+              <q-card-section>
+                <div class="text-subtitle1">{{ editingUser ? t("access.editUser") : t("access.addUser") }}</div>
+                <p class="text-caption text-grey-7">{{ t("access.domainHint") }}</p>
+              </q-card-section>
+              <q-card-section class="q-gutter-md">
+                <q-input v-model="userForm.displayName" outlined dense :label="t('access.fullName')" />
+                <q-input v-model="userForm.email" outlined dense type="email" :label="t('access.email')" :disable="!!editingUser" />
+                <q-checkbox v-model="userForm.localChatEnabled" dense :label="t('access.localChat')" />
+                <q-checkbox v-model="userForm.mcpEnabled" dense :label="t('access.mcpChat')" />
+                <div class="text-caption text-grey-7">{{ t("access.channelDefaultOff") }}</div>
+              </q-card-section>
+              <q-card-actions align="right">
+                <q-btn flat :label="t('access.cancel')" v-close-popup />
+                <q-btn color="primary" unelevated :loading="savingUser" :label="t('access.save')" @click="saveUserDialog" />
+              </q-card-actions>
+            </q-card>
+          </q-dialog>
+
+          <q-dialog v-model="importDialog">
+            <q-card style="min-width: 420px; max-width: 92vw">
+              <q-card-section>
+                <div class="text-subtitle1">{{ t("access.importMembers") }}</div>
+                <p class="text-caption text-grey-7">{{ membershipNote }}</p>
+              </q-card-section>
+              <q-card-section class="q-gutter-md">
+                <q-file v-model="importFile" outlined dense accept=".csv,text/csv" :label="t('access.csvFile')" />
+                <q-checkbox v-model="markMissingNonmember" dense :label="t('access.markMissingNonmember')" />
+              </q-card-section>
+              <q-card-actions align="right">
+                <q-btn flat :label="t('access.cancel')" v-close-popup />
+                <q-btn color="primary" unelevated :loading="importing" :disable="!importFile" :label="t('access.importNow')" @click="runMembershipImport" />
+              </q-card-actions>
+            </q-card>
+          </q-dialog>
         </q-tab-panel>
 
         <q-tab-panel name="source" class="q-pa-none">
@@ -67,8 +157,9 @@
                     clearable
                     @update:model-value="onUserSelected"
                   />
-                  <div v-if="selectedEmployee" class="q-mt-md">
+                  <div v-if="selectedEmployee" class="q-mt-md q-gutter-xs">
                     <q-badge :color="identityBadgeColor(selectedEmployee.identityStatus)" :label="identityStatusLabel(selectedEmployee.identityStatus)" />
+                    <q-badge outline :color="membershipBadgeColor(selectedEmployee.chatgptMembership)" :label="membershipLabel(selectedEmployee.chatgptMembership)" />
                     <div v-if="selectedEmployee.identityStatus === 'pending'" class="text-caption text-warning q-mt-sm">{{ t("access.pendingHint") }}</div>
                     <div v-if="selectedEmployee.identityStatus === 'disabled'" class="text-caption text-negative q-mt-sm">{{ t("access.disabledHint") }}</div>
                   </div>
@@ -79,7 +170,12 @@
                 <q-card-section>
                   <div class="text-subtitle2 q-mb-sm">{{ t("access.identitySummary") }}</div>
                   <div v-if="selectedEmployee" class="text-caption qka-kv">
-                    <div><span class="text-grey-7">{{ t("access.googleSub") }}</span><br />{{ selectedEmployee.googleSub || t("access.googleSubMissing") }}</div>
+                    <div><span class="text-grey-7">{{ t("access.fullName") }}</span><br />{{ selectedEmployee.displayName }}</div>
+                    <div class="q-mt-sm"><span class="text-grey-7">{{ t("access.googleSub") }}</span><br />{{ selectedEmployee.googleSub || t("access.googleSubMissing") }}</div>
+                    <div class="q-mt-sm">
+                      <span class="text-grey-7">{{ t("access.filterMembership") }}</span><br />
+                      <q-badge outline :color="membershipBadgeColor(selectedEmployee.chatgptMembership)" :label="membershipLabel(selectedEmployee.chatgptMembership)" />
+                    </div>
                     <div class="q-mt-sm">
                       <span class="text-grey-7">{{ t("access.adStatus") }}</span><br />
                       {{
@@ -124,15 +220,6 @@
                     class="q-mb-md"
                     @update:model-value="onShareSelected"
                   />
-
-                  <div v-if="eligibility && !eligibility.eligible" class="q-mb-md">
-                    <q-banner dense rounded class="bg-warning text-dark">
-                      {{ eligibility.reason }}
-                      <template #action>
-                        <q-btn flat dense color="primary" :to="{ name: 'synology' }" :label="t('access.openSourceSettings')" />
-                      </template>
-                    </q-banner>
-                  </div>
 
                   <div class="text-subtitle2 q-mb-sm">{{ t("access.accessScope") }}</div>
                   <q-btn-toggle
@@ -193,10 +280,11 @@
                   <div class="text-caption text-grey-7 q-mb-md">{{ t("access.fileTypesHint") }}</div>
 
                   <div class="text-subtitle2 q-mb-sm">{{ t("access.permissions") }}</div>
-                  <div class="row q-gutter-md q-mb-md">
-                    <q-checkbox v-model="capRead" dense :label="t('access.capRead')" />
-                    <q-checkbox v-model="capSearch" dense :label="t('access.capSearch')" />
-                    <q-checkbox v-model="capPreview" dense :label="t('access.capPreview')" />
+                  <div class="column q-gutter-xs q-mb-md">
+                    <q-checkbox v-model="capView" dense :label="t('access.capView')" />
+                    <div class="text-caption text-grey-7 q-ml-lg">{{ t("access.capViewHint") }}</div>
+                    <q-checkbox v-model="capDownload" dense :label="t('access.capDownload')" />
+                    <div class="text-caption text-grey-7 q-ml-lg">{{ t("access.capDownloadHint") }}</div>
                   </div>
 
                   <q-banner dense rounded class="bg-blue-1 text-dark q-mb-md">
@@ -222,7 +310,10 @@
                       @click="saveRule"
                     />
                   </div>
-                  <div v-if="selectedEmployee && !selectedEmployee.canGrant" class="text-caption text-warning q-mt-sm">
+                  <div v-if="selectedEmployee?.identityStatus === 'pending'" class="text-caption text-warning q-mt-sm">
+                    {{ t("access.pendingGrantHint") }}
+                  </div>
+                  <div v-else-if="selectedEmployee && !selectedEmployee.canGrant" class="text-caption text-warning q-mt-sm">
                     {{ t("access.grantRequiresLinked") }}
                   </div>
                 </q-card-section>
@@ -230,7 +321,10 @@
             </div>
           </div>
 
-          <q-card bordered flat class="qka-card q-mt-md">
+        </q-tab-panel>
+
+        <q-tab-panel name="audit" class="q-pa-none">
+          <q-card bordered flat class="qka-card">
             <q-card-section>
               <div class="text-subtitle1 q-mb-md">{{ t("access.audit") }}</div>
               <div class="row q-col-gutter-sm q-mb-md">
@@ -300,7 +394,7 @@ import { useI18n } from "vue-i18n";
 import type { QTableProps } from "quasar";
 import {
   api,
-  type AllowedEmail,
+  type DirectoryUser,
   type SourceAuditEntry,
   type SourceEffective,
   type SourceEmployee,
@@ -312,13 +406,26 @@ import { useSessionStore } from "@/stores/session";
 
 const { t } = useI18n();
 const session = useSessionStore();
-const tab = ref("emails");
+const tab = ref("users");
 
-const emails = ref<AllowedEmail[]>([]);
-const email = ref("");
-const emailError = ref("");
-const addingEmail = ref(false);
-const busyEmailId = ref<string | null>(null);
+const usersError = ref("");
+const usersLoading = ref(false);
+const userRows = ref<DirectoryUser[]>([]);
+const userSearch = ref("");
+const filterAccount = ref<string | null>(null);
+const filterIdentity = ref<string | null>(null);
+const filterMembership = ref<string | null>(null);
+const userPagination = ref({ page: 1, rowsPerPage: 25, rowsNumber: 0 });
+const userDialog = ref(false);
+const editingUser = ref<DirectoryUser | null>(null);
+const savingUser = ref(false);
+const busyUserId = ref<string | null>(null);
+const userForm = ref({ displayName: "", email: "", localChatEnabled: false, mcpEnabled: false });
+const importDialog = ref(false);
+const importFile = ref<File | null>(null);
+const importing = ref(false);
+const markMissingNonmember = ref(false);
+const membershipNote = ref("");
 
 const sourceError = ref("");
 const employees = ref<SourceEmployee[]>([]);
@@ -328,14 +435,18 @@ const tickedPaths = ref<string[]>([]);
 const selectedAllowlistId = ref<string | null>(null);
 const selectedShareId = ref<string | null>(null);
 const selectedScopeId = ref<string | null>(null);
-const eligibility = ref<{ eligible: boolean; scopes: SourceScope[]; reason: string | null } | null>(null);
+const eligibility = ref<{
+  eligible: boolean;
+  scopes: SourceScope[];
+  reason: string | null;
+  authorizedForDelegation?: boolean;
+} | null>(null);
 const effective = ref<SourceEffective | null>(null);
 const pathMode = ref<"all" | "selected">("all");
 const includeSubfolders = ref(true);
 const fileTypes = ref<string[]>(["excel", "word", "pdf", "powerpoint", "images", "csv", "text", "other"]);
-const capRead = ref(true);
-const capSearch = ref(true);
-const capPreview = ref(true);
+const capView = ref(true);
+const capDownload = ref(false);
 const granting = ref(false);
 
 const auditRows = ref<SourceAuditEntry[]>([]);
@@ -360,6 +471,39 @@ const auditActionOptions = [
   { label: "Updated", value: "Updated" },
   { label: "Disabled", value: "Disabled" },
   { label: "Revoked", value: "Revoked" },
+  { label: "UserCreated", value: "UserCreated" },
+  { label: "UserEdited", value: "UserEdited" },
+  { label: "UserEnabled", value: "UserEnabled" },
+  { label: "UserDisabled", value: "UserDisabled" },
+  { label: "ChannelAccessChanged", value: "ChannelAccessChanged" },
+  { label: "MembershipImportCompleted", value: "MembershipImportCompleted" },
+];
+
+const accountFilterOptions = computed(() => [
+  { label: t("access.accountActive"), value: "active" },
+  { label: t("access.accountPending"), value: "pending" },
+  { label: t("access.accountDisabled"), value: "disabled" },
+]);
+const identityFilterOptions = computed(() => [
+  { label: t("access.statusLinked"), value: "linked" },
+  { label: t("access.statusPending"), value: "pending" },
+  { label: t("access.statusDisabled"), value: "disabled" },
+]);
+const membershipFilterOptions = computed(() => [
+  { label: t("access.memberVerified"), value: "verified_member" },
+  { label: t("access.memberNonmember"), value: "verified_nonmember" },
+  { label: t("access.memberUnknown"), value: "unknown" },
+]);
+
+const userColumns: QTableProps["columns"] = [
+  { name: "displayName", label: "Full Name", field: "displayName", align: "left" },
+  { name: "primaryEmail", label: "Email Address", field: "primaryEmail", align: "left" },
+  { name: "identityStatus", label: "Google Identity", field: "identityStatus", align: "left" },
+  { name: "chatgptMembership", label: "ChatGPT Business", field: "chatgptMembership", align: "left" },
+  { name: "localChatEnabled", label: "Local AI Chat", field: "localChatEnabled", align: "left" },
+  { name: "mcpEnabled", label: "MCP Access", field: "mcpEnabled", align: "left" },
+  { name: "accountStatus", label: "Account Status", field: "accountStatus", align: "left" },
+  { name: "actions", label: "Actions", field: "actions", align: "right" },
 ];
 
 const auditColumns: QTableProps["columns"] = [
@@ -375,7 +519,7 @@ const auditColumns: QTableProps["columns"] = [
 
 const employeeOptions = computed(() =>
   employees.value.map((e) => ({
-    label: `${e.primaryEmail} — ${identityStatusLabel(e.identityStatus)}`,
+    label: `${e.displayName} · ${e.primaryEmail} · ${identityStatusLabel(e.identityStatus)} · ${membershipLabel(e.chatgptMembership)}`,
     value: e.allowlistId,
   })),
 );
@@ -409,17 +553,16 @@ const ruleSummary = computed(() => {
   if (!fileTypes.value.length || allFileTypesSelected.value) parts.push(t("access.allFileTypes"));
   else parts.push(fileTypes.value.map((v) => fileTypeOptions.find((f) => f.value === v)?.label || v).join(" + "));
   const caps = [
-    capRead.value ? t("access.capRead") : null,
-    capSearch.value ? t("access.capSearch") : null,
-    capPreview.value ? t("access.capPreview") : null,
+    capView.value ? t("access.capView") : null,
+    capDownload.value ? t("access.capDownload") : null,
   ].filter(Boolean);
   if (caps.length) parts.push(caps.join(", "));
   return parts.join(" · ");
 });
 
 const canSaveRule = computed(() => {
-  if (!selectedEmployee?.canGrant || !selectedScopeId.value || !eligibility?.value?.eligible) return false;
-  if (!(capRead.value || capSearch.value || capPreview.value)) return false;
+  if (!selectedEmployee.value?.canGrant || !selectedShareId.value) return false;
+  if (!(capView.value || capDownload.value)) return false;
   if (pathMode.value === "selected" && !tickedPaths.value.length) return false;
   return true;
 });
@@ -434,6 +577,26 @@ function identityBadgeColor(status: SourceEmployee["identityStatus"]) {
   if (status === "pending") return "warning";
   return "negative";
 }
+function membershipLabel(status: DirectoryUser["chatgptMembership"]) {
+  if (status === "verified_member") return t("access.memberVerified");
+  if (status === "verified_nonmember") return t("access.memberNonmember");
+  return t("access.memberUnknown");
+}
+function membershipBadgeColor(status: DirectoryUser["chatgptMembership"]) {
+  if (status === "verified_member") return "positive";
+  if (status === "verified_nonmember") return "grey";
+  return "orange";
+}
+function accountStatusLabel(status: DirectoryUser["accountStatus"]) {
+  if (status === "active") return t("access.accountActive");
+  if (status === "pending") return t("access.accountPending");
+  return t("access.accountDisabled");
+}
+function accountBadgeColor(status: DirectoryUser["accountStatus"]) {
+  if (status === "active") return "positive";
+  if (status === "pending") return "warning";
+  return "negative";
+}
 function formatWhen(value: string | null) {
   if (!value) return "—";
   try {
@@ -443,54 +606,117 @@ function formatWhen(value: string | null) {
   }
 }
 
-async function loadEmails() {
+async function loadUsers() {
   if (!session.user?.superAdmin) {
-    emails.value = [];
+    userRows.value = [];
     return;
   }
+  usersLoading.value = true;
   try {
-    emails.value = await api.listAllowedEmails();
-    emailError.value = "";
+    const page = await api.listDirectoryUsers({
+      search: userSearch.value || undefined,
+      accountStatus: filterAccount.value || undefined,
+      identityStatus: filterIdentity.value || undefined,
+      chatgptMembership: filterMembership.value || undefined,
+      page: userPagination.value.page,
+      pageSize: userPagination.value.rowsPerPage,
+    });
+    userRows.value = page.items;
+    userPagination.value = {
+      ...userPagination.value,
+      rowsNumber: page.total,
+      page: page.page,
+      rowsPerPage: page.pageSize,
+    };
+    membershipNote.value = page.membershipSync?.note || t("access.membershipManualNote");
+    usersError.value = "";
   } catch (err) {
-    emailError.value = err instanceof Error ? err.message : t("access.loadError");
+    usersError.value = err instanceof Error ? err.message : t("access.loadError");
+  } finally {
+    usersLoading.value = false;
   }
 }
 
-async function addEmail() {
-  addingEmail.value = true;
-  emailError.value = "";
+function reloadUsers() {
+  userPagination.value.page = 1;
+  void loadUsers();
+}
+
+async function onUsersRequest(req: { pagination: { page: number; rowsPerPage: number } }) {
+  userPagination.value.page = req.pagination.page;
+  userPagination.value.rowsPerPage = req.pagination.rowsPerPage;
+  await loadUsers();
+}
+
+function openAddUser() {
+  editingUser.value = null;
+  userForm.value = { displayName: "", email: "", localChatEnabled: false, mcpEnabled: false };
+  userDialog.value = true;
+}
+
+function openEditUser(row: DirectoryUser) {
+  editingUser.value = row;
+  userForm.value = {
+    displayName: row.displayName,
+    email: row.primaryEmail,
+    localChatEnabled: row.localChatEnabled,
+    mcpEnabled: row.mcpEnabled,
+  };
+  userDialog.value = true;
+}
+
+async function saveUserDialog() {
+  savingUser.value = true;
+  usersError.value = "";
   try {
-    const created = await api.addAllowedEmail(email.value);
-    emails.value = [...emails.value.filter((row) => row.id !== created.id), created].sort((a, b) => a.email.localeCompare(b.email));
-    email.value = "";
+    if (editingUser.value) {
+      await api.updateDirectoryUser(editingUser.value.allowlistId, {
+        displayName: userForm.value.displayName,
+        localChatEnabled: userForm.value.localChatEnabled,
+        mcpEnabled: userForm.value.mcpEnabled,
+      });
+    } else {
+      await api.createDirectoryUser({
+        displayName: userForm.value.displayName,
+        email: userForm.value.email,
+        localChatEnabled: userForm.value.localChatEnabled,
+        mcpEnabled: userForm.value.mcpEnabled,
+      });
+    }
+    userDialog.value = false;
+    await loadUsers();
   } catch (err) {
-    emailError.value = err instanceof Error ? err.message : t("access.addError");
+    usersError.value = err instanceof Error ? err.message : t("access.addError");
   } finally {
-    addingEmail.value = false;
+    savingUser.value = false;
   }
 }
 
-async function toggleEmail(row: AllowedEmail, enabled: boolean) {
-  busyEmailId.value = row.id;
+async function toggleUserEnabled(row: DirectoryUser) {
+  busyUserId.value = row.allowlistId;
   try {
-    const updated = await api.setAllowedEmailEnabled(row.id, enabled);
-    emails.value = emails.value.map((item) => (item.id === updated.id ? updated : item));
+    await api.updateDirectoryUser(row.allowlistId, { enabled: !row.allowlistEnabled });
+    await loadUsers();
   } catch (err) {
-    emailError.value = err instanceof Error ? err.message : t("access.updateError");
+    usersError.value = err instanceof Error ? err.message : t("access.updateError");
   } finally {
-    busyEmailId.value = null;
+    busyUserId.value = null;
   }
 }
 
-async function removeEmail(id: string) {
-  busyEmailId.value = id;
+async function runMembershipImport() {
+  if (!importFile.value) return;
+  importing.value = true;
+  usersError.value = "";
   try {
-    await api.removeAllowedEmail(id);
-    emails.value = emails.value.filter((row) => row.id !== id);
+    await api.importMembershipCsv(importFile.value, markMissingNonmember.value);
+    importDialog.value = false;
+    importFile.value = null;
+    await loadUsers();
   } catch (err) {
-    emailError.value = err instanceof Error ? err.message : t("access.removeError");
+    usersError.value = err instanceof Error ? err.message : t("access.importError");
   } finally {
-    busyEmailId.value = null;
+    importing.value = false;
   }
 }
 
@@ -536,7 +762,8 @@ async function onShareSelected() {
 async function onUserSelected() {
   effective.value = null;
   const employee = selectedEmployee.value;
-  if (!employee?.qkaUserId || employee.identityStatus !== "linked") return;
+  if (!employee) return;
+  if (!employee.qkaUserId || employee.identityStatus !== "linked") return;
   try {
     effective.value = await api.sourceEffective(employee.qkaUserId);
     const grant = effective.value.grants.find((g) => g.status === "active");
@@ -545,9 +772,8 @@ async function onUserSelected() {
       includeSubfolders.value = grant.includeSubfolders;
       tickedPaths.value = [...(grant.selectedPaths || [])];
       fileTypes.value = grant.fileTypes?.length ? [...grant.fileTypes] : [...allFileTypeValues.value];
-      capRead.value = grant.capabilityRead;
-      capSearch.value = grant.capabilitySearch;
-      capPreview.value = grant.capabilityPreview;
+      capView.value = grant.capabilityView ?? grant.capabilityRead ?? true;
+      capDownload.value = !!grant.capabilityDownload;
       if (grant.scopeId) selectedScopeId.value = grant.scopeId;
     }
   } catch (err) {
@@ -557,22 +783,24 @@ async function onUserSelected() {
 
 async function saveRule() {
   const employee = selectedEmployee.value;
-  if (!employee?.canGrant || !employee.qkaUserId || !selectedScopeId.value) return;
+  if (!employee?.canGrant || !selectedShareId.value) return;
   granting.value = true;
   sourceError.value = "";
   try {
-    await api.upsertSourceGrant({
-      scopeId: selectedScopeId.value,
-      qkaUserId: employee.qkaUserId,
-      capabilityRead: capRead.value,
-      capabilitySearch: capSearch.value,
-      capabilityPreview: capPreview.value,
+    const saved = await api.upsertSourceGrant({
+      scopeId: selectedScopeId.value || undefined,
+      approvedShareId: selectedShareId.value,
+      qkaUserId: employee.qkaUserId || undefined,
+      allowlistId: employee.allowlistId,
+      capabilityView: capView.value,
+      capabilityDownload: capDownload.value,
       pathMode: pathMode.value,
       includeSubfolders: includeSubfolders.value,
       selectedPaths: pathMode.value === "selected" ? tickedPaths.value : [],
       fileTypes: allFileTypesSelected.value ? [] : fileTypes.value,
       reason: "access-rule",
     });
+    if (saved.scopeId) selectedScopeId.value = saved.scopeId;
     await onUserSelected();
     await loadAudit();
   } catch (err) {
@@ -613,10 +841,12 @@ async function onAuditRequest(req: { pagination: { page: number; rowsPerPage: nu
 
 watch(tab, (value) => {
   if (value === "source") void loadSourcePanel();
+  if (value === "audit") void loadAudit();
+  if (value === "users") void loadUsers();
 });
 
 onMounted(async () => {
-  await loadEmails();
+  await loadUsers();
 });
 </script>
 

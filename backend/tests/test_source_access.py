@@ -190,6 +190,8 @@ def test_source_deny_overrides_corporate_grant(client):
                 capability_read=True,
                 capability_search=True,
                 capability_preview=True,
+                capability_view=True,
+                capability_download=False,
                 status=GrantStatus.ACTIVE,
                 reason="should not help",
                 created_at=now,
@@ -219,22 +221,24 @@ def test_employees_endpoint_lists_linked_pending_and_disabled(client):
     assert by_email["eduard@qehc.edu.sa"]["googleSub"]
     assert "dev.eduard@qehc.edu.sa" in by_email
     assert by_email["dev.eduard@qehc.edu.sa"]["identityStatus"] == "pending"
-    assert by_email["dev.eduard@qehc.edu.sa"]["canGrant"] is False
+    assert by_email["dev.eduard@qehc.edu.sa"]["canGrant"] is True
     assert by_email["dev.eduard@qehc.edu.sa"]["qkaUserId"] is None
     assert "disabled.user@qehc.edu.sa" in by_email
     assert by_email["disabled.user@qehc.edu.sa"]["identityStatus"] == "disabled"
     assert by_email["disabled.user@qehc.edu.sa"]["canGrant"] is False
 
 
-def test_pending_user_cannot_receive_grant(client):
+def test_pending_user_can_store_inactive_grant(client):
     headers = _admin_headers(client)
+    employees = client.get("/api/v1/access/source/employees", headers=headers).json()
+    pending = next(row for row in employees if row["primaryEmail"] == "dev.eduard@qehc.edu.sa")
     reg = client.post(
         "/api/v1/access/source/scopes/corporate",
         headers=headers,
         json={
             "approvedShareId": str(SHARE_ID),
             "folderPrefix": "EDUARDTESTCLOUD\\PENDING",
-            "displayName": "pending-block",
+            "displayName": "pending-plan",
             "sourceOwnerName": "Owner",
             "sourceOwnerEmail": "owner@qehc.edu.sa",
             "approvalReference": "TEST-PENDING",
@@ -256,6 +260,22 @@ def test_pending_user_cannot_receive_grant(client):
         },
     )
     assert bad.status_code == 400
+    planned = client.post(
+        "/api/v1/access/source/grants",
+        headers=headers,
+        json={
+            "scopeId": reg.json()["id"],
+            "allowlistId": pending["allowlistId"],
+            "capabilityRead": True,
+            "capabilitySearch": True,
+            "capabilityPreview": True,
+            "reason": "pending plan",
+        },
+    )
+    assert planned.status_code == 200, planned.text
+    assert planned.json()["pendingActivation"] is True
+    assert planned.json()["qkaUserId"] is None
+    assert planned.json()["allowedEmailId"] == pending["allowlistId"]
 
 
 def test_corporate_registration_requires_approval_fields(client):

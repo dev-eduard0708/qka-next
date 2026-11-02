@@ -13,6 +13,7 @@ from qka_api.auth import require_csrf, require_principal
 from qka_api.deps import get_session, get_settings_dep
 from qka_api.services import ai_chat as chat
 from qka_shared.allowlist import load_active_user
+from qka_shared.chat_access import channel_deny_message, require_local_chat
 from qka_shared.config import Settings
 from qka_shared.models import QkaUser
 
@@ -38,6 +39,14 @@ def _require_user(request: Request, settings: Settings, session: Session) -> Qka
     return user
 
 
+def _require_local_chat_user(request: Request, settings: Settings, session: Session) -> QkaUser:
+    user = _require_user(request, settings, session)
+    access = require_local_chat(session, user.id)
+    if not access.allowed:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=channel_deny_message(access.reason))
+    return user
+
+
 def _require_super_admin(request: Request, settings: Settings, session: Session, *, mutating: bool) -> QkaUser:
     if mutating:
         require_csrf(request)
@@ -53,8 +62,12 @@ def ai_status(
     settings: Settings = Depends(get_settings_dep),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    require_principal(request, settings)
-    return chat.openai_status(session, settings)
+    user = _require_user(request, settings, session)
+    status_body = chat.openai_status(session, settings)
+    channel = require_local_chat(session, user.id)
+    status_body["localChatEnabled"] = bool(channel.allowed and channel.local_chat)
+    status_body["localChatReason"] = None if status_body["localChatEnabled"] else channel_deny_message(channel.reason)
+    return status_body
 
 
 @router.get("/conversations")
@@ -63,7 +76,7 @@ def list_conversations(
     settings: Settings = Depends(get_settings_dep),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    user = _require_user(request, settings, session)
+    user = _require_local_chat_user(request, settings, session)
     return {"items": chat.list_conversations(session, user.id)}
 
 
@@ -75,7 +88,7 @@ def create_conversation(
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     require_csrf(request)
-    user = _require_user(request, settings, session)
+    user = _require_local_chat_user(request, settings, session)
     created = chat.create_conversation(session, user.id, body.title)
     session.commit()
     return created
@@ -88,7 +101,7 @@ def get_conversation(
     settings: Settings = Depends(get_settings_dep),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    user = _require_user(request, settings, session)
+    user = _require_local_chat_user(request, settings, session)
     payload = chat.get_conversation(session, user.id, conversation_id)
     if payload is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.")
@@ -103,7 +116,7 @@ def delete_conversation(
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     require_csrf(request)
-    user = _require_user(request, settings, session)
+    user = _require_local_chat_user(request, settings, session)
     ok = chat.delete_conversation(session, user.id, conversation_id)
     if not ok:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.")
@@ -119,7 +132,7 @@ def chat_stream(
     session: Session = Depends(get_session),
 ) -> StreamingResponse:
     require_csrf(request)
-    user = _require_user(request, settings, session)
+    user = _require_local_chat_user(request, settings, session)
     user_id = user.id
     factory = request.app.state.session_factory
 

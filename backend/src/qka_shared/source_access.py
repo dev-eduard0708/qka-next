@@ -45,6 +45,11 @@ class PathMode(IntEnum):
 
 
 class Capability:
+    """Document capabilities. VIEW covers search/preview/indexed text; DOWNLOAD is separate."""
+
+    VIEW = "view"
+    DOWNLOAD = "download"
+    # Legacy aliases accepted by grant_has_capability / callers during transition.
     READ = "read"
     SEARCH = "search"
     PREVIEW = "preview"
@@ -120,14 +125,26 @@ def acl_needles(user: QkaUser) -> list[str]:
     return needles
 
 
+def _grant_view(grant: SourceGrant) -> bool:
+    # New column or any legacy R/S/P (pre-migration / dual-write mirror).
+    return bool(
+        getattr(grant, "capability_view", False)
+        or grant.capability_read
+        or grant.capability_search
+        or grant.capability_preview
+    )
+
+
+def _grant_download(grant: SourceGrant) -> bool:
+    return bool(getattr(grant, "capability_download", False))
+
+
 def grant_has_capability(grant: SourceGrant, capability: str) -> bool:
-    cap = (capability or Capability.PREVIEW).lower()
-    if cap == Capability.SEARCH:
-        return bool(grant.capability_search)
-    if cap == Capability.READ:
-        return bool(grant.capability_read)
-    if cap == Capability.PREVIEW:
-        return bool(grant.capability_preview or grant.capability_read)
+    cap = (capability or Capability.VIEW).lower()
+    if cap in {Capability.VIEW, Capability.SEARCH, Capability.PREVIEW, Capability.READ}:
+        return _grant_view(grant)
+    if cap == Capability.DOWNLOAD:
+        return _grant_download(grant)
     return False
 
 
@@ -200,17 +217,22 @@ def evaluate_document_access(
     inventory: SynologyFileInventory,
     content: SynologyDocumentContent,
     *,
-    capability: str = Capability.PREVIEW,
+    capability: str = Capability.VIEW,
 ) -> EffectiveAccess:
-    content_ok = content.status == 1 and bool(content.extracted_text)
-    if not content_ok:
-        return EffectiveAccess(
-            allowed=False,
-            qka_grant="none",
-            source_permission="n/a",
-            effective="deny",
-            denial_reason="content_not_verified",
-        )
+    cap = (capability or Capability.VIEW).lower()
+    wants_download = cap == Capability.DOWNLOAD
+    # Indexed-text operations require verified extracted content in PostgreSQL.
+    # Original-file download does not require extracted text.
+    if not wants_download:
+        content_ok = content.status == 1 and bool(content.extracted_text)
+        if not content_ok:
+            return EffectiveAccess(
+                allowed=False,
+                qka_grant="none",
+                source_permission="n/a",
+                effective="deny",
+                denial_reason="content_not_verified",
+            )
 
     needles = acl_needles(user)
     source_acl = evaluate_needles(inventory, needles)
@@ -235,6 +257,9 @@ def evaluate_document_access(
         approved_share_id=content.approved_share_id,
         relative_path_normalized=content.relative_path_normalized,
     )
+    matched_grant_missing_cap = False
+    matched_scope_id: uuid.UUID | None = None
+    matched_grant_id: uuid.UUID | None = None
     for scope in scopes:
         if not scope.service_read_verified:
             continue
@@ -243,19 +268,14 @@ def evaluate_document_access(
         grant = load_active_grant(session, scope.id, user.id)
         if grant is None:
             continue
-        if not grant_has_capability(grant, capability):
-            return EffectiveAccess(
-                allowed=False,
-                qka_grant="insufficient_capability",
-                source_permission=source_label,
-                effective="deny",
-                denial_reason="grant_missing_capability",
-                covering_scope_id=scope.id,
-                grant_id=grant.id,
-            )
         if not grant_matches_path(grant, scope, content.relative_path_normalized):
             continue
         if not grant_matches_file_type(grant, content.extension):
+            continue
+        if not grant_has_capability(grant, cap):
+            matched_grant_missing_cap = True
+            matched_scope_id = scope.id
+            matched_grant_id = grant.id
             continue
         return EffectiveAccess(
             allowed=True,
@@ -267,8 +287,19 @@ def evaluate_document_access(
             grant_id=grant.id,
         )
 
-    # Personal workspace / individual source ACL path.
-    if source_acl == SourceAclState.ALLOWED:
+    if matched_grant_missing_cap:
+        return EffectiveAccess(
+            allowed=False,
+            qka_grant="insufficient_capability",
+            source_permission=source_label,
+            effective="deny",
+            denial_reason="grant_missing_capability",
+            covering_scope_id=matched_scope_id,
+            grant_id=matched_grant_id,
+        )
+
+    # Personal source ACL authorizes VIEW (indexed search/preview) only — never Download.
+    if not wants_download and source_acl == SourceAclState.ALLOWED:
         return EffectiveAccess(
             allowed=True,
             qka_grant="none_personal_acl",
@@ -277,7 +308,9 @@ def evaluate_document_access(
             denial_reason=None,
         )
 
-    if not needles:
+    if wants_download:
+        reason = "download_requires_explicit_grant"
+    elif not needles:
         reason = "no_linked_ad_identity"
     elif source_acl == SourceAclState.MISSING:
         reason = "source_acl_unknown_or_stale"
@@ -298,6 +331,6 @@ def authorize_document(
     inventory: SynologyFileInventory,
     content: SynologyDocumentContent,
     *,
-    capability: str = Capability.PREVIEW,
+    capability: str = Capability.VIEW,
 ) -> bool:
     return evaluate_document_access(session, user, inventory, content, capability=capability).allowed

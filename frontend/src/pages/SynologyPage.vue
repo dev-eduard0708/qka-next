@@ -194,6 +194,82 @@
 
       <q-card bordered>
         <q-card-section>
+          <div class="text-subtitle1 q-mb-sm">{{ t("synology.accessPolicy") }}</div>
+          <p class="text-caption q-mb-md">{{ t("synology.accessPolicyHint") }}</p>
+          <q-select
+            v-model="policyShareId"
+            outlined
+            dense
+            emit-value
+            map-options
+            :options="policyShareOptions"
+            :label="t('access.selectSource')"
+            class="q-mb-md"
+            @update:model-value="onPolicyShareSelected"
+          />
+          <div v-if="!policyShareId" class="text-caption text-grey-7">{{ t("synology.policySelectShare") }}</div>
+          <template v-else>
+            <div class="text-subtitle2 q-mb-sm">{{ t("synology.accessModel") }}</div>
+            <q-btn-toggle
+              v-model="policyModel"
+              spread
+              no-caps
+              unelevated
+              toggle-color="primary"
+              class="full-width q-mb-sm"
+              :options="[
+                { label: t('synology.modelSourceAcl'), value: 'source_acl' },
+                { label: t('synology.modelQkaManaged'), value: 'qka_managed' },
+              ]"
+            />
+            <p class="text-caption text-grey-7 q-mb-md">
+              {{ policyModel === "qka_managed" ? t("synology.modelQkaManagedHint") : t("synology.modelSourceAclHint") }}
+            </p>
+            <div v-if="policyManagedScopes.length" class="q-mb-md">
+              <div class="text-positive text-caption q-mb-sm">{{ t("synology.policyActive") }}</div>
+              <q-list bordered separator dense>
+                <q-item v-for="scope in policyManagedScopes" :key="scope.id">
+                  <q-item-section>
+                    <q-item-label>{{ scope.displayName || scope.folderPrefixNormalized }}</q-item-label>
+                    <q-item-label caption>{{ scope.approvalReference }} · {{ scope.sourceOwnerEmail }}</q-item-label>
+                  </q-item-section>
+                  <q-item-section side>
+                    <q-btn flat dense color="negative" no-caps :loading="policySaving" :label="t('synology.policyRevoke')" @click="revokePolicyScope(scope.id)" />
+                  </q-item-section>
+                </q-item>
+              </q-list>
+            </div>
+            <div v-if="policyModel === 'qka_managed' && !policyManagedScopes.length" class="qka-inline-form q-pa-md">
+              <div class="row q-col-gutter-md">
+                <div class="col-12">
+                  <q-input v-model="policyForm.folderPrefix" outlined dense :label="t('synology.policyFolderPrefix')" />
+                </div>
+                <div class="col-12 col-md-6">
+                  <q-input v-model="policyForm.ownerName" outlined dense :label="t('synology.policyOwnerName')" />
+                </div>
+                <div class="col-12 col-md-6">
+                  <q-input v-model="policyForm.ownerEmail" outlined dense type="email" :label="t('synology.policyOwnerEmail')" />
+                </div>
+                <div class="col-12 col-md-6">
+                  <q-input v-model="policyForm.approvalReference" outlined dense :label="t('synology.policyApprovalRef')" />
+                </div>
+                <div class="col-12 col-md-6">
+                  <q-input v-model="policyForm.notes" outlined dense :label="t('synology.policyNotes')" />
+                </div>
+                <div class="col-12">
+                  <q-checkbox v-model="policyForm.serviceReadVerified" dense :label="t('synology.policyServiceRead')" />
+                </div>
+              </div>
+              <div class="row justify-end q-mt-md">
+                <q-btn color="primary" unelevated no-caps :loading="policySaving" :label="t('synology.policyActivate')" @click="activateQkaManaged" />
+              </div>
+            </div>
+          </template>
+        </q-card-section>
+      </q-card>
+
+      <q-card bordered>
+        <q-card-section>
           <div class="text-subtitle1 q-mb-md">{{ t("synology.inventory") }}</div>
           <q-table
             class="qka-inventory"
@@ -265,7 +341,7 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import type { QTableColumn, QTableProps } from "quasar";
-import { api, type SynologyConnection, type SynologyInventoryPage, type SynologyMonitor } from "@/api";
+import { api, type SourceScope, type SourceSource, type SynologyConnection, type SynologyInventoryPage, type SynologyMonitor } from "@/api";
 import { useSessionStore } from "@/stores/session";
 
 const { t } = useI18n();
@@ -280,6 +356,19 @@ const cancelling = ref(false);
 const loadingInventory = ref(false);
 const connections = ref<SynologyConnection[]>([]);
 const selectedId = ref<string | null>(null);
+const policySources = ref<SourceSource[]>([]);
+const policyShareId = ref<string | null>(null);
+const policyModel = ref<"source_acl" | "qka_managed">("source_acl");
+const policyManagedScopes = ref<SourceScope[]>([]);
+const policySaving = ref(false);
+const policyForm = ref({
+  folderPrefix: "",
+  ownerName: "",
+  ownerEmail: "",
+  approvalReference: "",
+  notes: "",
+  serviceReadVerified: false,
+});
 const creating = ref(false);
 const connection = ref<SynologyConnection | null>(null);
 const connectionOpen = ref(false);
@@ -658,12 +747,82 @@ function stopPoll() {
   }
 }
 
+const policyShareOptions = computed(() =>
+  policySources.value.map((s) => ({
+    label: `${s.shareName}${s.isConfiguredPilotShare ? " (pilot)" : ""}`,
+    value: s.approvedShareId,
+  })),
+);
+
+async function loadAccessPolicy() {
+  policySources.value = await api.sourceSources();
+  if (!policyShareId.value) {
+    const pilot = policySources.value.find((s) => s.isConfiguredPilotShare) || policySources.value[0];
+    policyShareId.value = pilot?.approvedShareId || null;
+  }
+  onPolicyShareSelected();
+}
+
+function onPolicyShareSelected() {
+  const share = policySources.value.find((s) => s.approvedShareId === policyShareId.value);
+  policyManagedScopes.value = (share?.scopes || []).filter(
+    (s) => s.trustClass === "corporate_designated" && s.status === "active" && s.serviceReadVerified && !!s.approvalReference,
+  );
+  policyModel.value = policyManagedScopes.value.length ? "qka_managed" : "source_acl";
+  if (!policyForm.value.folderPrefix && share?.pilotFolderPrefix) {
+    policyForm.value.folderPrefix = share.pilotFolderPrefix;
+  }
+}
+
+async function activateQkaManaged() {
+  if (!policyShareId.value) return;
+  policySaving.value = true;
+  error.value = "";
+  try {
+    await api.registerCorporateScope({
+      approvedShareId: policyShareId.value,
+      folderPrefix: policyForm.value.folderPrefix,
+      displayName: policyForm.value.folderPrefix,
+      sourceOwnerName: policyForm.value.ownerName,
+      sourceOwnerEmail: policyForm.value.ownerEmail,
+      approvalReference: policyForm.value.approvalReference,
+      approvalNotes: policyForm.value.notes,
+      serviceReadVerified: policyForm.value.serviceReadVerified,
+    });
+    policyForm.value = {
+      ...policyForm.value,
+      approvalReference: "",
+      notes: "",
+      serviceReadVerified: false,
+    };
+    await loadAccessPolicy();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : t("synology.policySaveError");
+  } finally {
+    policySaving.value = false;
+  }
+}
+
+async function revokePolicyScope(scopeId: string) {
+  policySaving.value = true;
+  error.value = "";
+  try {
+    await api.revokeSourceScope(scopeId);
+    await loadAccessPolicy();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : t("synology.policySaveError");
+  } finally {
+    policySaving.value = false;
+  }
+}
+
 onMounted(async () => {
   if (!session.user?.superAdmin) return;
   try {
     await loadConnections();
     await loadMonitor();
     await loadInventory();
+    await loadAccessPolicy();
   } catch (err) {
     error.value = err instanceof Error ? err.message : t("synology.loadError");
   }

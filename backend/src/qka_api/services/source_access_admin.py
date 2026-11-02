@@ -14,6 +14,7 @@ from qka_shared.config import Settings
 from qka_shared.email_address import try_normalize
 from qka_shared.models import (
     AllowedEmail,
+    ChatAccess,
     ExternalIdentity,
     QkaUser,
     SourceGrant,
@@ -40,15 +41,29 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _grant_view_flag(row: SourceGrant) -> bool:
+    return bool(
+        getattr(row, "capability_view", False)
+        or row.capability_read
+        or row.capability_search
+        or row.capability_preview
+    )
+
+
 def _grant_snapshot(row: SourceGrant) -> dict:
+    view = _grant_view_flag(row)
+    download = bool(getattr(row, "capability_download", False))
     return {
         "pathMode": "all" if int(getattr(row, "path_mode", 0) or 0) == PathMode.ALL_IN_SCOPE else "selected",
         "includeSubfolders": bool(getattr(row, "include_subfolders", True)),
         "selectedPaths": parse_json_list(getattr(row, "selected_paths_json", "[]")),
         "fileTypes": parse_json_list(getattr(row, "file_types_json", "[]")),
-        "capabilityRead": bool(row.capability_read),
-        "capabilitySearch": bool(row.capability_search),
-        "capabilityPreview": bool(row.capability_preview),
+        "capabilityView": view,
+        "capabilityDownload": download,
+        # Legacy mirrors for older audit consumers.
+        "capabilityRead": view,
+        "capabilitySearch": view,
+        "capabilityPreview": view,
         "status": {GrantStatus.ACTIVE: "active", GrantStatus.DISABLED: "disabled", GrantStatus.REVOKED: "revoked"}.get(
             row.status, "unknown"
         ),
@@ -115,13 +130,18 @@ def _grant_dto(row: SourceGrant) -> dict:
         row.status, "unknown"
     )
     snap = _grant_snapshot(row)
+    pending = row.qka_user_id is None and row.allowed_email_id is not None
     return {
         "id": str(row.id),
         "scopeId": str(row.scope_id),
-        "qkaUserId": str(row.qka_user_id),
-        "capabilityRead": bool(row.capability_read),
-        "capabilitySearch": bool(row.capability_search),
-        "capabilityPreview": bool(row.capability_preview),
+        "qkaUserId": str(row.qka_user_id) if row.qka_user_id else None,
+        "allowedEmailId": str(row.allowed_email_id) if row.allowed_email_id else None,
+        "pendingActivation": pending,
+        "capabilityView": snap["capabilityView"],
+        "capabilityDownload": snap["capabilityDownload"],
+        "capabilityRead": snap["capabilityView"],
+        "capabilitySearch": snap["capabilityView"],
+        "capabilityPreview": snap["capabilityView"],
         "pathMode": snap["pathMode"],
         "includeSubfolders": snap["includeSubfolders"],
         "selectedPaths": snap["selectedPaths"],
@@ -211,42 +231,11 @@ def _employee_google_sub(user: QkaUser) -> str | None:
 
 
 def list_employees(session: Session) -> list[dict]:
-    """List every Allowed Email with Google identity status (linked / pending / disabled).
+    """Unified Users directory for Source Access selector (all allowlisted emails)."""
+    from qka_api.services import user_directory as directory
 
-    Pending allowlisted emails are visible for Super Admin planning but cannot receive
-    document grants until a verified Google sub is linked via OAuth (never by email merge).
-    """
-    rows = session.execute(select(AllowedEmail).order_by(AllowedEmail.email_normalized)).scalars().all()
-    by_email = _google_users_by_verified_email(session)
-    out: list[dict] = []
-    for row in rows:
-        email = row.email_normalized
-        linked_users = by_email.get(email, [])
-        user = linked_users[0] if linked_users else None
-        if not row.enabled:
-            identity_status = "disabled"
-        elif user is not None:
-            identity_status = "linked"
-        else:
-            identity_status = "pending"
-        google_sub = _employee_google_sub(user) if user is not None else None
-        out.append(
-            {
-                "allowlistId": str(row.id),
-                "qkaUserId": str(user.id) if user is not None else None,
-                "displayName": user.display_name if user is not None else email.split("@", 1)[0],
-                "primaryEmail": email,
-                "googleSub": google_sub,
-                "googleLinked": identity_status == "linked",
-                "identityStatus": identity_status,
-                "allowlisted": True,
-                "allowlistEnabled": bool(row.enabled),
-                "canGrant": identity_status == "linked" and user is not None,
-                "adIdentities": _employee_ad_idents(user) if user is not None else [],
-                "superAdmin": bool(user.is_super_admin) if user is not None else False,
-            }
-        )
-    return out
+    page = directory.list_users(session, page=1, page_size=5000)
+    return page["items"]
 
 
 def list_sources(session: Session, settings: Settings) -> list[dict]:
@@ -273,6 +262,15 @@ def list_sources(session: Session, settings: Settings) -> list[dict]:
                 SynologyFileInventory.acl_capture_status == 1,
             )
         )
+        share_scopes = by_share.get(share.id, [])
+        qka_managed = [
+            s
+            for s in share_scopes
+            if s.trust_class == TrustClass.CORPORATE_DESIGNATED
+            and s.service_read_verified
+            and bool(s.approval_reference.strip())
+            and s.approved_at is not None
+        ]
         result.append(
             {
                 "approvedShareId": str(share.id),
@@ -281,44 +279,111 @@ def list_sources(session: Session, settings: Settings) -> list[dict]:
                 "aclCapturedCount": int(acl_captured or 0),
                 "pilotFolderPrefix": settings.pilot_folder_prefix,
                 "isConfiguredPilotShare": settings.approved_share_id is not None and share.id == settings.approved_share_id,
-                "scopes": [_scope_dto(s) for s in by_share.get(share.id, [])],
-                "eligibleForGrants": any(
-                    s.trust_class == TrustClass.CORPORATE_DESIGNATED
-                    and s.service_read_verified
-                    and bool(s.approval_reference.strip())
-                    for s in by_share.get(share.id, [])
-                ),
+                "scopes": [_scope_dto(s) for s in share_scopes],
+                "accessModel": "qka_managed" if qka_managed else "source_acl",
+                "eligibleForGrants": bool(qka_managed),
             }
         )
     return result
 
 
 def eligible_scopes_for_share(session: Session, share_id: uuid.UUID) -> dict:
+    """Return scopes for Source Access rule editing.
+
+    No corporate-approval warning is returned here — authorization is configured once
+    under Synology Access Policy. Rules may be prepared even when QKA Managed is inactive;
+    Effective Access stays Denied until the source is authorized.
+    """
     scopes = session.execute(
         select(SourceScope).where(
             SourceScope.approved_share_id == share_id,
             SourceScope.status == ScopeStatus.ACTIVE,
-            SourceScope.trust_class == TrustClass.CORPORATE_DESIGNATED,
         )
     ).scalars().all()
-    eligible = [
-        _scope_dto(s)
+    managed = [
+        s
         for s in scopes
-        if s.service_read_verified and s.approval_reference.strip() and s.approved_at is not None
+        if s.trust_class == TrustClass.CORPORATE_DESIGNATED
+        and s.service_read_verified
+        and s.approval_reference.strip()
+        and s.approved_at is not None
     ]
-    if eligible:
-        return {"eligible": True, "scopes": eligible, "reason": None}
-    if scopes:
-        return {
-            "eligible": False,
-            "scopes": [],
-            "reason": "Corporate scopes exist but source-owner approval or service-read verification is incomplete.",
-        }
     return {
-        "eligible": False,
-        "scopes": [],
-        "reason": "No corporate designated scope is registered for this source. Configure approval under Synology source settings first.",
+        "eligible": bool(managed),
+        "accessModel": "qka_managed" if managed else "source_acl",
+        "scopes": [_scope_dto(s) for s in (managed or scopes)],
+        "reason": None,
+        "authorizedForDelegation": bool(managed),
     }
+
+
+def ensure_share_scope(
+    session: Session,
+    settings: Settings,
+    actor: QkaUser,
+    *,
+    approved_share_id: uuid.UUID,
+    folder_prefix: str | None = None,
+) -> SourceScope:
+    """Resolve or create an active scope for employee grants (planning or QKA Managed)."""
+    share = session.get(SynologyApprovedShare, approved_share_id)
+    if share is None or not share.is_active:
+        raise ValueError("Approved share was not found.")
+    prefix = normalize_prefix(folder_prefix if folder_prefix is not None else (settings.pilot_folder_prefix or ""))
+    if not prefix:
+        prefix = normalize_prefix(share.share_name) or "ROOT"
+
+    managed = session.execute(
+        select(SourceScope).where(
+            SourceScope.approved_share_id == approved_share_id,
+            SourceScope.status == ScopeStatus.ACTIVE,
+            SourceScope.trust_class == TrustClass.CORPORATE_DESIGNATED,
+            SourceScope.folder_prefix_normalized == prefix,
+            SourceScope.service_read_verified.is_(True),
+        )
+    ).scalar_one_or_none()
+    if managed is not None and managed.approval_reference.strip() and managed.approved_at is not None:
+        return managed
+
+    existing = session.execute(
+        select(SourceScope).where(
+            SourceScope.approved_share_id == approved_share_id,
+            SourceScope.status == ScopeStatus.ACTIVE,
+            SourceScope.folder_prefix_normalized == prefix,
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return existing
+
+    now = _now()
+    row = SourceScope(
+        id=uuid.uuid4(),
+        approved_share_id=approved_share_id,
+        folder_prefix_normalized=prefix,
+        trust_class=TrustClass.PERSONAL,
+        status=ScopeStatus.ACTIVE,
+        display_name=prefix,
+        source_owner_name="",
+        source_owner_email="",
+        approval_reference="",
+        approval_notes="",
+        approved_at=None,
+        approved_by_user_id=None,
+        service_read_verified=False,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(row)
+    session.flush()
+    _audit(
+        session,
+        action="ensure_planning_scope",
+        actor_id=actor.id,
+        scope_id=row.id,
+        detail=f"prefix={prefix}; planning scope for employee rules",
+        share_name=share.share_name,
+    )
+    return row
 
 
 def folder_tree(session: Session, settings: Settings, share_id: uuid.UUID, root_prefix: str | None = None) -> list[dict]:
@@ -439,10 +504,36 @@ def create_corporate_scope(
             SourceScope.status == ScopeStatus.ACTIVE,
         )
     ).scalar_one_or_none()
-    if existing is not None:
-        raise ValueError("An active scope already exists for that folder.")
-
     now = _now()
+    if existing is not None:
+        # Upgrade a planning / incomplete scope into authorized QKA Managed (same row keeps grants).
+        if (
+            existing.trust_class == TrustClass.CORPORATE_DESIGNATED
+            and existing.service_read_verified
+            and existing.approval_reference.strip()
+            and existing.approved_at is not None
+        ):
+            raise ValueError("An active QKA Managed scope already exists for that folder.")
+        existing.trust_class = TrustClass.CORPORATE_DESIGNATED
+        existing.display_name = (display_name or prefix).strip()[:512]
+        existing.source_owner_name = source_owner_name.strip()[:256]
+        existing.source_owner_email = owner_email
+        existing.approval_reference = approval_reference.strip()[:512]
+        existing.approval_notes = (approval_notes or "").strip()[:2000]
+        existing.approved_at = now
+        existing.approved_by_user_id = actor.id
+        existing.service_read_verified = True
+        existing.updated_at = now
+        session.flush()
+        _audit(
+            session,
+            action="activate_qka_managed_scope",
+            actor_id=actor.id,
+            scope_id=existing.id,
+            detail=f"prefix={prefix}; ref={existing.approval_reference}; owner={owner_email}",
+        )
+        return existing
+
     row = SourceScope(
         id=uuid.uuid4(),
         approved_share_id=approved_share_id,
@@ -518,54 +609,90 @@ def _primary_email_for_user(session: Session, user_id: uuid.UUID) -> str:
 def upsert_grant(
     session: Session,
     actor: QkaUser,
+    settings: Settings,
     *,
-    scope_id: uuid.UUID,
-    qka_user_id: uuid.UUID,
-    capability_read: bool,
-    capability_search: bool,
-    capability_preview: bool,
+    scope_id: uuid.UUID | None = None,
+    approved_share_id: uuid.UUID | None = None,
+    qka_user_id: uuid.UUID | None = None,
+    allowlist_id: uuid.UUID | None = None,
+    capability_view: bool = True,
+    capability_download: bool = False,
+    capability_read: bool | None = None,
+    capability_search: bool | None = None,
+    capability_preview: bool | None = None,
     reason: str,
     path_mode: str = "all",
     include_subfolders: bool = True,
     selected_paths: list[str] | None = None,
     file_types: list[str] | None = None,
 ) -> SourceGrant:
-    scope = session.get(SourceScope, scope_id)
-    if scope is None or scope.status != ScopeStatus.ACTIVE:
-        raise ValueError("Active corporate scope is required.")
-    if scope.trust_class != TrustClass.CORPORATE_DESIGNATED:
-        raise ValueError("Grants are only issued on corporate designated scopes.")
-    if not scope.service_read_verified or not scope.approval_reference.strip():
-        raise ValueError("Scope is missing recorded source-owner approval.")
-
-    user = session.get(QkaUser, qka_user_id)
-    if user is None:
-        raise ValueError("Target user was not found.")
-    google = session.execute(
-        select(ExternalIdentity).where(
-            ExternalIdentity.qka_user_id == qka_user_id,
-            ExternalIdentity.provider == PROVIDER_GOOGLE,
-            ExternalIdentity.link_status == LINKED,
-            ExternalIdentity.account_status == ACCOUNT_ENABLED,
+    # Legacy R/S/P → View (any true). Download never inferred from legacy.
+    if capability_read is not None or capability_search is not None or capability_preview is not None:
+        capability_view = bool(
+            capability_view
+            or capability_read
+            or capability_search
+            or capability_preview
         )
-    ).scalar_one_or_none()
-    if google is None:
-        raise ValueError("Target user must have a verified linked Google identity.")
-    emails = load_verified_emails(session, qka_user_id)
-    allowed = session.execute(
-        select(AllowedEmail).where(AllowedEmail.email_normalized.in_(emails), AllowedEmail.enabled.is_(True))
-    ).scalars().first()
-    if allowed is None:
-        raise ValueError("Target user must be on the enabled Google allowlist.")
-    if not (capability_read or capability_search or capability_preview):
-        raise ValueError("At least one capability is required.")
+
+    if scope_id is not None:
+        scope = session.get(SourceScope, scope_id)
+        if scope is None or scope.status != ScopeStatus.ACTIVE:
+            raise ValueError("Active source scope is required.")
+    elif approved_share_id is not None:
+        scope = ensure_share_scope(session, settings, actor, approved_share_id=approved_share_id)
+    else:
+        raise ValueError("scopeId or approvedShareId is required.")
+
+    target_user_id: uuid.UUID | None = None
+    allowed: AllowedEmail | None = None
+    employee_email = ""
+
+    if qka_user_id is not None:
+        user = session.get(QkaUser, qka_user_id)
+        if user is None:
+            raise ValueError("Target user was not found.")
+        google = session.execute(
+            select(ExternalIdentity).where(
+                ExternalIdentity.qka_user_id == qka_user_id,
+                ExternalIdentity.provider == PROVIDER_GOOGLE,
+                ExternalIdentity.link_status == LINKED,
+                ExternalIdentity.account_status == ACCOUNT_ENABLED,
+            )
+        ).scalar_one_or_none()
+        if google is None:
+            raise ValueError("Target user must have a verified linked Google identity.")
+        emails = load_verified_emails(session, qka_user_id)
+        allowed = session.execute(
+            select(AllowedEmail).where(AllowedEmail.email_normalized.in_(emails), AllowedEmail.enabled.is_(True))
+        ).scalars().first()
+        if allowed is None:
+            raise ValueError("Target user must be on the enabled Google allowlist.")
+        target_user_id = qka_user_id
+        employee_email = _primary_email_for_user(session, qka_user_id)
+    elif allowlist_id is not None:
+        allowed = session.get(AllowedEmail, allowlist_id)
+        if allowed is None or not allowed.enabled:
+            raise ValueError("Enabled allowlist entry is required for pending grants.")
+        by_email = _google_users_by_verified_email(session)
+        linked = by_email.get(allowed.email_normalized) or []
+        if linked:
+            target_user_id = linked[0].id
+        employee_email = allowed.email_normalized
+    else:
+        raise ValueError("qkaUserId or allowlistId is required.")
+
+    if not (capability_view or capability_download):
+        raise ValueError("At least one permission (View Documents or Download Originals) is required.")
+    # Download is never auto-enabled from View alone.
+    capability_download = bool(capability_download)
 
     mode = PathMode.ALL_IN_SCOPE if (path_mode or "all").lower() != "selected" else PathMode.SELECTED
     paths = [normalize_prefix(p) for p in (selected_paths or []) if normalize_prefix(p)]
     scope_prefix = normalize_prefix(scope.folder_prefix_normalized)
     for path in paths:
         if not under_prefix(path, scope_prefix):
-            raise ValueError(f"Selected path is outside the approved corporate scope: {path}")
+            raise ValueError(f"Selected path is outside the scope: {path}")
     if mode == PathMode.SELECTED and not paths:
         raise ValueError("Select at least one folder or file for specific-folder access.")
     allowed_types = set(FILE_TYPE_EXTENSIONS.keys()) | {"all"}
@@ -576,37 +703,69 @@ def upsert_grant(
         types = []
 
     now = _now()
-    employee_email = _primary_email_for_user(session, qka_user_id)
     share_name = _resolve_share_name(session, scope)
-    existing = session.execute(
-        select(SourceGrant).where(
-            SourceGrant.scope_id == scope_id,
-            SourceGrant.qka_user_id == qka_user_id,
-            SourceGrant.status == GrantStatus.ACTIVE,
-        )
-    ).scalar_one_or_none()
+    assert allowed is not None
+    scope_id = scope.id
+
+    existing: SourceGrant | None = None
+    if target_user_id is not None:
+        existing = session.execute(
+            select(SourceGrant).where(
+                SourceGrant.scope_id == scope_id,
+                SourceGrant.qka_user_id == target_user_id,
+                SourceGrant.status == GrantStatus.ACTIVE,
+            )
+        ).scalar_one_or_none()
+    if existing is None:
+        existing = session.execute(
+            select(SourceGrant).where(
+                SourceGrant.scope_id == scope_id,
+                SourceGrant.allowed_email_id == allowed.id,
+                SourceGrant.status == GrantStatus.ACTIVE,
+            )
+        ).scalar_one_or_none()
+
+    def _apply(row: SourceGrant) -> None:
+        row.capability_view = bool(capability_view)
+        row.capability_download = bool(capability_download)
+        # Dual-write legacy mirrors from View only (never invent Download).
+        row.capability_read = bool(capability_view)
+        row.capability_search = bool(capability_view)
+        row.capability_preview = bool(capability_view)
+        row.path_mode = int(mode)
+        row.include_subfolders = bool(include_subfolders)
+        row.selected_paths_json = json.dumps(paths)
+        row.file_types_json = json.dumps(types)
+        row.reason = (reason or "").strip()[:1024]
+        row.allowed_email_id = allowed.id
+        if target_user_id is not None:
+            row.qka_user_id = target_user_id
+        row.updated_at = now
+        row.updated_by_user_id = actor.id
+
     if existing is not None:
         before = _grant_snapshot(existing)
-        existing.capability_read = capability_read
-        existing.capability_search = capability_search
-        existing.capability_preview = capability_preview
-        existing.path_mode = int(mode)
-        existing.include_subfolders = bool(include_subfolders)
-        existing.selected_paths_json = json.dumps(paths)
-        existing.file_types_json = json.dumps(types)
-        existing.reason = (reason or "").strip()[:1024]
-        existing.updated_at = now
-        existing.updated_by_user_id = actor.id
+        _apply(existing)
         session.flush()
         after = _grant_snapshot(existing)
+        detail = existing.reason or "grant updated"
+        if existing.qka_user_id is None:
+            detail = f"{detail}; pending_activation".strip("; ")
+        authorized = (
+            scope.trust_class == TrustClass.CORPORATE_DESIGNATED
+            and scope.service_read_verified
+            and bool(scope.approval_reference.strip())
+        )
+        if not authorized:
+            detail = f"{detail}; effective_denied_until_source_authorized"
         _audit(
             session,
             action="Updated",
             actor_id=actor.id,
-            target_user_id=qka_user_id,
+            target_user_id=existing.qka_user_id,
             scope_id=scope_id,
             grant_id=existing.id,
-            detail=existing.reason or "grant updated",
+            detail=detail,
             employee_email=employee_email,
             share_name=share_name,
             before=before,
@@ -617,10 +776,13 @@ def upsert_grant(
     row = SourceGrant(
         id=uuid.uuid4(),
         scope_id=scope_id,
-        qka_user_id=qka_user_id,
-        capability_read=capability_read,
-        capability_search=capability_search,
-        capability_preview=capability_preview,
+        qka_user_id=target_user_id,
+        allowed_email_id=allowed.id,
+        capability_read=bool(capability_view),
+        capability_search=bool(capability_view),
+        capability_preview=bool(capability_view),
+        capability_view=bool(capability_view),
+        capability_download=bool(capability_download),
         path_mode=int(mode),
         include_subfolders=bool(include_subfolders),
         selected_paths_json=json.dumps(paths),
@@ -635,20 +797,56 @@ def upsert_grant(
     session.add(row)
     session.flush()
     after = _grant_snapshot(row)
+    detail = row.reason or "grant created"
+    if row.qka_user_id is None:
+        detail = f"{detail}; pending_activation".strip("; ")
+    authorized = (
+        scope.trust_class == TrustClass.CORPORATE_DESIGNATED
+        and scope.service_read_verified
+        and bool(scope.approval_reference.strip())
+    )
+    if not authorized:
+        detail = f"{detail}; effective_denied_until_source_authorized"
     _audit(
         session,
         action="Created",
         actor_id=actor.id,
-        target_user_id=qka_user_id,
+        target_user_id=target_user_id,
         scope_id=scope_id,
         grant_id=row.id,
-        detail=row.reason or "grant created",
+        detail=detail,
         employee_email=employee_email,
         share_name=share_name,
         before={},
         after=after,
     )
     return row
+
+
+def set_employee_chat_access(
+    session: Session,
+    actor: QkaUser,
+    allowlist_id: uuid.UUID,
+    *,
+    local_chat_enabled: bool,
+    mcp_enabled: bool,
+) -> dict:
+    from qka_shared.chat_access import set_chat_access
+
+    row = set_chat_access(
+        session,
+        actor.id,
+        allowlist_id,
+        local_chat_enabled=local_chat_enabled,
+        mcp_enabled=mcp_enabled,
+    )
+    allow = session.get(AllowedEmail, allowlist_id)
+    return {
+        "allowlistId": str(allowlist_id),
+        "email": allow.email_normalized if allow else "",
+        "localChatEnabled": bool(row.local_chat_enabled),
+        "mcpEnabled": bool(row.mcp_enabled),
+    }
 
 
 def set_grant_status(session: Session, actor: QkaUser, grant_id: uuid.UUID, status: int, reason: str = "") -> SourceGrant:
@@ -666,6 +864,12 @@ def set_grant_status(session: Session, actor: QkaUser, grant_id: uuid.UUID, stat
     session.flush()
     action = {GrantStatus.ACTIVE: "Updated", GrantStatus.DISABLED: "Disabled", GrantStatus.REVOKED: "Revoked"}[status]
     scope = session.get(SourceScope, row.scope_id)
+    employee_email = ""
+    if row.qka_user_id is not None:
+        employee_email = _primary_email_for_user(session, row.qka_user_id)
+    elif row.allowed_email_id is not None:
+        allow = session.get(AllowedEmail, row.allowed_email_id)
+        employee_email = allow.email_normalized if allow else ""
     _audit(
         session,
         action=action,
@@ -674,7 +878,7 @@ def set_grant_status(session: Session, actor: QkaUser, grant_id: uuid.UUID, stat
         scope_id=row.scope_id,
         grant_id=row.id,
         detail=row.reason,
-        employee_email=_primary_email_for_user(session, row.qka_user_id),
+        employee_email=employee_email,
         share_name=_resolve_share_name(session, scope),
         before=before,
         after=_grant_snapshot(row),
@@ -703,7 +907,7 @@ def effective_for_user(
         ).scalar_one_or_none()
         inventory = session.get(SynologyFileInventory, document_id) if content else None
         if content and inventory:
-            eff = evaluate_document_access(session, user, inventory, content, capability="search")
+            eff = evaluate_document_access(session, user, inventory, content, capability="view")
             sample = {
                 "documentId": document_id.hex,
                 "fileName": content.file_name,
@@ -729,7 +933,7 @@ def effective_for_user(
         if content is not None:
             inventory = session.get(SynologyFileInventory, content.inventory_file_id)
             if inventory is not None:
-                eff = evaluate_document_access(session, user, inventory, content, capability="search")
+                eff = evaluate_document_access(session, user, inventory, content, capability="view")
                 sample = {
                     "documentId": content.inventory_file_id.hex,
                     "fileName": content.file_name,
