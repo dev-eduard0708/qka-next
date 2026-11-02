@@ -275,6 +275,8 @@ def seed_db():
         session.execute(text("ALTER TABLE qka_next_source_grant_audit ADD COLUMN IF NOT EXISTS after_detail TEXT NOT NULL DEFAULT ''"))
         session.execute(text('ALTER TABLE allowed_email ADD COLUMN IF NOT EXISTS "DisplayName" VARCHAR(256) NOT NULL DEFAULT \'\''))
         session.execute(text('ALTER TABLE allowed_email ADD COLUMN IF NOT EXISTS "GoogleProfileName" VARCHAR(256) NOT NULL DEFAULT \'\''))
+        session.execute(text('ALTER TABLE synology_file_inventory ADD COLUMN IF NOT EXISTS "IsDirectory" BOOLEAN NOT NULL DEFAULT FALSE'))
+        session.execute(text('ALTER TABLE synology_file_inventory ADD COLUMN IF NOT EXISTS "ParentPathNormalized" VARCHAR(2048) NOT NULL DEFAULT \'\''))
         session.execute(
             text(
                 """
@@ -374,6 +376,8 @@ def seed_db():
                     acl_capture_status=1,
                     acl_snapshot_json=f'[{{"Identity":"{SID_ALLOWED}","Rights":"Modify, Read","AccessControlType":"Allow"}}]',
                     is_present=True,
+                    is_directory=False,
+                    parent_path_normalized=r"EDUARDTESTCLOUD",
                     created_at=now,
                     updated_at=now,
                 ),
@@ -405,6 +409,10 @@ def seed_db():
                 ),
             ]
         )
+        session.commit()
+        from qka_api.services.inventory_hierarchy import backfill_inventory_hierarchy
+
+        backfill_inventory_hierarchy(session)
         session.commit()
         session.execute(text("""UPDATE synology_document_content SET search_vector = to_tsvector('english', coalesce("ExtractedText", ''))"""))
         session.commit()

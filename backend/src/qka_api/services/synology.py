@@ -10,6 +10,7 @@ from sqlalchemy import func, or_, select, text as sql_text
 from sqlalchemy.orm import Session
 
 from qka_api.extract import EXTRACT_SUCCEEDED, extract_bytes, is_supported
+from qka_api.services.inventory_hierarchy import parent_normalized, present_file_filters
 from qka_api.smb import ACL_CAPTURED, EnumeratedFile, SmbCredentials, SmbError, SmbGateway
 from qka_shared.config import Settings
 from qka_shared.models import (
@@ -598,7 +599,7 @@ def list_inventory(
 ) -> dict:
     page = max(1, page)
     page_size = max(1, min(page_size or 50, 200))
-    query = select(SynologyFileInventory).where(SynologyFileInventory.is_present.is_(True))
+    query = select(SynologyFileInventory).where(*present_file_filters())
     if connection_id is not None:
         connection = _require_connection(session, connection_id)
         if connection.primary_approved_share_id is None:
@@ -749,18 +750,21 @@ def _run_job(session: Session, settings: Settings, gateway: SmbGateway, job_id: 
                 raise InterruptedError("cancelled")
             key = item.relative_path.replace("/", "\\").strip("\\").upper()
             seen.add(key)
-            job.files_discovered += 1
+            is_dir = bool(getattr(item, "is_directory", False))
             job.current_operation = f"Processing {item.file_name}"
             try:
                 row, changed = _upsert_inventory(session, share.id, job, item)
-                if changed:
-                    _extract_if_needed(session, settings, gateway, connection, share, row, unc, creds)
-                job.files_processed += 1
+                seen.update(_ensure_ancestors(session, share.id, job, item.relative_path))
+                if not is_dir:
+                    job.files_discovered += 1
+                    if changed:
+                        _extract_if_needed(session, settings, gateway, connection, share, row, unc, creds)
+                    job.files_processed += 1
+                    _bump_type(job, classify(item.extension), item.size_bytes)
             except Exception:
                 log.exception("Failed to inventory Synology file name=%s", item.file_name)
                 job.files_failed += 1
                 job.files_skipped += 1
-            _bump_type(job, classify(item.extension), item.size_bytes)
             since_flush += 1
             if since_flush >= 25:
                 since_flush = 0
@@ -821,10 +825,63 @@ def _run_job(session: Session, settings: Settings, gateway: SmbGateway, job_id: 
         _ = exc
 
 
+def _ensure_ancestors(session: Session, share_id: uuid.UUID, job: SynologySyncJob, relative: str) -> set[str]:
+    """Persist parent folders for a file/folder path and return their normalized keys."""
+    parts = [p for p in (relative or "").replace("/", "\\").strip("\\").split("\\") if p]
+    seen: set[str] = set()
+    accum: list[str] = []
+    for part in parts[:-1]:
+        accum.append(part)
+        rel_path = "\\".join(accum)
+        key = rel_path.upper()
+        seen.add(key)
+        existing = session.execute(
+            select(SynologyFileInventory).where(
+                SynologyFileInventory.approved_share_id == share_id,
+                SynologyFileInventory.relative_path_normalized == key,
+            )
+        ).scalar_one_or_none()
+        now = _now()
+        if existing is None:
+            session.add(
+                SynologyFileInventory(
+                    id=uuid.uuid4(),
+                    approved_share_id=share_id,
+                    relative_path=rel_path,
+                    relative_path_normalized=key,
+                    file_name=part,
+                    extension="",
+                    file_type_category=0,
+                    size_bytes=0,
+                    last_write_utc=None,
+                    sync_status=SYNC_NEW,
+                    acl_capture_status=0,
+                    last_seen_job_id=job.id,
+                    is_present=True,
+                    is_directory=True,
+                    parent_path_normalized=parent_normalized(key),
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        else:
+            existing.is_present = True
+            existing.is_directory = True
+            existing.file_name = existing.file_name or part
+            existing.parent_path_normalized = parent_normalized(key)
+            existing.last_seen_job_id = job.id
+            existing.updated_at = now
+            if existing.sync_status == SYNC_REMOVED:
+                existing.sync_status = SYNC_UNCHANGED
+    session.flush()
+    return seen
+
+
 def _upsert_inventory(session: Session, share_id: uuid.UUID, job: SynologySyncJob, item: EnumeratedFile) -> tuple[SynologyFileInventory, bool]:
     relative = item.relative_path.replace("/", "\\").strip("\\")
     key = relative.upper()
-    category = classify(item.extension)
+    is_dir = bool(getattr(item, "is_directory", False))
+    category = 0 if is_dir else classify(item.extension)
     acl_status = item.acl.status if item.acl.captured else item.acl.status
     row = session.execute(
         select(SynologyFileInventory).where(
@@ -843,24 +900,37 @@ def _upsert_inventory(session: Session, share_id: uuid.UUID, job: SynologySyncJo
             sync_status=SYNC_NEW,
         )
         session.add(row)
-        job.files_new += 1
+        if not is_dir:
+            job.files_new += 1
     else:
-        modified = row.size_bytes != item.size_bytes or row.last_write_utc != item.last_write_utc or row.file_name != item.file_name
+        modified = (
+            (not is_dir)
+            and (
+                row.size_bytes != item.size_bytes
+                or row.last_write_utc != item.last_write_utc
+                or row.file_name != item.file_name
+            )
+        )
         row.sync_status = SYNC_MODIFIED if modified else SYNC_UNCHANGED
-        if modified:
-            job.files_modified += 1
+        if not is_dir:
+            if modified:
+                job.files_modified += 1
+            else:
+                job.files_unchanged += 1
+                changed = False
         else:
-            job.files_unchanged += 1
             changed = False
     row.file_name = item.file_name
-    row.extension = (item.extension or "").lower()
+    row.extension = "" if is_dir else (item.extension or "").lower()
     row.file_type_category = category
-    row.size_bytes = item.size_bytes
+    row.size_bytes = 0 if is_dir else item.size_bytes
     row.last_write_utc = item.last_write_utc
     row.acl_capture_status = acl_status
     row.acl_snapshot_json = json.dumps(item.acl.entries) if item.acl.captured else None
     row.last_seen_job_id = job.id
     row.is_present = True
+    row.is_directory = is_dir
+    row.parent_path_normalized = parent_normalized(key)
     row.updated_at = _now()
     session.flush()
     return row, changed
@@ -876,6 +946,8 @@ def _extract_if_needed(
     unc: str,
     creds: SmbCredentials | None,
 ) -> None:
+    if bool(getattr(row, "is_directory", False)):
+        return
     prefix = (settings.pilot_folder_prefix or "").replace("/", "\\").strip("\\").upper()
     path_key = row.relative_path_normalized
     pilot = (not prefix) or path_key == prefix or path_key.startswith(prefix + "\\")

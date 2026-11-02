@@ -342,8 +342,51 @@ def source_folder_tree(
     session: Session = Depends(get_session),
 ) -> list[dict]:
     _require_super_admin(request, settings, session, mutating=False)
-    # Distinguish omitted (pilot default) vs explicit "" (entire share).
+    # Empty or omitted prefix lists the entire approved share (not the extraction pilot folder).
     return source_admin.folder_tree(session, settings, approvedShareId, rootPrefix)
+
+
+@router.get("/source/folder-children")
+def source_folder_children(
+    request: Request,
+    approvedShareId: uuid.UUID = Query(...),
+    parentPath: str = Query(default=""),
+    search: str | None = Query(default=None),
+    fileType: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    pageSize: int = Query(default=200, ge=1, le=500),
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    from qka_api.services.inventory_hierarchy import list_folder_children
+
+    _require_super_admin(request, settings, session, mutating=False)
+    return list_folder_children(
+        session,
+        approvedShareId,
+        parentPath,
+        search=search,
+        file_type=fileType,
+        page=page,
+        page_size=pageSize,
+    )
+
+
+@router.get("/source/folder-search")
+def source_folder_search(
+    request: Request,
+    approvedShareId: uuid.UUID = Query(...),
+    q: str = Query(default="", max_length=200),
+    parentPath: str = Query(default=""),
+    page: int = Query(default=1, ge=1),
+    pageSize: int = Query(default=50, ge=1, le=100),
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    from qka_api.services.inventory_hierarchy import search_folder_nodes
+
+    _require_super_admin(request, settings, session, mutating=False)
+    return search_folder_nodes(session, approvedShareId, q, parent_path=parentPath, page=page, page_size=pageSize)
 
 
 @router.get("/source/scopes")

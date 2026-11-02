@@ -96,9 +96,23 @@ export type SourceFolderNode = {
   label: string;
   path: string;
   isFile: boolean;
+  lazy?: boolean;
   icon?: string;
+  inventoryId?: string | null;
   aclCaptureStatus: number | null;
-  children?: SourceFolderNode[];
+  children?: SourceFolderNode[] | null;
+};
+
+export type SourceFolderPage = {
+  parentPath: string;
+  breadcrumb: Array<{ label: string; path: string }>;
+  items: SourceFolderNode[];
+  total: number;
+  folderCount: number;
+  fileCount: number;
+  page: number;
+  pageSize: number;
+  hasMore: boolean;
 };
 
 export type SourceGrant = {
@@ -362,9 +376,25 @@ export const api = {
   sourceSources: () => request<SourceSource[]>("/api/v1/access/source/sources"),
   sourceFolderTree: (approvedShareId: string, rootPrefix?: string | null) => {
     const q = new URLSearchParams({ approvedShareId });
-    // null/undefined → API pilot default; "" → entire share; otherwise scoped prefix
+    // "" / omitted → entire share; otherwise scoped prefix
     if (rootPrefix !== undefined && rootPrefix !== null) q.set("rootPrefix", rootPrefix);
     return request<SourceFolderNode[]>(`/api/v1/access/source/folder-tree?${q.toString()}`);
+  },
+  sourceFolderChildren: (
+    approvedShareId: string,
+    parentPath = "",
+    params?: { search?: string; fileType?: string; page?: number; pageSize?: number },
+  ) => {
+    const q = new URLSearchParams({ approvedShareId, parentPath });
+    if (params?.search) q.set("search", params.search);
+    if (params?.fileType) q.set("fileType", params.fileType);
+    if (params?.page) q.set("page", String(params.page));
+    if (params?.pageSize) q.set("pageSize", String(params.pageSize));
+    return request<SourceFolderPage>(`/api/v1/access/source/folder-children?${q.toString()}`);
+  },
+  sourceFolderSearch: (approvedShareId: string, query: string, parentPath = "") => {
+    const q = new URLSearchParams({ approvedShareId, q: query, parentPath });
+    return request<{ items: SourceFolderNode[]; total: number }>(`/api/v1/access/source/folder-search?${q.toString()}`);
   },
   sourceScopes: () => request<SourceScope[]>("/api/v1/access/source/scopes"),
   sourceEligibleScopes: (approvedShareId: string) =>

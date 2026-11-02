@@ -394,6 +394,8 @@ class SynologyFileInventory(Base):
     acl_snapshot_json: Mapped[str | None] = mapped_column("AclSnapshotJson", String(8000), nullable=True)
     last_seen_job_id: Mapped[uuid.UUID | None] = mapped_column("LastSeenJobId", Uuid(as_uuid=True), nullable=True)
     is_present: Mapped[bool] = mapped_column("IsPresent", Boolean, default=True)
+    is_directory: Mapped[bool] = mapped_column("IsDirectory", Boolean, default=False)
+    parent_path_normalized: Mapped[str] = mapped_column("ParentPathNormalized", String(2048), default="")
     created_at: Mapped[datetime] = mapped_column("CreatedAt", DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column("UpdatedAt", DateTime(timezone=True))
 

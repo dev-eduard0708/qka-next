@@ -237,13 +237,34 @@
 
                   <template v-if="pathMode === 'selected'">
                     <q-checkbox v-model="includeSubfolders" dense :label="t('access.includeSubfolders')" class="q-mb-sm" />
+                    <q-input
+                      v-model="folderSearch"
+                      outlined
+                      dense
+                      clearable
+                      debounce="300"
+                      class="q-mb-sm"
+                      :label="t('access.folderSearch')"
+                      @update:model-value="onFolderSearch"
+                    />
+                    <div v-if="folderSearchHits" class="qka-tree q-mb-md">
+                      <q-checkbox
+                        v-for="hit in folderSearchHits"
+                        :key="hit.id"
+                        v-model="tickedPaths"
+                        :val="hit.path"
+                        dense
+                        :label="`${hit.label} — ${hit.path}`"
+                      />
+                      <div v-if="!folderSearchHits.length" class="text-caption text-grey-7">{{ t("access.noFolders") }}</div>
+                    </div>
                     <q-tree
-                      v-if="folderNodes.length"
+                      v-else-if="folderNodes.length"
                       :nodes="folderNodes"
                       node-key="id"
                       tick-strategy="strict"
                       v-model:ticked="tickedPaths"
-                      default-expand-all
+                      @lazy-load="onFolderLazyLoad"
                       class="q-mb-md qka-tree"
                     >
                       <template #default-header="prop">
@@ -432,6 +453,8 @@ const employees = ref<SourceEmployee[]>([]);
 const sources = ref<SourceSource[]>([]);
 const folderNodes = ref<SourceFolderNode[]>([]);
 const tickedPaths = ref<string[]>([]);
+const folderSearch = ref("");
+const folderSearchHits = ref<SourceFolderNode[] | null>(null);
 const selectedAllowlistId = ref<string | null>(null);
 const selectedShareId = ref<string | null>(null);
 const selectedScopeId = ref<string | null>(null);
@@ -748,14 +771,40 @@ async function onShareSelected() {
   if (!selectedShareId.value) return;
   try {
     eligibility.value = await api.sourceEligibleScopes(selectedShareId.value);
-    selectedScopeId.value = eligibility.value.scopes[0]?.id || null;
-    // Prefer corporate scope prefix; otherwise show the full share folder tree
-    // (pilot-only EDUARDTESTCLOUD has just a few files and looks like "one folder").
-    const scopePrefix = eligibility.value.scopes[0]?.folderPrefixNormalized;
-    const rootPrefix = scopePrefix && scopePrefix.trim() ? scopePrefix : "";
-    folderNodes.value = await api.sourceFolderTree(selectedShareId.value, rootPrefix);
+    const wholeShare = eligibility.value.scopes.find((s) => !(s.folderPrefixNormalized || "").trim());
+    selectedScopeId.value = wholeShare?.id || null;
+    folderSearch.value = "";
+    folderSearchHits.value = null;
+    folderNodes.value = await api.sourceFolderTree(selectedShareId.value, "");
   } catch (err) {
     sourceError.value = err instanceof Error ? err.message : t("access.sourceLoadError");
+  }
+}
+
+async function onFolderLazyLoad(tick: { node: SourceFolderNode; done: (children: SourceFolderNode[]) => void; fail: () => void }) {
+  if (!selectedShareId.value) {
+    tick.fail();
+    return;
+  }
+  try {
+    const page = await api.sourceFolderChildren(selectedShareId.value, tick.node.path || "", { pageSize: 500 });
+    tick.done(page.items || []);
+  } catch {
+    tick.fail();
+  }
+}
+
+async function onFolderSearch() {
+  const q = folderSearch.value.trim();
+  if (!q || !selectedShareId.value) {
+    folderSearchHits.value = null;
+    return;
+  }
+  try {
+    const found = await api.sourceFolderSearch(selectedShareId.value, q);
+    folderSearchHits.value = found.items || [];
+  } catch {
+    folderSearchHits.value = [];
   }
 }
 
@@ -774,7 +823,8 @@ async function onUserSelected() {
       fileTypes.value = grant.fileTypes?.length ? [...grant.fileTypes] : [...allFileTypeValues.value];
       capView.value = grant.capabilityView ?? grant.capabilityRead ?? true;
       capDownload.value = !!grant.capabilityDownload;
-      if (grant.scopeId) selectedScopeId.value = grant.scopeId;
+      const grantPrefix = (grant.scope?.folderPrefixNormalized || "").trim();
+      if (grant.scopeId && !grantPrefix) selectedScopeId.value = grant.scopeId;
     }
   } catch (err) {
     sourceError.value = err instanceof Error ? err.message : t("access.sourceLoadError");

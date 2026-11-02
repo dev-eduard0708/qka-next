@@ -253,12 +253,14 @@ def list_sources(session: Session, settings: Settings) -> list[dict]:
             select(func.count()).select_from(SynologyFileInventory).where(
                 SynologyFileInventory.approved_share_id == share.id,
                 SynologyFileInventory.is_present.is_(True),
+                SynologyFileInventory.is_directory.is_(False),
             )
         )
         acl_captured = session.scalar(
             select(func.count()).select_from(SynologyFileInventory).where(
                 SynologyFileInventory.approved_share_id == share.id,
                 SynologyFileInventory.is_present.is_(True),
+                SynologyFileInventory.is_directory.is_(False),
                 SynologyFileInventory.acl_capture_status == 1,
             )
         )
@@ -329,9 +331,11 @@ def ensure_share_scope(
     share = session.get(SynologyApprovedShare, approved_share_id)
     if share is None or not share.is_active:
         raise ValueError("Approved share was not found.")
-    prefix = normalize_prefix(folder_prefix if folder_prefix is not None else (settings.pilot_folder_prefix or ""))
-    if not prefix:
-        prefix = normalize_prefix(share.share_name) or "ROOT"
+    # Empty prefix = entire approved share. Do not fall back to the extraction pilot folder.
+    if folder_prefix is None:
+        prefix = ""
+    else:
+        prefix = normalize_prefix(folder_prefix)
 
     managed = session.execute(
         select(SourceScope).where(
@@ -362,7 +366,7 @@ def ensure_share_scope(
         folder_prefix_normalized=prefix,
         trust_class=TrustClass.PERSONAL,
         status=ScopeStatus.ACTIVE,
-        display_name=prefix,
+        display_name=prefix or share.share_name,
         source_owner_name="",
         source_owner_email="",
         approval_reference="",
@@ -387,79 +391,12 @@ def ensure_share_scope(
 
 
 def folder_tree(session: Session, settings: Settings, share_id: uuid.UUID, root_prefix: str | None = None) -> list[dict]:
-    # None → default pilot prefix; "" → entire share; otherwise the given folder prefix.
-    if root_prefix is None:
-        prefix = normalize_prefix(settings.pilot_folder_prefix or "")
-    else:
-        prefix = normalize_prefix(root_prefix)
-    rows = session.execute(
-        select(SynologyFileInventory.relative_path_normalized, SynologyFileInventory.acl_capture_status)
-        .where(
-            SynologyFileInventory.approved_share_id == share_id,
-            SynologyFileInventory.is_present.is_(True),
-        )
-        .order_by(SynologyFileInventory.relative_path_normalized)
-        .limit(8000)
-    ).all()
-    nodes: dict[str, dict] = {}
-    for path, acl_status in rows:
-        norm = normalize_prefix(path or "")
-        if prefix and not under_prefix(norm, prefix):
-            continue
-        parts = [p for p in norm.split("\\") if p]
-        if not parts:
-            continue
-        # folder nodes = all ancestors; file leaf marked separately
-        accum: list[str] = []
-        for i, part in enumerate(parts):
-            accum.append(part)
-            key = "\\".join(accum)
-            is_file = i == len(parts) - 1
-            if key not in nodes:
-                nodes[key] = {
-                    "id": key,
-                    "label": part,
-                    "path": key,
-                    "lazy": False,
-                    "children": [],
-                    "isFile": is_file,
-                    "icon": _file_icon(part, is_file),
-                    "aclCaptureStatus": int(acl_status or 0) if is_file else None,
-                }
-            elif is_file:
-                nodes[key]["isFile"] = True
-                nodes[key]["icon"] = _file_icon(part, True)
-                nodes[key]["aclCaptureStatus"] = int(acl_status or 0)
-            parent_key = "\\".join(accum[:-1])
-            if parent_key and parent_key in nodes:
-                child_ids = {c["id"] if isinstance(c, dict) else c for c in nodes[parent_key]["children"]}
-                if key not in child_ids:
-                    nodes[parent_key]["children"].append(nodes[key])
-                    nodes[parent_key]["isFile"] = False
-                    nodes[parent_key]["icon"] = "folder"
+    """Lazy one-level roots from PostgreSQL. Empty prefix = entire share (not the extraction pilot folder)."""
+    from qka_api.services.inventory_hierarchy import folder_tree_roots
 
-    roots = []
-    if prefix and prefix in nodes:
-        roots.append(nodes[prefix])
-    else:
-        for key, node in nodes.items():
-            if "\\" not in key:
-                roots.append(node)
-
-    def prune(node: dict) -> dict:
-        kids = [prune(c) for c in node["children"] if isinstance(c, dict)]
-        is_file = bool(node.get("isFile"))
-        return {
-            "id": node["id"],
-            "label": node["label"],
-            "path": node["path"],
-            "isFile": is_file,
-            "icon": node.get("icon") or _file_icon(node["label"], is_file),
-            "aclCaptureStatus": node.get("aclCaptureStatus"),
-            "children": kids,
-        }
-
-    return [prune(r) for r in roots]
+    _ = settings
+    prefix = "" if root_prefix is None else normalize_prefix(root_prefix)
+    return folder_tree_roots(session, share_id, prefix)
 
 
 def list_scopes(session: Session) -> list[dict]:

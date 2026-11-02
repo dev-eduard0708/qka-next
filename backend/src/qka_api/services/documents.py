@@ -268,11 +268,19 @@ def list_inventory(
         return [], 0, deny_message("no_verified_email")
 
     prefix = _prefix_normalized(settings.pilot_folder_prefix)
-    stmt = select(SynologyFileInventory).where(SynologyFileInventory.is_present.is_(True))
+    stmt = select(SynologyFileInventory).where(
+        SynologyFileInventory.is_present.is_(True),
+        SynologyFileInventory.is_directory.is_(False),
+    )
     if settings.approved_share_id:
         stmt = stmt.where(SynologyFileInventory.approved_share_id == settings.approved_share_id)
     if prefix:
-        stmt = stmt.where(SynologyFileInventory.relative_path_normalized.startswith(prefix))
+        stmt = stmt.where(
+            or_(
+                SynologyFileInventory.relative_path_normalized == prefix,
+                SynologyFileInventory.relative_path_normalized.like(prefix + "\\%"),
+            )
+        )
     if search:
         like = f"%{search.strip()}%"
         stmt = stmt.where(

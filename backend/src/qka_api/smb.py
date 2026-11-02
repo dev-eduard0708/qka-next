@@ -35,6 +35,7 @@ class EnumeratedFile:
     size_bytes: int
     last_write_utc: datetime | None
     acl: AclSnapshot
+    is_directory: bool = False
 
 
 class SmbError(RuntimeError):
@@ -230,19 +231,22 @@ def _walk(scope_root: str, current: str) -> Iterator[EnumeratedFile]:
             is_dir = entry.is_dir(follow_symlinks=False)
         except OSError:
             continue
-        if is_dir:
-            yield from _walk(scope_root, path)
-            continue
-        try:
-            stat = entry.stat(follow_symlinks=False)
-        except OSError:
-            continue
         relative = path[len(scope_root.rstrip("\\")) + 1 :] if len(path) > len(scope_root.rstrip("\\")) else entry.name
         relative = relative.replace("/", "\\").lstrip("\\")
         name = entry.name
+        try:
+            stat = entry.stat(follow_symlinks=False)
+        except OSError:
+            stat = None
+        write = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc) if stat is not None else None
+        if is_dir:
+            yield EnumeratedFile(relative, name, "", 0, write, capture_acl(path), True)
+            yield from _walk(scope_root, path)
+            continue
+        if stat is None:
+            continue
         ext = os.path.splitext(name)[1].lstrip(".").lower()
-        write = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
-        yield EnumeratedFile(relative, name, ext, int(stat.st_size), write, capture_acl(path))
+        yield EnumeratedFile(relative, name, ext, int(stat.st_size), write, capture_acl(path), False)
 
 
 def _resolve_under_root(unc_root: str, relative_path: str) -> str:
