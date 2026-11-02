@@ -277,6 +277,14 @@ def seed_db():
         session.execute(text('ALTER TABLE allowed_email ADD COLUMN IF NOT EXISTS "GoogleProfileName" VARCHAR(256) NOT NULL DEFAULT \'\''))
         session.execute(text('ALTER TABLE synology_file_inventory ADD COLUMN IF NOT EXISTS "IsDirectory" BOOLEAN NOT NULL DEFAULT FALSE'))
         session.execute(text('ALTER TABLE synology_file_inventory ADD COLUMN IF NOT EXISTS "ParentPathNormalized" VARCHAR(2048) NOT NULL DEFAULT \'\''))
+        session.execute(text('ALTER TABLE synology_approved_share ADD COLUMN IF NOT EXISTS "AccessModel" INTEGER NOT NULL DEFAULT 0'))
+        session.execute(text('ALTER TABLE synology_approved_share ADD COLUMN IF NOT EXISTS "QkaManagedApprovalReference" VARCHAR(512) NOT NULL DEFAULT \'\''))
+        session.execute(text('ALTER TABLE synology_approved_share ADD COLUMN IF NOT EXISTS "QkaManagedOwnerName" VARCHAR(256) NOT NULL DEFAULT \'\''))
+        session.execute(text('ALTER TABLE synology_approved_share ADD COLUMN IF NOT EXISTS "QkaManagedOwnerEmail" VARCHAR(256) NOT NULL DEFAULT \'\''))
+        session.execute(text('ALTER TABLE synology_approved_share ADD COLUMN IF NOT EXISTS "QkaManagedNotes" VARCHAR(2000) NOT NULL DEFAULT \'\''))
+        session.execute(text('ALTER TABLE synology_approved_share ADD COLUMN IF NOT EXISTS "QkaManagedServiceReadVerified" BOOLEAN NOT NULL DEFAULT FALSE'))
+        session.execute(text('ALTER TABLE synology_approved_share ADD COLUMN IF NOT EXISTS "QkaManagedEnabledAt" TIMESTAMPTZ NULL'))
+        session.execute(text('ALTER TABLE synology_approved_share ADD COLUMN IF NOT EXISTS "QkaManagedEnabledByUserId" UUID NULL'))
         session.execute(
             text(
                 """

@@ -1,9 +1,10 @@
-"""Shared Synology document authorization (REST + MCP).
+"""Shared Synology document authorization (REST + MCP + Local AI Chat).
 
 Two layers:
   A) QKA login — verified Google + enabled allowlist (checked by callers via allowlist.evaluate_user)
-  B) QKA document access — personal source ACL OR corporate designated grant
+  B) QKA document access — Source ACL (AD/NAS) OR QKA Managed (explicit grants)
 
+QKA Managed does not require a linked AD identity or NAS account.
 Never treat SMB service-account read authority as an employee grant.
 Never merge Google and AD identities by email.
 """
@@ -19,8 +20,18 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from qka_shared.acl import SourceAclState, evaluate_needles
-from qka_shared.allowlist import ACCOUNT_ENABLED, LINKED, PROVIDER_AD
-from qka_shared.models import QkaUser, SourceGrant, SourceScope, SynologyDocumentContent, SynologyFileInventory
+from qka_shared.allowlist import ACCOUNT_ENABLED, LINKED, PROVIDER_AD, PROVIDER_GOOGLE
+from qka_shared.models import (
+    QkaUser,
+    SourceGrant,
+    SourceScope,
+    SynologyApprovedShare,
+    SynologyDocumentContent,
+    SynologyFileInventory,
+)
+
+ACCESS_MODEL_SOURCE_ACL = 0
+ACCESS_MODEL_QKA_MANAGED = 1
 
 
 class TrustClass(IntEnum):
@@ -182,6 +193,37 @@ def grant_matches_path(grant: SourceGrant, scope: SourceScope, relative_path_nor
     return False
 
 
+def is_authorized_managed_scope(scope: SourceScope) -> bool:
+    return (
+        scope.trust_class == TrustClass.CORPORATE_DESIGNATED
+        and scope.status == ScopeStatus.ACTIVE
+        and bool(scope.service_read_verified)
+        and bool((scope.approval_reference or "").strip())
+        and scope.approved_at is not None
+    )
+
+
+def share_is_qka_managed(share: SynologyApprovedShare | None) -> bool:
+    if share is None:
+        return False
+    if int(getattr(share, "access_model", ACCESS_MODEL_SOURCE_ACL) or ACCESS_MODEL_SOURCE_ACL) != ACCESS_MODEL_QKA_MANAGED:
+        return False
+    return (
+        bool(getattr(share, "qka_managed_service_read_verified", False))
+        and bool((getattr(share, "qka_managed_approval_reference", "") or "").strip())
+        and getattr(share, "qka_managed_enabled_at", None) is not None
+    )
+
+
+def has_verified_google_identity(user: QkaUser) -> bool:
+    return any(
+        identity.provider == PROVIDER_GOOGLE
+        and identity.link_status == LINKED
+        and identity.account_status == ACCOUNT_ENABLED
+        for identity in (user.identities or [])
+    )
+
+
 def load_active_corporate_scopes(
     session: Session,
     *,
@@ -211,6 +253,129 @@ def load_active_grant(session: Session, scope_id: uuid.UUID, user_id: uuid.UUID)
     ).scalar_one_or_none()
 
 
+def _load_share_grants_for_user(
+    session: Session,
+    share_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> list[tuple[SourceScope, SourceGrant]]:
+    scopes = session.execute(
+        select(SourceScope).where(
+            SourceScope.approved_share_id == share_id,
+            SourceScope.status == ScopeStatus.ACTIVE,
+        )
+    ).scalars().all()
+    if not scopes:
+        return []
+    by_id = {row.id: row for row in scopes}
+    grants = session.execute(
+        select(SourceGrant).where(
+            SourceGrant.scope_id.in_(list(by_id)),
+            SourceGrant.qka_user_id == user_id,
+            SourceGrant.status.in_((GrantStatus.ACTIVE, GrantStatus.DISABLED)),
+        )
+    ).scalars().all()
+    return [(by_id[grant.scope_id], grant) for grant in grants if grant.scope_id in by_id]
+
+
+def _deny(
+    *,
+    reason: str,
+    qka_grant: str = "none",
+    source_permission: str = "n/a",
+    covering_scope_id: uuid.UUID | None = None,
+    grant_id: uuid.UUID | None = None,
+) -> EffectiveAccess:
+    return EffectiveAccess(
+        allowed=False,
+        qka_grant=qka_grant,
+        source_permission=source_permission,
+        effective="deny",
+        denial_reason=reason,
+        covering_scope_id=covering_scope_id,
+        grant_id=grant_id,
+    )
+
+
+def _evaluate_qka_managed_grants(
+    pairs: list[tuple[SourceScope, SourceGrant]],
+    *,
+    relative_path: str,
+    extension: str,
+    capability: str,
+    source_permission: str,
+) -> EffectiveAccess:
+    missing_cap: tuple[SourceScope, SourceGrant] | None = None
+    type_mismatch: tuple[SourceScope, SourceGrant] | None = None
+    outside: tuple[SourceScope, SourceGrant] | None = None
+    disabled: tuple[SourceScope, SourceGrant] | None = None
+    for scope, grant in pairs:
+        if grant.status == GrantStatus.DISABLED:
+            disabled = (scope, grant)
+            continue
+        if grant.status != GrantStatus.ACTIVE:
+            continue
+        if not grant_matches_path(grant, scope, relative_path):
+            outside = (scope, grant)
+            continue
+        if not grant_matches_file_type(grant, extension):
+            type_mismatch = (scope, grant)
+            continue
+        if not grant_has_capability(grant, capability):
+            missing_cap = (scope, grant)
+            continue
+        return EffectiveAccess(
+            allowed=True,
+            qka_grant="qka_managed",
+            source_permission=source_permission,
+            effective="allow",
+            denial_reason=None,
+            covering_scope_id=scope.id,
+            grant_id=grant.id,
+        )
+    if missing_cap is not None:
+        scope, grant = missing_cap
+        reason = (
+            "download_requires_explicit_grant"
+            if capability == Capability.DOWNLOAD
+            else "grant_missing_capability"
+        )
+        return _deny(
+            reason=reason,
+            qka_grant="insufficient_capability",
+            source_permission=source_permission,
+            covering_scope_id=scope.id,
+            grant_id=grant.id,
+        )
+    if type_mismatch is not None:
+        scope, grant = type_mismatch
+        return _deny(
+            reason="file_type_not_permitted",
+            qka_grant="none",
+            source_permission=source_permission,
+            covering_scope_id=scope.id,
+            grant_id=grant.id,
+        )
+    if outside is not None:
+        scope, grant = outside
+        return _deny(
+            reason="outside_allowed_scope",
+            qka_grant="none",
+            source_permission=source_permission,
+            covering_scope_id=scope.id,
+            grant_id=grant.id,
+        )
+    if disabled is not None:
+        scope, grant = disabled
+        return _deny(
+            reason="qka_grant_disabled",
+            qka_grant="disabled",
+            source_permission=source_permission,
+            covering_scope_id=scope.id,
+            grant_id=grant.id,
+        )
+    return _deny(reason="qka_grant_missing", source_permission=source_permission)
+
+
 def evaluate_document_access(
     session: Session,
     user: QkaUser,
@@ -226,13 +391,7 @@ def evaluate_document_access(
     if not wants_download:
         content_ok = content.status == 1 and bool(content.extracted_text)
         if not content_ok:
-            return EffectiveAccess(
-                allowed=False,
-                qka_grant="none",
-                source_permission="n/a",
-                effective="deny",
-                denial_reason="content_not_verified",
-            )
+            return _deny(reason="content_not_verified")
 
     needles = acl_needles(user)
     source_acl = evaluate_needles(inventory, needles)
@@ -242,63 +401,40 @@ def evaluate_document_access(
         SourceAclState.ALLOWED: "allowed",
     }[source_acl]
 
-    # Explicit source DENY always overrides any QKA grant.
-    if source_acl == SourceAclState.DENIED:
-        return EffectiveAccess(
-            allowed=False,
+    # Explicit source DENY overrides grants only when an AD identity can be matched.
+    if needles and source_acl == SourceAclState.DENIED:
+        return _deny(
+            reason="source_acl_deny",
             qka_grant="blocked_by_source_deny",
             source_permission=source_label,
-            effective="deny",
-            denial_reason="source_acl_deny",
         )
 
-    scopes = load_active_corporate_scopes(
+    share = session.get(SynologyApprovedShare, content.approved_share_id)
+    corporate = load_active_corporate_scopes(
         session,
         approved_share_id=content.approved_share_id,
         relative_path_normalized=content.relative_path_normalized,
     )
-    matched_grant_missing_cap = False
-    matched_scope_id: uuid.UUID | None = None
-    matched_grant_id: uuid.UUID | None = None
-    for scope in scopes:
-        if not scope.service_read_verified:
-            continue
-        if not scope.approval_reference.strip() or scope.approved_at is None:
-            continue
-        grant = load_active_grant(session, scope.id, user.id)
-        if grant is None:
-            continue
-        if not grant_matches_path(grant, scope, content.relative_path_normalized):
-            continue
-        if not grant_matches_file_type(grant, content.extension):
-            continue
-        if not grant_has_capability(grant, cap):
-            matched_grant_missing_cap = True
-            matched_scope_id = scope.id
-            matched_grant_id = grant.id
-            continue
-        return EffectiveAccess(
-            allowed=True,
-            qka_grant="corporate_delegated",
-            source_permission=source_label,
-            effective="allow",
-            denial_reason=None,
-            covering_scope_id=scope.id,
-            grant_id=grant.id,
+    authorized_corporate = [row for row in corporate if is_authorized_managed_scope(row)]
+    qka_managed = share_is_qka_managed(share) or bool(authorized_corporate)
+    managed_permission = source_label if needles else "qka_managed"
+
+    if qka_managed:
+        if not has_verified_google_identity(user):
+            return _deny(reason="pending_google_identity", source_permission=managed_permission)
+        pairs = _load_share_grants_for_user(session, content.approved_share_id, user.id)
+        if not share_is_qka_managed(share):
+            allowed_ids = {row.id for row in authorized_corporate}
+            pairs = [(scope, grant) for scope, grant in pairs if scope.id in allowed_ids]
+        return _evaluate_qka_managed_grants(
+            pairs,
+            relative_path=content.relative_path_normalized,
+            extension=content.extension,
+            capability=cap,
+            source_permission=managed_permission,
         )
 
-    if matched_grant_missing_cap:
-        return EffectiveAccess(
-            allowed=False,
-            qka_grant="insufficient_capability",
-            source_permission=source_label,
-            effective="deny",
-            denial_reason="grant_missing_capability",
-            covering_scope_id=matched_scope_id,
-            grant_id=matched_grant_id,
-        )
-
-    # Personal source ACL authorizes VIEW (indexed search/preview) only — never Download.
+    # Source ACL mode: personal NAS/AD rights authorize VIEW only — never Download.
     if not wants_download and source_acl == SourceAclState.ALLOWED:
         return EffectiveAccess(
             allowed=True,
@@ -315,14 +451,8 @@ def evaluate_document_access(
     elif source_acl == SourceAclState.MISSING:
         reason = "source_acl_unknown_or_stale"
     else:
-        reason = "no_qka_grant_and_no_source_acl"
-    return EffectiveAccess(
-        allowed=False,
-        qka_grant="none",
-        source_permission=source_label,
-        effective="deny",
-        denial_reason=reason,
-    )
+        reason = "source_policy_not_configured"
+    return _deny(reason=reason, source_permission=source_label)
 
 
 def authorize_document(

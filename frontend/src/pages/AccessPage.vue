@@ -194,8 +194,8 @@
                         :color="effective?.sampleDocument?.allowed ? 'positive' : 'negative'"
                         :label="(effective?.sampleDocument?.effectiveAccess || 'deny').toUpperCase()"
                       />
-                      <div v-if="effective?.sampleDocument?.denialReason" class="q-mt-xs text-grey-7">
-                        {{ effective.sampleDocument.denialReason }}
+                      <div v-if="effectiveDenialLabel" class="q-mt-xs text-grey-7">
+                        {{ effectiveDenialLabel }}
                       </div>
                     </div>
                   </div>
@@ -220,6 +220,12 @@
                     class="q-mb-md"
                     @update:model-value="onShareSelected"
                   />
+                  <div v-if="selectedShare?.accessModel === 'qka_managed'" class="text-caption text-positive q-mb-md">
+                    {{ t("access.qkaManagedStatus") }}
+                  </div>
+                  <div v-else-if="selectedShare" class="text-caption text-grey-7 q-mb-md">
+                    {{ t("access.sourceAclStatus") }}
+                  </div>
 
                   <div class="text-subtitle2 q-mb-sm">{{ t("access.accessScope") }}</div>
                   <q-btn-toggle
@@ -314,8 +320,10 @@
                       {{ t("access.effective") }}:
                       {{
                         effective?.sampleDocument?.allowed
-                          ? t("access.effectiveAllowConfigured")
-                          : effective?.sampleDocument?.denialReason || t("access.effectiveDenySource")
+                          ? selectedShare?.accessModel === "qka_managed"
+                            ? t("access.effectiveAllowManaged")
+                            : t("access.effectiveAllowConfigured")
+                          : effectiveDenialLabel || t("access.effectiveDenySource")
                       }}
                     </div>
                   </q-banner>
@@ -463,6 +471,8 @@ const eligibility = ref<{
   scopes: SourceScope[];
   reason: string | null;
   authorizedForDelegation?: boolean;
+  accessModel?: "source_acl" | "qka_managed";
+  configurationStatus?: string;
 } | null>(null);
 const effective = ref<SourceEffective | null>(null);
 const pathMode = ref<"all" | "selected">("all");
@@ -554,6 +564,16 @@ const shareOptions = computed(() =>
 );
 const selectedEmployee = computed(() => employees.value.find((e) => e.allowlistId === selectedAllowlistId.value) || null);
 const selectedShare = computed(() => sources.value.find((s) => s.approvedShareId === selectedShareId.value) || null);
+const effectiveDenialLabel = computed(() => {
+  const code = effective.value?.sampleDocument?.denialReason;
+  if (!code) return "";
+  if (selectedShare.value?.accessModel === "qka_managed" && code === "no_linked_ad_identity") {
+    return t("access.denial.qka_grant_missing");
+  }
+  const key = `access.denial.${code}`;
+  const label = t(key);
+  return label === key ? code : label;
+});
 
 const allFileTypeValues = computed(() => fileTypeOptions.map((ft) => ft.value));
 const allFileTypesSelected = computed(

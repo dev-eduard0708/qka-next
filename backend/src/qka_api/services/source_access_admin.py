@@ -25,14 +25,18 @@ from qka_shared.models import (
     SynologyFileInventory,
 )
 from qka_shared.source_access import (
+    ACCESS_MODEL_QKA_MANAGED,
+    ACCESS_MODEL_SOURCE_ACL,
     FILE_TYPE_EXTENSIONS,
     GrantStatus,
     PathMode,
     ScopeStatus,
     TrustClass,
     evaluate_document_access,
+    is_authorized_managed_scope,
     normalize_prefix,
     parse_json_list,
+    share_is_qka_managed,
     under_prefix,
 )
 
@@ -101,6 +105,48 @@ def _audit(
             created_at=_now(),
         )
     )
+
+
+def _mark_share_qka_managed(
+    share: SynologyApprovedShare,
+    actor: QkaUser,
+    *,
+    approval_reference: str,
+    owner_name: str,
+    owner_email: str,
+    notes: str = "",
+) -> None:
+    now = _now()
+    share.access_model = ACCESS_MODEL_QKA_MANAGED
+    share.qka_managed_approval_reference = (approval_reference or "").strip()[:512]
+    share.qka_managed_owner_name = (owner_name or "").strip()[:256]
+    share.qka_managed_owner_email = (owner_email or "").strip()[:256]
+    share.qka_managed_notes = (notes or "").strip()[:2000]
+    share.qka_managed_service_read_verified = True
+    share.qka_managed_enabled_at = now
+    share.qka_managed_enabled_by_user_id = actor.id
+    share.updated_at = now
+    share.updated_by_user_id = actor.id
+
+
+def _clear_share_qka_managed_if_unused(session: Session, share_id: uuid.UUID) -> None:
+    remaining = session.execute(
+        select(SourceScope).where(
+            SourceScope.approved_share_id == share_id,
+            SourceScope.status == ScopeStatus.ACTIVE,
+            SourceScope.trust_class == TrustClass.CORPORATE_DESIGNATED,
+        )
+    ).scalars().all()
+    if any(is_authorized_managed_scope(row) for row in remaining):
+        return
+    share = session.get(SynologyApprovedShare, share_id)
+    if share is None:
+        return
+    share.access_model = ACCESS_MODEL_SOURCE_ACL
+    share.qka_managed_service_read_verified = False
+    share.qka_managed_enabled_at = None
+    share.qka_managed_enabled_by_user_id = None
+    share.updated_at = _now()
 
 
 def _scope_dto(row: SourceScope) -> dict:
@@ -265,14 +311,7 @@ def list_sources(session: Session, settings: Settings) -> list[dict]:
             )
         )
         share_scopes = by_share.get(share.id, [])
-        qka_managed = [
-            s
-            for s in share_scopes
-            if s.trust_class == TrustClass.CORPORATE_DESIGNATED
-            and s.service_read_verified
-            and bool(s.approval_reference.strip())
-            and s.approved_at is not None
-        ]
+        qka_managed = share_is_qka_managed(share) or any(is_authorized_managed_scope(s) for s in share_scopes)
         result.append(
             {
                 "approvedShareId": str(share.id),
@@ -283,7 +322,8 @@ def list_sources(session: Session, settings: Settings) -> list[dict]:
                 "isConfiguredPilotShare": settings.approved_share_id is not None and share.id == settings.approved_share_id,
                 "scopes": [_scope_dto(s) for s in share_scopes],
                 "accessModel": "qka_managed" if qka_managed else "source_acl",
-                "eligibleForGrants": bool(qka_managed),
+                "eligibleForGrants": True,
+                "authorizedForDelegation": qka_managed,
             }
         )
     return result
@@ -296,26 +336,21 @@ def eligible_scopes_for_share(session: Session, share_id: uuid.UUID) -> dict:
     under Synology Access Policy. Rules may be prepared even when QKA Managed is inactive;
     Effective Access stays Denied until the source is authorized.
     """
+    share = session.get(SynologyApprovedShare, share_id)
     scopes = session.execute(
         select(SourceScope).where(
             SourceScope.approved_share_id == share_id,
             SourceScope.status == ScopeStatus.ACTIVE,
         )
     ).scalars().all()
-    managed = [
-        s
-        for s in scopes
-        if s.trust_class == TrustClass.CORPORATE_DESIGNATED
-        and s.service_read_verified
-        and s.approval_reference.strip()
-        and s.approved_at is not None
-    ]
+    managed = share_is_qka_managed(share) or any(is_authorized_managed_scope(s) for s in scopes)
     return {
-        "eligible": bool(managed),
+        "eligible": True,
         "accessModel": "qka_managed" if managed else "source_acl",
-        "scopes": [_scope_dto(s) for s in (managed or scopes)],
+        "scopes": [_scope_dto(s) for s in scopes],
         "reason": None,
-        "authorizedForDelegation": bool(managed),
+        "authorizedForDelegation": managed,
+        "configurationStatus": "qka_managed" if managed else "source_acl",
     }
 
 
@@ -418,10 +453,8 @@ def create_corporate_scope(
     service_read_verified: bool,
 ) -> SourceScope:
     prefix = normalize_prefix(folder_prefix)
-    if not prefix:
-        raise ValueError("Folder prefix is required.")
     if not approval_reference.strip():
-        raise ValueError("Approval reference is required for corporate designation.")
+        raise ValueError("Approval reference is required for QKA Managed authorization.")
     if not source_owner_name.strip():
         raise ValueError("Source owner name is required.")
     owner_email, email_err = try_normalize(source_owner_email)
@@ -462,12 +495,21 @@ def create_corporate_scope(
         existing.service_read_verified = True
         existing.updated_at = now
         session.flush()
+        _mark_share_qka_managed(
+            share,
+            actor,
+            approval_reference=existing.approval_reference,
+            owner_name=existing.source_owner_name,
+            owner_email=existing.source_owner_email,
+            notes=existing.approval_notes,
+        )
         _audit(
             session,
             action="activate_qka_managed_scope",
             actor_id=actor.id,
             scope_id=existing.id,
             detail=f"prefix={prefix}; ref={existing.approval_reference}; owner={owner_email}",
+            share_name=share.share_name,
         )
         return existing
 
@@ -490,12 +532,21 @@ def create_corporate_scope(
     )
     session.add(row)
     session.flush()
+    _mark_share_qka_managed(
+        share,
+        actor,
+        approval_reference=row.approval_reference,
+        owner_name=row.source_owner_name,
+        owner_email=row.source_owner_email,
+        notes=row.approval_notes,
+    )
     _audit(
         session,
         action="register_corporate_scope",
         actor_id=actor.id,
         scope_id=row.id,
         detail=f"prefix={prefix}; ref={row.approval_reference}; owner={owner_email}",
+        share_name=share.share_name,
     )
     return row
 
@@ -512,6 +563,7 @@ def revoke_scope(session: Session, actor: QkaUser, scope_id: uuid.UUID) -> Sourc
             grant.updated_at = row.updated_at
             grant.updated_by_user_id = actor.id
     session.flush()
+    _clear_share_qka_managed_if_unused(session, row.approved_share_id)
     _audit(session, action="revoke_scope", actor_id=actor.id, scope_id=row.id, detail="scope revoked")
     return row
 

@@ -89,6 +89,7 @@ export type SourceSource = {
   scopes: SourceScope[];
   accessModel?: "source_acl" | "qka_managed";
   eligibleForGrants?: boolean;
+  authorizedForDelegation?: boolean;
 };
 
 export type SourceFolderNode = {

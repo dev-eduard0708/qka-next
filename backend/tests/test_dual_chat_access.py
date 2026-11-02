@@ -146,22 +146,22 @@ def test_source_acl_model_blocks_grants_until_qka_managed(client):
     body = eligible.json()
     # No corporate approval warning; rules may be prepared without QKA Managed.
     assert body.get("reason") in (None, "")
-    if not body["eligible"]:
-        assert body["accessModel"] == "source_acl"
-        prepared = client.post(
-            "/api/v1/access/source/grants",
-            headers=headers,
-            json={
-                "approvedShareId": str(SHARE_ID),
-                "qkaUserId": str(GOOGLE_ONLY_USER),
-                "allowlistId": str(ALLOW_EMAIL_EDUARD),
-                "capabilityView": True,
-                "capabilityDownload": False,
-            },
-        )
-        assert prepared.status_code == 200, prepared.text
-        # Without QKA Managed authorization, search still denies for Google-only user.
-        client.cookies.clear()
-        search = client.get("/api/v1/search", params={"q": "Laptop"}, cookies=auth_cookies(GOOGLE_ONLY_USER))
-        assert search.status_code == 200
-        assert search.json()["results"] == []
+    assert body["accessModel"] == "source_acl"
+    assert body.get("authorizedForDelegation") is False
+    prepared = client.post(
+        "/api/v1/access/source/grants",
+        headers=headers,
+        json={
+            "approvedShareId": str(SHARE_ID),
+            "qkaUserId": str(GOOGLE_ONLY_USER),
+            "allowlistId": str(ALLOW_EMAIL_EDUARD),
+            "capabilityView": True,
+            "capabilityDownload": False,
+        },
+    )
+    assert prepared.status_code == 200, prepared.text
+    # Without QKA Managed authorization, search still denies for Google-only user.
+    client.cookies.clear()
+    search = client.get("/api/v1/search", params={"q": "Laptop"}, cookies=auth_cookies(GOOGLE_ONLY_USER))
+    assert search.status_code == 200
+    assert search.json()["results"] == []

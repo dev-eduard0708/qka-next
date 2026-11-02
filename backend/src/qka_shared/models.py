@@ -309,6 +309,15 @@ class SynologyApprovedShare(Base):
     last_preview_at: Mapped[datetime | None] = mapped_column("LastPreviewAt", DateTime(timezone=True), nullable=True)
     last_successful_sync_at: Mapped[datetime | None] = mapped_column("LastSuccessfulSyncAt", DateTime(timezone=True), nullable=True)
     updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column("UpdatedByUserId", Uuid(as_uuid=True), nullable=True)
+    # 0 = Source ACL (AD/NAS); 1 = QKA Managed (Google identity + explicit grants). Default stays Source ACL.
+    access_model: Mapped[int] = mapped_column("AccessModel", Integer, default=0)
+    qka_managed_approval_reference: Mapped[str] = mapped_column("QkaManagedApprovalReference", String(512), default="")
+    qka_managed_owner_name: Mapped[str] = mapped_column("QkaManagedOwnerName", String(256), default="")
+    qka_managed_owner_email: Mapped[str] = mapped_column("QkaManagedOwnerEmail", String(256), default="")
+    qka_managed_notes: Mapped[str] = mapped_column("QkaManagedNotes", String(2000), default="")
+    qka_managed_service_read_verified: Mapped[bool] = mapped_column("QkaManagedServiceReadVerified", Boolean, default=False)
+    qka_managed_enabled_at: Mapped[datetime | None] = mapped_column("QkaManagedEnabledAt", DateTime(timezone=True), nullable=True)
+    qka_managed_enabled_by_user_id: Mapped[uuid.UUID | None] = mapped_column("QkaManagedEnabledByUserId", Uuid(as_uuid=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column("CreatedAt", DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column("UpdatedAt", DateTime(timezone=True))
 

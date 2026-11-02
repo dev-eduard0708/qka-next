@@ -47,7 +47,7 @@ class UpdateUserRequest(BaseModel):
 
 class RegisterCorporateScopeRequest(BaseModel):
     approvedShareId: uuid.UUID
-    folderPrefix: str
+    folderPrefix: str = ""
     displayName: str = ""
     sourceOwnerName: str
     sourceOwnerEmail: str
