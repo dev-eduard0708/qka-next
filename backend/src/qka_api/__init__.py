@@ -1,0 +1,1 @@
+"""QKA-Next FastAPI application."""

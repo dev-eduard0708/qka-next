@@ -1,0 +1,29 @@
+{
+  "name": "qka-next-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5186",
+    "build": "vue-tsc -b && vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 4186",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@quasar/extras": "^1.17.0",
+    "pinia": "^3.0.3",
+    "quasar": "^2.18.2",
+    "vue": "^3.5.22",
+    "vue-i18n": "^11.1.12",
+    "vue-router": "^4.6.3"
+  },
+  "devDependencies": {
+    "@quasar/vite-plugin": "^1.10.0",
+    "@vitejs/plugin-vue": "^6.0.1",
+    "sass-embedded": "^1.93.2",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.12",
+    "vitest": "^3.2.4",
+    "vue-tsc": "^3.1.1"
+  }
+}

@@ -1,0 +1,370 @@
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, Uuid
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class QkaUser(Base):
+    __tablename__ = "qka_user"
+
+    id: Mapped[uuid.UUID] = mapped_column("Id", Uuid(as_uuid=True), primary_key=True)
+    display_name: Mapped[str] = mapped_column("DisplayName", String(256))
+    status: Mapped[int] = mapped_column("Status", Integer, default=0)
+    effective_department_id: Mapped[uuid.UUID | None] = mapped_column("EffectiveDepartmentId", Uuid(as_uuid=True), nullable=True)
+    login_enabled: Mapped[bool] = mapped_column("LoginEnabled", Boolean, default=False)
+    is_directory_operator: Mapped[bool] = mapped_column("IsDirectoryOperator", Boolean, default=False)
+    is_super_admin: Mapped[bool] = mapped_column("IsSuperAdmin", Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column("CreatedAt", DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column("UpdatedAt", DateTime(timezone=True))
+
+    identities: Mapped[list[ExternalIdentity]] = relationship(back_populates="user")
+    memberships: Mapped[list[DepartmentMembership]] = relationship(back_populates="user")
+
+
+class ExternalIdentity(Base):
+    __tablename__ = "external_identity"
+
+    id: Mapped[uuid.UUID] = mapped_column("Id", Uuid(as_uuid=True), primary_key=True)
+    qka_user_id: Mapped[uuid.UUID | None] = mapped_column("QkaUserId", Uuid(as_uuid=True), ForeignKey("qka_user.Id"), nullable=True)
+    provider: Mapped[int] = mapped_column("Provider", Integer)
+    stable_external_id: Mapped[str] = mapped_column("StableExternalId", String(128))
+    domain_username: Mapped[str | None] = mapped_column("DomainUsername", String(256), nullable=True)
+    upn: Mapped[str | None] = mapped_column("Upn", String(256), nullable=True)
+    primary_email: Mapped[str | None] = mapped_column("PrimaryEmail", String(256), nullable=True)
+    account_status: Mapped[int] = mapped_column("AccountStatus", Integer, default=0)
+    link_status: Mapped[int] = mapped_column("LinkStatus", Integer, default=0)
+    directory_presence: Mapped[int] = mapped_column("DirectoryPresence", Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column("CreatedAt", DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column("UpdatedAt", DateTime(timezone=True))
+
+    user: Mapped[QkaUser | None] = relationship(back_populates="identities")
+    google: Mapped[GoogleWorkspaceAccount | None] = relationship(back_populates="identity")
+
+
+class GoogleWorkspaceAccount(Base):
+    __tablename__ = "google_workspace_account"
+
+    id: Mapped[uuid.UUID] = mapped_column("Id", Uuid(as_uuid=True), primary_key=True)
+    external_identity_id: Mapped[uuid.UUID] = mapped_column("ExternalIdentityId", Uuid(as_uuid=True), ForeignKey("external_identity.Id"))
+    google_user_id: Mapped[str] = mapped_column("GoogleUserId", String(128))
+    primary_email: Mapped[str] = mapped_column("PrimaryEmail", String(256))
+    drive_onboarded: Mapped[bool] = mapped_column("DriveOnboarded", Boolean, default=False)
+
+    identity: Mapped[ExternalIdentity] = relationship(back_populates="google")
+
+
+class Department(Base):
+    __tablename__ = "department"
+
+    id: Mapped[uuid.UUID] = mapped_column("Id", Uuid(as_uuid=True), primary_key=True)
+    status: Mapped[int] = mapped_column("Status", Integer, default=0)
+
+
+class DepartmentMembership(Base):
+    __tablename__ = "department_membership"
+
+    id: Mapped[uuid.UUID] = mapped_column("Id", Uuid(as_uuid=True), primary_key=True)
+    qka_user_id: Mapped[uuid.UUID] = mapped_column("QkaUserId", Uuid(as_uuid=True), ForeignKey("qka_user.Id"))
+    department_id: Mapped[uuid.UUID | None] = mapped_column("DepartmentId", Uuid(as_uuid=True), ForeignKey("department.Id"), nullable=True)
+
+    user: Mapped[QkaUser] = relationship(back_populates="memberships")
+
+
+class AdSecurityGroup(Base):
+    __tablename__ = "ad_security_group"
+
+    id: Mapped[uuid.UUID] = mapped_column("Id", Uuid(as_uuid=True), primary_key=True)
+    is_active: Mapped[bool] = mapped_column("IsActive", Boolean, default=True)
+
+
+class AdGroupMembership(Base):
+    __tablename__ = "ad_group_membership"
+
+    id: Mapped[uuid.UUID] = mapped_column("Id", Uuid(as_uuid=True), primary_key=True)
+    external_identity_id: Mapped[uuid.UUID] = mapped_column("ExternalIdentityId", Uuid(as_uuid=True), ForeignKey("external_identity.Id"))
+    ad_security_group_id: Mapped[uuid.UUID] = mapped_column("AdSecurityGroupId", Uuid(as_uuid=True), ForeignKey("ad_security_group.Id"))
+
+
+class AccessPolicy(Base):
+    __tablename__ = "access_policy"
+
+    id: Mapped[uuid.UUID] = mapped_column("Id", Uuid(as_uuid=True), primary_key=True)
+    effect: Mapped[int] = mapped_column("Effect", Integer)
+    scope_kind: Mapped[int] = mapped_column("ScopeKind", Integer)
+    resource_id: Mapped[uuid.UUID | None] = mapped_column("ResourceId", Uuid(as_uuid=True), nullable=True)
+    owner_qka_user_id: Mapped[uuid.UUID | None] = mapped_column("OwnerQkaUserId", Uuid(as_uuid=True), nullable=True)
+    target_kind: Mapped[int] = mapped_column("TargetKind", Integer)
+    target_id: Mapped[uuid.UUID] = mapped_column("TargetId", Uuid(as_uuid=True))
+    status: Mapped[int] = mapped_column("Status", Integer, default=0)
+
+
+class AllowedEmail(Base):
+    __tablename__ = "allowed_email"
+
+    id: Mapped[uuid.UUID] = mapped_column("Id", Uuid(as_uuid=True), primary_key=True)
+    email: Mapped[str] = mapped_column("Email", String(256))
+    email_normalized: Mapped[str] = mapped_column("EmailNormalized", String(256))
+    enabled: Mapped[bool] = mapped_column("Enabled", Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column("CreatedAt", DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column("UpdatedAt", DateTime(timezone=True))
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column("CreatedByUserId", Uuid(as_uuid=True), nullable=True)
+    updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column("UpdatedByUserId", Uuid(as_uuid=True), nullable=True)
+
+
+class LocalLogin(Base):
+    __tablename__ = "qka_next_local_login"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    username: Mapped[str] = mapped_column(String(64), unique=True)
+    password_hash: Mapped[str] = mapped_column(String(256))
+    qka_user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), ForeignKey("qka_user.Id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class McpToolAudit(Base):
+    """Append-only MCP tool execution audit for QKA-Next (no secrets / no document bodies)."""
+
+    __tablename__ = "qka_next_mcp_tool_audit"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    tool_name: Mapped[str] = mapped_column(String(64))
+    qka_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    succeeded: Mapped[bool] = mapped_column(Boolean, default=False)
+    error_category: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    detail: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class SynologyConnectionSettings(Base):
+    __tablename__ = "synology_connection_settings"
+
+    id: Mapped[uuid.UUID] = mapped_column("Id", Uuid(as_uuid=True), primary_key=True)
+    host_name: Mapped[str] = mapped_column("HostName", String(256), default="")
+    connection_name: Mapped[str | None] = mapped_column("ConnectionName", String(256), nullable=True)
+    configured_shared_folder_path: Mapped[str] = mapped_column("ConfiguredSharedFolderPath", String(1024), default="")
+    primary_approved_share_id: Mapped[uuid.UUID | None] = mapped_column("PrimaryApprovedShareId", Uuid(as_uuid=True), nullable=True)
+    auth_mode: Mapped[int] = mapped_column("AuthMode", Integer, default=0)
+    service_account_user_name: Mapped[str | None] = mapped_column("ServiceAccountUserName", String(256), nullable=True)
+    service_account_secret_protected: Mapped[bytes | None] = mapped_column("ServiceAccountSecretProtected", LargeBinary, nullable=True)
+    connection_status: Mapped[int] = mapped_column("ConnectionStatus", Integer, default=0)
+    port445_reachable: Mapped[bool | None] = mapped_column("Port445Reachable", Boolean, nullable=True)
+    authenticated_share_access: Mapped[bool | None] = mapped_column("AuthenticatedShareAccess", Boolean, nullable=True)
+    last_successful_test_at: Mapped[datetime | None] = mapped_column("LastSuccessfulTestAt", DateTime(timezone=True), nullable=True)
+    last_safe_error: Mapped[str | None] = mapped_column("LastSafeError", String(1024), nullable=True)
+    updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column("UpdatedByUserId", Uuid(as_uuid=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column("UpdatedAt", DateTime(timezone=True))
+
+
+class SynologyApprovedShare(Base):
+    __tablename__ = "synology_approved_share"
+
+    id: Mapped[uuid.UUID] = mapped_column("Id", Uuid(as_uuid=True), primary_key=True)
+    share_name: Mapped[str] = mapped_column("ShareName", String(128))
+    share_name_normalized: Mapped[str] = mapped_column("ShareNameNormalized", String(128))
+    folder_relative_path: Mapped[str] = mapped_column("FolderRelativePath", String(1024), default="")
+    folder_relative_path_normalized: Mapped[str] = mapped_column("FolderRelativePathNormalized", String(1024), default="")
+    is_active: Mapped[bool] = mapped_column("IsActive", Boolean, default=True)
+    acl_capture_status: Mapped[int] = mapped_column("AclCaptureStatus", Integer, default=0)
+    last_safe_error: Mapped[str | None] = mapped_column("LastSafeError", String(1024), nullable=True)
+    last_access_test_at: Mapped[datetime | None] = mapped_column("LastAccessTestAt", DateTime(timezone=True), nullable=True)
+    last_preview_at: Mapped[datetime | None] = mapped_column("LastPreviewAt", DateTime(timezone=True), nullable=True)
+    last_successful_sync_at: Mapped[datetime | None] = mapped_column("LastSuccessfulSyncAt", DateTime(timezone=True), nullable=True)
+    updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column("UpdatedByUserId", Uuid(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column("CreatedAt", DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column("UpdatedAt", DateTime(timezone=True))
+
+
+class SynologySyncSettings(Base):
+    __tablename__ = "synology_sync_settings"
+
+    id: Mapped[uuid.UUID] = mapped_column("Id", Uuid(as_uuid=True), primary_key=True)
+    current_job_id: Mapped[uuid.UUID | None] = mapped_column("CurrentJobId", Uuid(as_uuid=True), nullable=True)
+    last_successful_job_id: Mapped[uuid.UUID | None] = mapped_column("LastSuccessfulJobId", Uuid(as_uuid=True), nullable=True)
+    last_successful_sync_at: Mapped[datetime | None] = mapped_column("LastSuccessfulSyncAt", DateTime(timezone=True), nullable=True)
+    last_attempted_sync_at: Mapped[datetime | None] = mapped_column("LastAttemptedSyncAt", DateTime(timezone=True), nullable=True)
+    last_excel_count: Mapped[int] = mapped_column("LastExcelCount", Integer, default=0)
+    last_pdf_count: Mapped[int] = mapped_column("LastPdfCount", Integer, default=0)
+    last_word_count: Mapped[int] = mapped_column("LastWordCount", Integer, default=0)
+    last_powerpoint_count: Mapped[int] = mapped_column("LastPowerPointCount", Integer, default=0)
+    last_csv_count: Mapped[int] = mapped_column("LastCsvCount", Integer, default=0)
+    last_other_count: Mapped[int] = mapped_column("LastOtherCount", Integer, default=0)
+    last_total_files: Mapped[int] = mapped_column("LastTotalFiles", Integer, default=0)
+    last_total_bytes: Mapped[int] = mapped_column("LastTotalBytes", BigInteger, default=0)
+    updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column("UpdatedByUserId", Uuid(as_uuid=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column("UpdatedAt", DateTime(timezone=True))
+
+
+class SynologySyncJob(Base):
+    __tablename__ = "synology_sync_job"
+
+    id: Mapped[uuid.UUID] = mapped_column("Id", Uuid(as_uuid=True), primary_key=True)
+    trigger: Mapped[int] = mapped_column("Trigger", Integer, default=0)
+    status: Mapped[int] = mapped_column("Status", Integer, default=0)
+    approved_share_id: Mapped[uuid.UUID | None] = mapped_column("ApprovedShareId", Uuid(as_uuid=True), nullable=True)
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column("ActorUserId", Uuid(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column("CreatedAt", DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column("StartedAt", DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column("CompletedAt", DateTime(timezone=True), nullable=True)
+    enumeration_complete: Mapped[bool] = mapped_column("EnumerationComplete", Boolean, default=False)
+    current_operation: Mapped[str | None] = mapped_column("CurrentOperation", String(512), nullable=True)
+    scope_unc_root: Mapped[str] = mapped_column("ScopeUncRoot", String(1024), default="")
+    files_discovered: Mapped[int] = mapped_column("FilesDiscovered", Integer, default=0)
+    files_processed: Mapped[int] = mapped_column("FilesProcessed", Integer, default=0)
+    files_skipped: Mapped[int] = mapped_column("FilesSkipped", Integer, default=0)
+    files_failed: Mapped[int] = mapped_column("FilesFailed", Integer, default=0)
+    files_new: Mapped[int] = mapped_column("FilesNew", Integer, default=0)
+    files_modified: Mapped[int] = mapped_column("FilesModified", Integer, default=0)
+    files_unchanged: Mapped[int] = mapped_column("FilesUnchanged", Integer, default=0)
+    files_removed: Mapped[int] = mapped_column("FilesRemoved", Integer, default=0)
+    excel_count: Mapped[int] = mapped_column("ExcelCount", Integer, default=0)
+    pdf_count: Mapped[int] = mapped_column("PdfCount", Integer, default=0)
+    word_count: Mapped[int] = mapped_column("WordCount", Integer, default=0)
+    powerpoint_count: Mapped[int] = mapped_column("PowerPointCount", Integer, default=0)
+    csv_count: Mapped[int] = mapped_column("CsvCount", Integer, default=0)
+    other_count: Mapped[int] = mapped_column("OtherCount", Integer, default=0)
+    total_bytes: Mapped[int] = mapped_column("TotalBytes", BigInteger, default=0)
+    discovery_total: Mapped[int | None] = mapped_column("DiscoveryTotal", Integer, nullable=True)
+    safe_error: Mapped[str | None] = mapped_column("SafeError", String(1024), nullable=True)
+    cancel_requested: Mapped[bool] = mapped_column("CancelRequested", Boolean, default=False)
+
+
+class SynologySyncJobLease(Base):
+    __tablename__ = "synology_sync_job_lease"
+
+    id: Mapped[uuid.UUID] = mapped_column("Id", Uuid(as_uuid=True), primary_key=True)
+    owner_job_id: Mapped[uuid.UUID | None] = mapped_column("OwnerJobId", Uuid(as_uuid=True), nullable=True)
+    owner_instance_id: Mapped[str | None] = mapped_column("OwnerInstanceId", String(256), nullable=True)
+    acquired_at: Mapped[datetime | None] = mapped_column("AcquiredAt", DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column("ExpiresAt", DateTime(timezone=True), nullable=True)
+
+
+class SynologyFileInventory(Base):
+    __tablename__ = "synology_file_inventory"
+
+    id: Mapped[uuid.UUID] = mapped_column("Id", Uuid(as_uuid=True), primary_key=True)
+    approved_share_id: Mapped[uuid.UUID] = mapped_column("ApprovedShareId", Uuid(as_uuid=True))
+    relative_path: Mapped[str] = mapped_column("RelativePath", String(2048))
+    relative_path_normalized: Mapped[str] = mapped_column("RelativePathNormalized", String(2048))
+    file_name: Mapped[str] = mapped_column("FileName", String(512))
+    extension: Mapped[str] = mapped_column("Extension", String(32))
+    file_type_category: Mapped[int] = mapped_column("FileTypeCategory", Integer, default=0)
+    size_bytes: Mapped[int] = mapped_column("SizeBytes", BigInteger, default=0)
+    last_write_utc: Mapped[datetime | None] = mapped_column("LastWriteUtc", DateTime(timezone=True), nullable=True)
+    sync_status: Mapped[int] = mapped_column("SyncStatus", Integer, default=0)
+    acl_capture_status: Mapped[int] = mapped_column("AclCaptureStatus", Integer, default=0)
+    acl_snapshot_json: Mapped[str | None] = mapped_column("AclSnapshotJson", String(8000), nullable=True)
+    last_seen_job_id: Mapped[uuid.UUID | None] = mapped_column("LastSeenJobId", Uuid(as_uuid=True), nullable=True)
+    is_present: Mapped[bool] = mapped_column("IsPresent", Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column("CreatedAt", DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column("UpdatedAt", DateTime(timezone=True))
+
+
+class SynologyDocumentContent(Base):
+    __tablename__ = "synology_document_content"
+
+    id: Mapped[uuid.UUID] = mapped_column("Id", Uuid(as_uuid=True), primary_key=True)
+    inventory_file_id: Mapped[uuid.UUID] = mapped_column("InventoryFileId", Uuid(as_uuid=True))
+    approved_share_id: Mapped[uuid.UUID] = mapped_column("ApprovedShareId", Uuid(as_uuid=True))
+    relative_path_normalized: Mapped[str] = mapped_column("RelativePathNormalized", String(2048))
+    file_name: Mapped[str] = mapped_column("FileName", String(512))
+    extension: Mapped[str] = mapped_column("Extension", String(32))
+    status: Mapped[int] = mapped_column("Status", Integer, default=0)
+    extracted_text: Mapped[str | None] = mapped_column("ExtractedText", Text, nullable=True)
+    content_sha256: Mapped[str | None] = mapped_column("ContentSha256", String(64), nullable=True)
+    safe_error: Mapped[str | None] = mapped_column("SafeError", String(1024), nullable=True)
+    pilot_scoped: Mapped[bool] = mapped_column("PilotScoped", Boolean, default=False)
+    non_confidential: Mapped[bool] = mapped_column("NonConfidential", Boolean, default=False)
+    extracted_at: Mapped[datetime | None] = mapped_column("ExtractedAt", DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column("CreatedAt", DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column("UpdatedAt", DateTime(timezone=True))
+
+
+class AiConversation(Base):
+    """Native OpenAI chat conversation owned by one QKA user (QKA-Next only)."""
+
+    __tablename__ = "qka_next_ai_conversation"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    qka_user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    title: Mapped[str] = mapped_column(String(256), default="New chat")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    messages: Mapped[list["AiMessage"]] = relationship(back_populates="conversation", cascade="all, delete-orphan")
+
+
+class AiMessage(Base):
+    __tablename__ = "qka_next_ai_message"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("qka_next_ai_conversation.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(32))
+    content: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(32), default="complete")
+    error: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    conversation: Mapped[AiConversation] = relationship(back_populates="messages")
+    attachments: Mapped[list["AiMessageAttachment"]] = relationship(
+        back_populates="message", cascade="all, delete-orphan"
+    )
+
+
+class AiMessageAttachment(Base):
+    __tablename__ = "qka_next_ai_message_attachment"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    message_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("qka_next_ai_message.id", ondelete="CASCADE"), index=True
+    )
+    kind: Mapped[str] = mapped_column(String(32))
+    document_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    sample_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    display_name: Mapped[str] = mapped_column(String(512), default="")
+    source_ref: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+
+    message: Mapped[AiMessage] = relationship(back_populates="attachments")
+
+
+class AiSampleUpload(Base):
+    """Admin-approved sample file for ACL-independent analysis (not Synology inventory)."""
+
+    __tablename__ = "qka_next_ai_sample_upload"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    uploaded_by_user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    file_name: Mapped[str] = mapped_column(String(512))
+    extension: Mapped[str] = mapped_column(String(32))
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    extracted_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[int] = mapped_column(Integer, default=0)
+    safe_error: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AiUsageAudit(Base):
+    """Append-only OpenAI usage / error audit (no prompts, no document bodies, no API keys)."""
+
+    __tablename__ = "qka_next_ai_usage_audit"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    qka_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    model: Mapped[str] = mapped_column(String(128), default="")
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    succeeded: Mapped[bool] = mapped_column(Boolean, default=False)
+    error_category: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    detail: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
