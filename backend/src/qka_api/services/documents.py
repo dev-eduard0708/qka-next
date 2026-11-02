@@ -6,9 +6,7 @@ from dataclasses import dataclass
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
-from qka_shared.access import AccessDecision, ResourceContext, decide
-from qka_shared.acl import evaluate_needles as evaluate_acl
-from qka_shared.allowlist import ACCOUNT_ENABLED, LINKED, PROVIDER_AD, deny_message, evaluate_user, load_active_user
+from qka_shared.allowlist import deny_message, evaluate_user, load_active_user
 from qka_shared.config import Settings
 from qka_shared.models import (
     AllowedEmail,
@@ -18,6 +16,9 @@ from qka_shared.models import (
     SynologyDocumentContent,
     SynologyFileInventory,
 )
+from qka_shared.source_access import Capability, authorize_document as source_authorize
+from qka_shared.source_access import normalize_prefix as _prefix_normalized
+from qka_shared.source_access import under_prefix as _under_prefix
 
 
 @dataclass(frozen=True)
@@ -29,17 +30,6 @@ class SearchHit:
     relative_path: str
     extension: str
     file_type: str
-
-
-def _prefix_normalized(prefix: str) -> str:
-    return (prefix or "").replace("/", "\\").strip().strip("\\").upper()
-
-
-def _under_prefix(path: str, prefix: str) -> bool:
-    if not prefix:
-        return True
-    normalized = (path or "").replace("/", "\\").strip("\\").upper()
-    return normalized == prefix or normalized.startswith(prefix + "\\")
 
 
 def _file_type(extension: str) -> str:
@@ -70,39 +60,17 @@ def _snippet(text: str | None, query: str, limit: int = 220) -> str:
     return body[start : start + limit]
 
 
-def _acl_needles(user: QkaUser) -> list[str]:
-    needles: list[str] = []
-    for identity in user.identities:
-        if identity.link_status != LINKED or identity.account_status != ACCOUNT_ENABLED:
-            continue
-        if identity.provider != PROVIDER_AD:
-            continue
-        for value in (identity.domain_username, identity.stable_external_id, identity.upn):
-            text = (value or "").strip()
-            if text and text not in needles:
-                needles.append(text)
-    return needles
-
-
 def authorize_document(
     session: Session,
     settings: Settings,
     user: QkaUser,
     inventory: SynologyFileInventory,
     content: SynologyDocumentContent,
+    *,
+    capability: str = Capability.PREVIEW,
 ) -> bool:
-    source_acl = evaluate_acl(inventory, _acl_needles(user))
-    context = ResourceContext(
-        resource_id=inventory.id,
-        resource_owner_user_id=user.id,
-        approved_indexed=True,
-        classification_known=True,
-        restricted=False,
-        content_verified=content.status == 1 and bool(content.extracted_text),
-        source_acl=source_acl,
-    )
-    decision = decide(session, user, context)
-    return decision == AccessDecision.ALLOW
+    _ = settings
+    return source_authorize(session, user, inventory, content, capability=capability)
 
 
 def search_documents(
@@ -159,7 +127,7 @@ def search_documents(
         inventory = session.get(SynologyFileInventory, content.inventory_file_id)
         if inventory is None or not inventory.is_present:
             continue
-        if not authorize_document(session, settings, user, inventory, content):
+        if not authorize_document(session, settings, user, inventory, content, capability=Capability.SEARCH):
             continue
         hits.append(
             SearchHit(
@@ -211,7 +179,9 @@ def fetch_document(
         return {"id": document_id, "denied": True, "error": "Document not found or outside pilot scope."}
 
     inventory = session.get(SynologyFileInventory, content.inventory_file_id)
-    if inventory is None or not authorize_document(session, settings, user, inventory, content):
+    if inventory is None or not authorize_document(
+        session, settings, user, inventory, content, capability=Capability.PREVIEW
+    ):
         return {"id": document_id, "denied": True, "error": "Access denied."}
 
     body = content.extracted_text or ""
@@ -276,7 +246,7 @@ def list_inventory(
         ).scalar_one_or_none()
         if content is None:
             continue
-        if authorize_document(session, settings, user, inventory, content):
+        if authorize_document(session, settings, user, inventory, content, capability=Capability.READ):
             authorized.append(inventory)
 
     total = len(authorized)

@@ -35,6 +35,7 @@ ALLOWED_USER = uuid.UUID("aaaaaaaa-1111-4111-8111-111111111111")
 DENIED_USER = uuid.UUID("bbbbbbbb-2222-4222-8222-222222222222")
 DISABLED_USER = uuid.UUID("cccccccc-3333-4333-8333-333333333333")
 UNLISTED_USER = uuid.UUID("dddddddd-4444-4444-8444-444444444444")
+GOOGLE_ONLY_USER = uuid.UUID("aaaaaaaa-9999-4999-8999-999999999999")
 SHARE_ID = uuid.UUID("533398e3-3f65-457e-adc8-abc318abb063")
 FILE_ID = uuid.UUID("d68c528b-9896-48be-963f-625502cfb9e3")
 CONTENT_ID = uuid.UUID("4f21b207-a4c3-49e7-b13f-962d72eac2a6")
@@ -45,6 +46,7 @@ GOOGLE_SUB_DISABLED = "google-sub-disabled"
 GOOGLE_SUB_UNLISTED = "google-sub-unlisted"
 GOOGLE_SUB_PENDING = "google-sub-pending"
 GOOGLE_SUB_UNKNOWN = "google-sub-unknown"
+GOOGLE_SUB_ONLY = "google-sub-only"
 
 
 @pytest.fixture
@@ -159,6 +161,84 @@ def seed_db():
                 """
             )
         )
+        session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS qka_next_source_scope (
+                    id UUID PRIMARY KEY,
+                    approved_share_id UUID NOT NULL,
+                    folder_prefix_normalized VARCHAR(2048) NOT NULL,
+                    trust_class INTEGER NOT NULL DEFAULT 0,
+                    status INTEGER NOT NULL DEFAULT 0,
+                    display_name VARCHAR(512) NOT NULL DEFAULT '',
+                    source_owner_name VARCHAR(256) NOT NULL DEFAULT '',
+                    source_owner_email VARCHAR(256) NOT NULL DEFAULT '',
+                    approval_reference VARCHAR(512) NOT NULL DEFAULT '',
+                    approval_notes VARCHAR(2000) NOT NULL DEFAULT '',
+                    approved_at TIMESTAMPTZ NULL,
+                    approved_by_user_id UUID NULL,
+                    service_read_verified BOOLEAN NOT NULL DEFAULT FALSE,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+        )
+        session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS qka_next_source_grant (
+                    id UUID PRIMARY KEY,
+                    scope_id UUID NOT NULL REFERENCES qka_next_source_scope(id) ON DELETE CASCADE,
+                    qka_user_id UUID NOT NULL,
+                    capability_read BOOLEAN NOT NULL DEFAULT TRUE,
+                    capability_search BOOLEAN NOT NULL DEFAULT TRUE,
+                    capability_preview BOOLEAN NOT NULL DEFAULT TRUE,
+                    path_mode INTEGER NOT NULL DEFAULT 0,
+                    include_subfolders BOOLEAN NOT NULL DEFAULT TRUE,
+                    selected_paths_json TEXT NOT NULL DEFAULT '[]',
+                    file_types_json TEXT NOT NULL DEFAULT '[]',
+                    status INTEGER NOT NULL DEFAULT 0,
+                    reason VARCHAR(1024) NOT NULL DEFAULT '',
+                    created_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL,
+                    created_by_user_id UUID NULL,
+                    updated_by_user_id UUID NULL
+                )
+                """
+            )
+        )
+        session.execute(text("ALTER TABLE qka_next_source_grant ADD COLUMN IF NOT EXISTS path_mode INTEGER NOT NULL DEFAULT 0"))
+        session.execute(text("ALTER TABLE qka_next_source_grant ADD COLUMN IF NOT EXISTS include_subfolders BOOLEAN NOT NULL DEFAULT TRUE"))
+        session.execute(text("ALTER TABLE qka_next_source_grant ADD COLUMN IF NOT EXISTS selected_paths_json TEXT NOT NULL DEFAULT '[]'"))
+        session.execute(text("ALTER TABLE qka_next_source_grant ADD COLUMN IF NOT EXISTS file_types_json TEXT NOT NULL DEFAULT '[]'"))
+        session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS qka_next_source_grant_audit (
+                    id UUID PRIMARY KEY,
+                    action VARCHAR(64) NOT NULL,
+                    actor_user_id UUID NULL,
+                    target_user_id UUID NULL,
+                    scope_id UUID NULL,
+                    grant_id UUID NULL,
+                    detail VARCHAR(2000) NOT NULL DEFAULT '',
+                    employee_email VARCHAR(256) NOT NULL DEFAULT '',
+                    share_name VARCHAR(256) NOT NULL DEFAULT '',
+                    before_detail TEXT NOT NULL DEFAULT '',
+                    after_detail TEXT NOT NULL DEFAULT '',
+                    created_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+        )
+        session.execute(text("ALTER TABLE qka_next_source_grant_audit ADD COLUMN IF NOT EXISTS employee_email VARCHAR(256) NOT NULL DEFAULT ''"))
+        session.execute(text("ALTER TABLE qka_next_source_grant_audit ADD COLUMN IF NOT EXISTS share_name VARCHAR(256) NOT NULL DEFAULT ''"))
+        session.execute(text("ALTER TABLE qka_next_source_grant_audit ADD COLUMN IF NOT EXISTS before_detail TEXT NOT NULL DEFAULT ''"))
+        session.execute(text("ALTER TABLE qka_next_source_grant_audit ADD COLUMN IF NOT EXISTS after_detail TEXT NOT NULL DEFAULT ''"))
+        session.execute(text("DELETE FROM qka_next_source_grant_audit"))
+        session.execute(text("DELETE FROM qka_next_source_grant"))
+        session.execute(text("DELETE FROM qka_next_source_scope"))
         session.execute(text("DELETE FROM qka_next_ai_usage_audit"))
         session.execute(text("DELETE FROM qka_next_ai_message_attachment"))
         session.execute(text("DELETE FROM qka_next_ai_message"))
@@ -181,14 +261,17 @@ def seed_db():
                 QkaUser(id=DENIED_USER, display_name="Denied User", status=0, login_enabled=True, is_directory_operator=False, is_super_admin=False, created_at=now, updated_at=now),
                 QkaUser(id=DISABLED_USER, display_name="Disabled Email User", status=0, login_enabled=True, is_directory_operator=False, is_super_admin=False, created_at=now, updated_at=now),
                 QkaUser(id=UNLISTED_USER, display_name="Unlisted User", status=0, login_enabled=True, is_directory_operator=False, is_super_admin=False, created_at=now, updated_at=now),
+                QkaUser(id=GOOGLE_ONLY_USER, display_name="Google Only Employee", status=0, login_enabled=True, is_directory_operator=False, is_super_admin=False, created_at=now, updated_at=now),
                 ExternalIdentity(id=uuid.UUID("aaaaaaaa-2222-4222-8222-222222222222"), qka_user_id=ALLOWED_USER, provider=0, stable_external_id=SID_ALLOWED, domain_username="qkai", primary_email="eduard@qehc.edu.sa", account_status=0, link_status=2, created_at=now, updated_at=now),
                 ExternalIdentity(id=uuid.UUID("aaaaaaaa-3333-4333-8333-333333333333"), qka_user_id=ALLOWED_USER, provider=1, stable_external_id=GOOGLE_SUB_ALLOWED, primary_email="eduard@qehc.edu.sa", account_status=0, link_status=2, created_at=now, updated_at=now),
                 ExternalIdentity(id=uuid.UUID("bbbbbbbb-3333-4333-8333-333333333333"), qka_user_id=DENIED_USER, provider=0, stable_external_id="other-sid", domain_username="otheruser", primary_email="other.person@qehc.edu.sa", account_status=0, link_status=2, created_at=now, updated_at=now),
                 ExternalIdentity(id=uuid.UUID("bbbbbbbb-4444-4444-8444-444444444444"), qka_user_id=DENIED_USER, provider=1, stable_external_id=GOOGLE_SUB_DENIED, primary_email="other.person@qehc.edu.sa", account_status=0, link_status=2, created_at=now, updated_at=now),
                 ExternalIdentity(id=uuid.UUID("cccccccc-4444-4444-8444-444444444444"), qka_user_id=DISABLED_USER, provider=1, stable_external_id=GOOGLE_SUB_DISABLED, primary_email="disabled.user@qehc.edu.sa", account_status=0, link_status=2, created_at=now, updated_at=now),
                 ExternalIdentity(id=uuid.UUID("dddddddd-5555-4555-8555-555555555555"), qka_user_id=UNLISTED_USER, provider=1, stable_external_id=GOOGLE_SUB_UNLISTED, primary_email="unlisted.user@qehc.edu.sa", account_status=0, link_status=2, created_at=now, updated_at=now),
+                ExternalIdentity(id=uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), qka_user_id=GOOGLE_ONLY_USER, provider=1, stable_external_id=GOOGLE_SUB_ONLY, primary_email="eduard@qehc.edu.sa", account_status=0, link_status=2, created_at=now, updated_at=now),
                 ExternalIdentity(id=uuid.UUID("eeeeeeee-6666-4666-8666-666666666666"), qka_user_id=None, provider=1, stable_external_id=GOOGLE_SUB_PENDING, primary_email="pending.user@qehc.edu.sa", account_status=0, link_status=0, created_at=now, updated_at=now),
                 AllowedEmail(id=uuid.uuid4(), email="eduard@qehc.edu.sa", email_normalized="eduard@qehc.edu.sa", enabled=True, created_at=now, updated_at=now),
+                AllowedEmail(id=uuid.uuid4(), email="dev.eduard@qehc.edu.sa", email_normalized="dev.eduard@qehc.edu.sa", enabled=True, created_at=now, updated_at=now),
                 AllowedEmail(id=uuid.uuid4(), email="other.person@qehc.edu.sa", email_normalized="other.person@qehc.edu.sa", enabled=True, created_at=now, updated_at=now),
                 AllowedEmail(id=uuid.uuid4(), email="disabled.user@qehc.edu.sa", email_normalized="disabled.user@qehc.edu.sa", enabled=False, created_at=now, updated_at=now),
                 SynologyApprovedShare(id=SHARE_ID, share_name="eduard", share_name_normalized="EDUARD", folder_relative_path="", folder_relative_path_normalized="", is_active=True, acl_capture_status=1, created_at=now, updated_at=now),
@@ -217,6 +300,7 @@ def seed_db():
                 GoogleWorkspaceAccount(id=uuid.uuid4(), external_identity_id=uuid.UUID("bbbbbbbb-4444-4444-8444-444444444444"), google_user_id=GOOGLE_SUB_DENIED, primary_email="other.person@qehc.edu.sa", drive_onboarded=False),
                 GoogleWorkspaceAccount(id=uuid.uuid4(), external_identity_id=uuid.UUID("cccccccc-4444-4444-8444-444444444444"), google_user_id=GOOGLE_SUB_DISABLED, primary_email="disabled.user@qehc.edu.sa", drive_onboarded=False),
                 GoogleWorkspaceAccount(id=uuid.uuid4(), external_identity_id=uuid.UUID("dddddddd-5555-4555-8555-555555555555"), google_user_id=GOOGLE_SUB_UNLISTED, primary_email="unlisted.user@qehc.edu.sa", drive_onboarded=False),
+                GoogleWorkspaceAccount(id=uuid.uuid4(), external_identity_id=uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), google_user_id=GOOGLE_SUB_ONLY, primary_email="eduard@qehc.edu.sa", drive_onboarded=False),
                 GoogleWorkspaceAccount(id=uuid.uuid4(), external_identity_id=uuid.UUID("eeeeeeee-6666-4666-8666-666666666666"), google_user_id=GOOGLE_SUB_PENDING, primary_email="pending.user@qehc.edu.sa", drive_onboarded=False),
                 SynologyDocumentContent(
                     id=CONTENT_ID,

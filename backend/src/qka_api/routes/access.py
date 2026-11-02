@@ -3,17 +3,19 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from qka_api.auth import require_csrf, require_principal
 from qka_api.deps import get_session, get_settings_dep
+from qka_api.services import source_access_admin as source_admin
 from qka_shared.allowlist import load_active_user
 from qka_shared.config import Settings
 from qka_shared.email_address import try_normalize
 from qka_shared.models import AllowedEmail, QkaUser
+from qka_shared.source_access import GrantStatus
 
 router = APIRouter(prefix="/api/v1/access")
 
@@ -24,6 +26,35 @@ class AddEmailRequest(BaseModel):
 
 class SetEnabledRequest(BaseModel):
     enabled: bool
+
+
+class RegisterCorporateScopeRequest(BaseModel):
+    approvedShareId: uuid.UUID
+    folderPrefix: str
+    displayName: str = ""
+    sourceOwnerName: str
+    sourceOwnerEmail: str
+    approvalReference: str
+    approvalNotes: str = ""
+    serviceReadVerified: bool = False
+
+
+class UpsertGrantRequest(BaseModel):
+    scopeId: uuid.UUID
+    qkaUserId: uuid.UUID
+    capabilityRead: bool = True
+    capabilitySearch: bool = True
+    capabilityPreview: bool = True
+    reason: str = ""
+    pathMode: str = "all"
+    includeSubfolders: bool = True
+    selectedPaths: list[str] = Field(default_factory=list)
+    fileTypes: list[str] = Field(default_factory=list)
+
+
+class SetGrantStatusRequest(BaseModel):
+    status: str = Field(description="active | disabled | revoked")
+    reason: str = ""
 
 
 def _require_super_admin(
@@ -132,3 +163,217 @@ def remove_email(
     session.delete(row)
     session.flush()
     return {"ok": True}
+
+
+@router.get("/source/employees")
+def source_employees(
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> list[dict]:
+    _require_super_admin(request, settings, session, mutating=False)
+    return source_admin.list_employees(session)
+
+
+@router.get("/source/sources")
+def source_sources(
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> list[dict]:
+    _require_super_admin(request, settings, session, mutating=False)
+    return source_admin.list_sources(session, settings)
+
+
+@router.get("/source/folder-tree")
+def source_folder_tree(
+    request: Request,
+    approvedShareId: uuid.UUID = Query(...),
+    rootPrefix: str | None = Query(default=None),
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> list[dict]:
+    _require_super_admin(request, settings, session, mutating=False)
+    # Distinguish omitted (pilot default) vs explicit "" (entire share).
+    return source_admin.folder_tree(session, settings, approvedShareId, rootPrefix)
+
+
+@router.get("/source/scopes")
+def source_scopes(
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> list[dict]:
+    _require_super_admin(request, settings, session, mutating=False)
+    return source_admin.list_scopes(session)
+
+
+@router.get("/source/eligible-scopes")
+def source_eligible_scopes(
+    request: Request,
+    approvedShareId: uuid.UUID = Query(...),
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    _require_super_admin(request, settings, session, mutating=False)
+    return source_admin.eligible_scopes_for_share(session, approvedShareId)
+
+
+@router.post("/source/scopes/corporate")
+def register_corporate_scope(
+    body: RegisterCorporateScopeRequest,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    if settings.database_read_only:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="The database is read-only.")
+    try:
+        row = source_admin.create_corporate_scope(
+            session,
+            actor,
+            approved_share_id=body.approvedShareId,
+            folder_prefix=body.folderPrefix,
+            display_name=body.displayName,
+            source_owner_name=body.sourceOwnerName,
+            source_owner_email=body.sourceOwnerEmail,
+            approval_reference=body.approvalReference,
+            approval_notes=body.approvalNotes,
+            service_read_verified=body.serviceReadVerified,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    session.flush()
+    return source_admin._scope_dto(row)
+
+
+@router.post("/source/scopes/{scope_id}/revoke")
+def revoke_source_scope(
+    scope_id: uuid.UUID,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    if settings.database_read_only:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="The database is read-only.")
+    try:
+        row = source_admin.revoke_scope(session, actor, scope_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    session.flush()
+    return source_admin._scope_dto(row)
+
+
+@router.get("/source/grants")
+def source_grants(
+    request: Request,
+    scopeId: uuid.UUID | None = None,
+    qkaUserId: uuid.UUID | None = None,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> list[dict]:
+    _require_super_admin(request, settings, session, mutating=False)
+    return source_admin.list_grants(session, scope_id=scopeId, user_id=qkaUserId)
+
+
+@router.post("/source/grants")
+def upsert_source_grant(
+    body: UpsertGrantRequest,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    if settings.database_read_only:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="The database is read-only.")
+    try:
+        row = source_admin.upsert_grant(
+            session,
+            actor,
+            scope_id=body.scopeId,
+            qka_user_id=body.qkaUserId,
+            capability_read=body.capabilityRead,
+            capability_search=body.capabilitySearch,
+            capability_preview=body.capabilityPreview,
+            reason=body.reason,
+            path_mode=body.pathMode,
+            include_subfolders=body.includeSubfolders,
+            selected_paths=body.selectedPaths,
+            file_types=body.fileTypes,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    session.flush()
+    return source_admin._grant_dto(row)
+
+
+@router.post("/source/grants/{grant_id}/status")
+def set_source_grant_status(
+    grant_id: uuid.UUID,
+    body: SetGrantStatusRequest,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    if settings.database_read_only:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="The database is read-only.")
+    status_map = {"active": GrantStatus.ACTIVE, "disabled": GrantStatus.DISABLED, "revoked": GrantStatus.REVOKED}
+    mapped = status_map.get((body.status or "").strip().lower())
+    if mapped is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="status must be active, disabled, or revoked.")
+    try:
+        row = source_admin.set_grant_status(session, actor, grant_id, mapped, body.reason)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    session.flush()
+    return source_admin._grant_dto(row)
+
+
+@router.get("/source/effective/{user_id}")
+def source_effective(
+    user_id: uuid.UUID,
+    request: Request,
+    documentId: str | None = None,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    _require_super_admin(request, settings, session, mutating=False)
+    doc_uuid: uuid.UUID | None = None
+    if documentId:
+        try:
+            doc_uuid = uuid.UUID(documentId) if "-" in documentId else uuid.UUID(hex=documentId)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid documentId.") from exc
+    try:
+        return source_admin.effective_for_user(session, settings, user_id, document_id=doc_uuid)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.get("/source/audit")
+def source_audit(
+    request: Request,
+    search: str | None = None,
+    employeeEmail: str | None = None,
+    shareName: str | None = None,
+    action: str | None = None,
+    page: int = 1,
+    pageSize: int = 20,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    _require_super_admin(request, settings, session, mutating=False)
+    return source_admin.list_audit(
+        session,
+        search=search,
+        employee_email=employeeEmail,
+        share_name=shareName,
+        action=action,
+        page=page,
+        page_size=pageSize,
+    )

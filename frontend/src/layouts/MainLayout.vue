@@ -7,21 +7,7 @@
           <div class="text-subtitle1">{{ t("app.title") }}</div>
           <div class="text-caption text-white-50">{{ t("app.subtitle") }}</div>
         </q-toolbar-title>
-        <div v-if="session.user" class="row items-center no-wrap q-gutter-sm q-mr-sm">
-          <q-avatar size="32px" color="white" text-color="primary" font-size="14px" :aria-label="t('session.account')">
-            {{ userInitials }}
-          </q-avatar>
-          <div class="gt-xs text-body2 ellipsis qka-topbar-name">{{ session.user.displayName }}</div>
-          <q-btn
-            flat
-            dense
-            no-caps
-            icon="logout"
-            :label="t('session.signOut')"
-            :aria-label="t('session.signOut')"
-            @click="signOut"
-          />
-        </div>
+        <q-space />
         <q-btn
           flat
           round
@@ -29,6 +15,35 @@
           :aria-label="dark ? 'Switch to light mode' : 'Switch to dark mode'"
           @click="toggleDark"
         />
+        <q-btn
+          v-if="session.user"
+          flat
+          round
+          dense
+          class="q-ml-xs"
+          :aria-label="t('session.account')"
+        >
+          <q-avatar size="32px" color="white" text-color="primary" font-size="14px">
+            {{ userInitials }}
+          </q-avatar>
+          <q-menu anchor="bottom right" self="top right">
+            <q-list style="min-width: 200px">
+              <q-item>
+                <q-item-section>
+                  <q-item-label>{{ session.user.displayName }}</q-item-label>
+                  <q-item-label caption>{{ t("session.account") }}</q-item-label>
+                </q-item-section>
+              </q-item>
+              <q-separator />
+              <q-item v-close-popup clickable @click="signOut">
+                <q-item-section avatar>
+                  <q-icon name="logout" />
+                </q-item-section>
+                <q-item-section>{{ t("session.signOut") }}</q-item-section>
+              </q-item>
+            </q-list>
+          </q-menu>
+        </q-btn>
       </q-toolbar>
     </q-header>
 

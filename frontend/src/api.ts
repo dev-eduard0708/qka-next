@@ -21,6 +21,119 @@ export type AllowedEmail = {
   updatedAt?: string | null;
 };
 
+export type SourceEmployee = {
+  allowlistId: string;
+  qkaUserId: string | null;
+  displayName: string;
+  primaryEmail: string;
+  googleSub: string | null;
+  googleLinked: boolean;
+  identityStatus: "linked" | "pending" | "disabled";
+  allowlisted: boolean;
+  allowlistEnabled: boolean;
+  canGrant: boolean;
+  adIdentities: Array<{ domainUsername: string | null; sidSuffix: string | null; linked: boolean }>;
+  superAdmin: boolean;
+};
+
+export type SourceScope = {
+  id: string;
+  approvedShareId: string;
+  folderPrefixNormalized: string;
+  trustClass: string;
+  status: string;
+  displayName: string;
+  sourceOwnerName: string;
+  sourceOwnerEmail: string;
+  approvalReference: string;
+  approvalNotes: string;
+  approvedAt: string | null;
+  approvedByUserId: string | null;
+  serviceReadVerified: boolean;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+};
+
+export type SourceSource = {
+  approvedShareId: string;
+  shareName: string;
+  inventoryCount: number;
+  aclCapturedCount: number;
+  pilotFolderPrefix: string;
+  isConfiguredPilotShare: boolean;
+  scopes: SourceScope[];
+  eligibleForGrants?: boolean;
+};
+
+export type SourceFolderNode = {
+  id: string;
+  label: string;
+  path: string;
+  isFile: boolean;
+  icon?: string;
+  aclCaptureStatus: number | null;
+  children?: SourceFolderNode[];
+};
+
+export type SourceGrant = {
+  id: string;
+  scopeId: string;
+  qkaUserId: string;
+  capabilityRead: boolean;
+  capabilitySearch: boolean;
+  capabilityPreview: boolean;
+  pathMode: "all" | "selected";
+  includeSubfolders: boolean;
+  selectedPaths: string[];
+  fileTypes: string[];
+  status: string;
+  reason: string;
+  scope?: SourceScope | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+};
+
+export type SourceEffective = {
+  qkaUserId: string;
+  displayName: string;
+  grants: SourceGrant[];
+  sampleDocument: {
+    documentId: string;
+    fileName: string;
+    relativePath: string;
+    qkaGrant: string;
+    sourcePermission: string;
+    effectiveAccess: string;
+    denialReason: string | null;
+    allowed: boolean;
+  } | null;
+};
+
+export type SourceAuditEntry = {
+  id: string;
+  action: string;
+  actorUserId: string | null;
+  changedBy: string;
+  targetUserId: string | null;
+  employeeEmail: string;
+  shareName: string;
+  scope: string;
+  fileTypes: string[];
+  scopeId: string | null;
+  grantId: string | null;
+  detail: string;
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
+  createdAt: string | null;
+};
+
+export type SourceAuditPage = {
+  items: SourceAuditEntry[];
+  total: number;
+  page: number;
+  pageSize: number;
+};
+
 export class ApiError extends Error {
   status: number;
 
@@ -134,6 +247,84 @@ export const api = {
     }),
   removeAllowedEmail: (id: string) =>
     request<{ ok: boolean }>(`/api/v1/access/emails/${id}/remove`, { method: "POST" }),
+  sourceEmployees: () => request<SourceEmployee[]>("/api/v1/access/source/employees"),
+  sourceSources: () => request<SourceSource[]>("/api/v1/access/source/sources"),
+  sourceFolderTree: (approvedShareId: string, rootPrefix?: string | null) => {
+    const q = new URLSearchParams({ approvedShareId });
+    // null/undefined → API pilot default; "" → entire share; otherwise scoped prefix
+    if (rootPrefix !== undefined && rootPrefix !== null) q.set("rootPrefix", rootPrefix);
+    return request<SourceFolderNode[]>(`/api/v1/access/source/folder-tree?${q.toString()}`);
+  },
+  sourceScopes: () => request<SourceScope[]>("/api/v1/access/source/scopes"),
+  sourceEligibleScopes: (approvedShareId: string) =>
+    request<{ eligible: boolean; scopes: SourceScope[]; reason: string | null }>(
+      `/api/v1/access/source/eligible-scopes?approvedShareId=${encodeURIComponent(approvedShareId)}`,
+    ),
+  registerCorporateScope: (body: {
+    approvedShareId: string;
+    folderPrefix: string;
+    displayName?: string;
+    sourceOwnerName: string;
+    sourceOwnerEmail: string;
+    approvalReference: string;
+    approvalNotes?: string;
+    serviceReadVerified: boolean;
+  }) =>
+    request<SourceScope>("/api/v1/access/source/scopes/corporate", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  revokeSourceScope: (scopeId: string) =>
+    request<SourceScope>(`/api/v1/access/source/scopes/${scopeId}/revoke`, { method: "POST" }),
+  sourceGrants: (params?: { scopeId?: string; qkaUserId?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.scopeId) q.set("scopeId", params.scopeId);
+    if (params?.qkaUserId) q.set("qkaUserId", params.qkaUserId);
+    const suffix = q.toString() ? `?${q.toString()}` : "";
+    return request<SourceGrant[]>(`/api/v1/access/source/grants${suffix}`);
+  },
+  upsertSourceGrant: (body: {
+    scopeId: string;
+    qkaUserId: string;
+    capabilityRead: boolean;
+    capabilitySearch: boolean;
+    capabilityPreview: boolean;
+    reason?: string;
+    pathMode?: "all" | "selected";
+    includeSubfolders?: boolean;
+    selectedPaths?: string[];
+    fileTypes?: string[];
+  }) =>
+    request<SourceGrant>("/api/v1/access/source/grants", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  setSourceGrantStatus: (grantId: string, status: "active" | "disabled" | "revoked", reason?: string) =>
+    request<SourceGrant>(`/api/v1/access/source/grants/${grantId}/status`, {
+      method: "POST",
+      body: JSON.stringify({ status, reason: reason || "" }),
+    }),
+  sourceEffective: (userId: string, documentId?: string) => {
+    const q = documentId ? `?documentId=${encodeURIComponent(documentId)}` : "";
+    return request<SourceEffective>(`/api/v1/access/source/effective/${userId}${q}`);
+  },
+  sourceAudit: (params?: {
+    search?: string;
+    employeeEmail?: string;
+    shareName?: string;
+    action?: string;
+    page?: number;
+    pageSize?: number;
+  }) => {
+    const q = new URLSearchParams();
+    if (params?.search) q.set("search", params.search);
+    if (params?.employeeEmail) q.set("employeeEmail", params.employeeEmail);
+    if (params?.shareName) q.set("shareName", params.shareName);
+    if (params?.action) q.set("action", params.action);
+    q.set("page", String(params?.page ?? 1));
+    q.set("pageSize", String(params?.pageSize ?? 20));
+    return request<SourceAuditPage>(`/api/v1/access/source/audit?${q.toString()}`);
+  },
   logout: () => request<{ ok: boolean }>("/api/v1/auth/logout", { method: "POST", allowUnauthorized: true }),
   summary: () =>
     request<{
@@ -513,15 +704,23 @@ export type AiStatus = {
   configured: boolean;
   available: boolean;
   status: string;
+  provider?: string | null;
+  connectionLabel?: string | null;
   model: string | null;
+  modelAvailable?: boolean | null;
   maxOutputTokens: number;
   maxContextChars: number;
   dataSharingPermitted: boolean;
+  creditStatus?: string;
+  creditMessage?: string | null;
+  creditBalanceReadable?: boolean;
+  billingUrl?: string | null;
   successCount: number;
   errorCount: number;
   lastSuccessfulRequestAt: string | null;
   lastErrorAt: string | null;
   lastError: string | null;
+  probeError?: string | null;
   message: string | null;
 };
 

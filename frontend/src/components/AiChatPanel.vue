@@ -3,22 +3,53 @@
     <div class="row items-center q-gutter-sm q-mb-sm">
       <div class="col">
         <div class="text-subtitle2">{{ title }}</div>
-        <div class="text-caption">
-          <template v-if="!statusLoaded">…</template>
-          <template v-else-if="!aiStatus?.configured">{{ t("ai.notConfigured") }}</template>
-          <template v-else>
-            {{ t("ai.model") }}: {{ aiStatus.model }}
-            <span v-if="aiStatus.dataSharingPermitted"> · {{ t("ai.dataSharingOn") }}</span>
-            <span v-else> · {{ t("ai.dataSharingOff") }}</span>
-          </template>
-        </div>
       </div>
+      <q-btn flat dense icon="sync" :loading="statusLoading" :label="t('ai.refreshStatus')" @click="loadStatus" />
       <q-btn flat dense icon="add" :label="t('ai.newChat')" :disable="streaming" @click="newChat" />
       <q-btn flat dense icon="refresh" :disable="streaming || !lastFailed" :label="t('ai.retry')" @click="retry" />
     </div>
 
+    <q-card flat bordered class="q-mb-sm qka-ai-status-card">
+      <q-card-section class="q-py-sm">
+        <div class="row items-center q-col-gutter-sm">
+          <div class="col-auto">
+            <q-chip
+              dense
+              :color="connectionChipColor"
+              text-color="white"
+              :label="connectionChipLabel"
+              :icon="connectionChipIcon"
+            />
+          </div>
+          <div class="col">
+            <div class="text-caption">
+              <span class="text-weight-medium">{{ t("ai.provider") }}:</span>
+              {{ aiStatus?.provider === "openai" ? "OpenAI API" : "—" }}
+            </div>
+            <div class="text-caption">
+              <span class="text-weight-medium">{{ t("ai.model") }}:</span>
+              {{ aiStatus?.model || "—" }}
+              <span v-if="aiStatus?.modelAvailable === true" class="text-positive"> · {{ t("ai.modelOk") }}</span>
+              <span v-else-if="aiStatus?.modelAvailable === false" class="text-negative"> · {{ t("ai.modelMissing") }}</span>
+            </div>
+            <div class="text-caption">
+              <span class="text-weight-medium">{{ t("ai.credits") }}:</span>
+              {{ creditLabel }}
+            </div>
+          </div>
+        </div>
+        <div v-if="aiStatus?.creditMessage" class="text-caption q-mt-xs">{{ aiStatus.creditMessage }}</div>
+        <div v-if="aiStatus?.billingUrl && aiStatus.creditStatus === 'exhausted'" class="q-mt-xs">
+          <a :href="aiStatus.billingUrl" target="_blank" rel="noopener noreferrer">{{ t("ai.openBilling") }}</a>
+        </div>
+      </q-card-section>
+    </q-card>
+
     <q-banner v-if="aiStatus && !aiStatus.configured" class="bg-warning text-dark q-mb-sm" dense>
       {{ t("ai.notConfigured") }}
+    </q-banner>
+    <q-banner v-else-if="aiStatus?.creditStatus === 'exhausted'" class="bg-warning text-dark q-mb-sm" dense>
+      {{ t("ai.noCredits") }}
     </q-banner>
     <q-banner v-if="bannerError" class="bg-negative text-white q-mb-sm" dense>
       {{ bannerError }}
@@ -127,6 +158,7 @@ const { t } = useI18n();
 const title = computed(() => props.title || t("ai.chat"));
 const aiStatus = ref<AiStatus | null>(null);
 const statusLoaded = ref(false);
+const statusLoading = ref(false);
 const conversationId = ref<string | null>(null);
 const messages = ref<AiMessage[]>([]);
 const draft = ref("");
@@ -142,13 +174,40 @@ const canSend = computed(
   () => Boolean(aiStatus.value?.configured) && Boolean(draft.value.trim()) && !streaming.value,
 );
 
+const connectionChipColor = computed(() => {
+  const s = aiStatus.value?.status;
+  if (s === "connected") return "positive";
+  if (s === "error") return "negative";
+  if (s === "not_configured") return "warning";
+  return "grey";
+});
+const connectionChipLabel = computed(() => {
+  if (!statusLoaded.value) return t("ai.statusLoading");
+  return aiStatus.value?.connectionLabel || t("ai.notConfigured");
+});
+const connectionChipIcon = computed(() => {
+  const s = aiStatus.value?.status;
+  if (s === "connected") return "cloud_done";
+  if (s === "error") return "cloud_off";
+  return "cloud_queue";
+});
+const creditLabel = computed(() => {
+  const c = aiStatus.value?.creditStatus;
+  if (!aiStatus.value?.configured) return "—";
+  if (c === "exhausted") return t("ai.creditsExhausted");
+  if (c === "available") return t("ai.creditsOk");
+  return t("ai.creditsUnknown");
+});
+
 async function loadStatus() {
+  statusLoading.value = true;
   try {
     aiStatus.value = await api.aiStatus();
   } catch (err) {
     bannerError.value = err instanceof Error ? err.message : t("ai.statusError");
   } finally {
     statusLoaded.value = true;
+    statusLoading.value = false;
   }
 }
 

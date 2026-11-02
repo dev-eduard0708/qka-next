@@ -34,33 +34,25 @@ Add authorized redirect URI (in addition to the Quasar web callback):
 
 Remote ChatGPT users cannot complete loopback authorize from another PC. For multi-user activation use a public **HTTPS** `QKA_MCP_PUBLIC_BASE_URL` and matching Google redirect URI.
 
-## Separate Secure MCP Tunnel (do not overwrite legacy)
+## Existing Secure MCP Tunnel (cutover)
 
-1. Create a **new** Platform tunnel for staging (do not reuse the :5255 tunnel id).
-2. Set `QKA_NEXT_CONTROL_PLANE_TUNNEL_ID` and `CONTROL_PLANE_API_KEY`.
-3. From `QKA-Next/scripts/mcp-tunnel`:
+Reuse the Platform tunnel `tunnel_6ae301cc…` / profile `qka-mcp-local` (health `:8080`). Do **not** start a second client against the same tunnel.
 
 ```powershell
-.\Init-QkaNextMcpTunnel.ps1
-.\Run-QkaNextMcpTunnel.ps1
+# After backup (see docs/07-MCP-TUNNEL-CUTOVER.md):
+.\Cutover-ExistingTunnelTo5265.ps1
+# Rollback:
+.\Rollback-ExistingTunnelTo5255.ps1
 ```
 
-4. Confirm `http://127.0.0.1:8081/readyz` (legacy health stays on `:8080`).
+Confirm `http://127.0.0.1:8080/readyz` with MCP target `http://127.0.0.1:5265/mcp`.
 
-## ChatGPT Business admin — staging plugin
+## ChatGPT Business admin — existing plugin
 
-1. Confirm QKA-Next API on `:5265` with `QKA_MCP_OAUTH_ENABLED=true` and Google client configured.
-2. Start the **staging** tunnel (`qka-next-mcp-staging`).
-3. As ChatGPT Business admin: Plugins → Add custom MCP server.
-4. Name: `QKA-Next DEV – QEC Knowledge AI`.
-5. Connection: Tunnel → select the **staging** tunnel (not the production/pilot :5255 tunnel).
-6. Authentication: OAuth (CIMD preferred).
-7. Install plugin → new chat → `@QKA-Next DEV – QEC Knowledge AI` → search then fetch.
-8. Only after a successful live ChatGPT tool call with matching QKA-Next audit evidence, set `QKA_MCP_CHATGPT_LIVE_VERIFIED_AT` (ISO timestamp). Dashboard must stay **Not verified** until then.
-
-## Optional cutover (requires explicit approval)
-
-Do **not** cut over the existing QKA plugin without written approval. When approved: dual-run staging, freeze legacy writes, switch ChatGPT plugin tunnel target, verify, then retire legacy carefully.
+1. Confirm QKA-Next API on `:5265` with `QKA_MCP_OAUTH_ENABLED=true` and Google redirect `http://127.0.0.1:5265/oauth/google/callback`.
+2. Keep the existing ChatGPT plugin (**QKA Synology Pilot**) bound to tunnel **QKA-MCP-Pilot**.
+3. Because OAuth issuer moved `:5255` → `:5265`, **reconnect OAuth** on the plugin (refresh tools if prompted). Do not recreate the plugin unless reconnect fails.
+4. Live Verified appears only after a ChatGPT-originated MCP audit row (`client=chatgpt%`). Local inspector tests never set Live Verified.
 
 ## Dashboard
 

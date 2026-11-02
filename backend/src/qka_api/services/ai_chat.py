@@ -69,6 +69,79 @@ def _iso(value: datetime | None) -> str | None:
     return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _credit_signal(text: str | None) -> str | None:
+    body = (text or "").lower()
+    if not body:
+        return None
+    if any(
+        token in body
+        for token in (
+            "no credits remaining",
+            "insufficient_quota",
+            "exceeded your current quota",
+            "billing",
+            "add credits",
+        )
+    ):
+        return "exhausted"
+    return None
+
+
+def _probe_openai(settings: Settings) -> dict[str, Any]:
+    """Live OpenAI connectivity check. Credit balance is not readable with API/service keys."""
+    result: dict[str, Any] = {
+        "reachable": False,
+        "authOk": False,
+        "modelAvailable": None,
+        "probeError": None,
+        "creditStatus": "unknown",
+        "creditMessage": "OpenAI credit balance is not readable with an API key. Check Billing in the OpenAI dashboard.",
+        "billingUrl": "https://platform.openai.com/settings/organization/billing",
+    }
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=settings.openai_api_key.strip(), timeout=8.0)
+        # Auth + network probe (billing endpoints require a browser session key).
+        client.models.list()
+        result["reachable"] = True
+        result["authOk"] = True
+        model_id = (settings.openai_model or "").strip()
+        if model_id:
+            try:
+                client.models.retrieve(model_id)
+                result["modelAvailable"] = True
+            except Exception as model_exc:  # noqa: BLE001
+                result["modelAvailable"] = False
+                result["probeError"] = str(model_exc)[:300]
+                if _credit_signal(str(model_exc)) == "exhausted":
+                    result["creditStatus"] = "exhausted"
+                    result["creditMessage"] = "No OpenAI credits remaining. Add credits in the OpenAI billing dashboard."
+        if result["creditStatus"] == "unknown":
+            result["creditStatus"] = "unknown"
+            result["creditMessage"] = (
+                "API key authenticated. Exact remaining credit balance is not exposed by OpenAI to API keys; "
+                "use the billing dashboard for the balance."
+            )
+    except Exception as exc:  # noqa: BLE001
+        err = str(exc)[:400]
+        result["probeError"] = err
+        result["reachable"] = "api.openai.com" not in err.lower() or "connection" not in err.lower()
+        if "incorrect api key" in err.lower() or "invalid_api_key" in err.lower() or "401" in err:
+            result["authOk"] = False
+            result["creditStatus"] = "unknown"
+            result["creditMessage"] = "OpenAI API key was rejected."
+        elif _credit_signal(err) == "exhausted":
+            result["authOk"] = True
+            result["reachable"] = True
+            result["creditStatus"] = "exhausted"
+            result["creditMessage"] = "No OpenAI credits remaining. Add credits in the OpenAI billing dashboard."
+        else:
+            result["authOk"] = False
+            result["creditMessage"] = err
+    return result
+
+
 def openai_status(session: Session, settings: Settings) -> dict[str, Any]:
     configured = settings.openai_configured
     last_ok = session.execute(
@@ -83,22 +156,62 @@ def openai_status(session: Session, settings: Settings) -> dict[str, Any]:
     error_count = session.scalar(
         select(func.count()).select_from(AiUsageAudit).where(AiUsageAudit.succeeded.is_(False))
     ) or 0
-    status = "connected" if configured and success_count > 0 else (
-        "not_configured" if not configured else ("error" if error_count > 0 and success_count == 0 else "disconnected")
-    )
+
+    last_error_detail = last_err.detail if last_err else None
+    last_error_category = last_err.error_category if last_err else None
+    credit_from_audit = _credit_signal(last_error_detail) or _credit_signal(last_error_category)
+
+    probe: dict[str, Any] | None = None
+    if configured:
+        probe = _probe_openai(settings)
+
+    if not configured:
+        status = "not_configured"
+        connection_label = "Not connected"
+        credit_status = "unavailable"
+        credit_message = AI_NOT_CONFIGURED
+    elif probe and probe.get("authOk"):
+        if (probe.get("creditStatus") == "exhausted") or credit_from_audit == "exhausted":
+            status = "error"
+            connection_label = "Connected to OpenAI API"
+            credit_status = "exhausted"
+            credit_message = (
+                probe.get("creditMessage")
+                if probe.get("creditStatus") == "exhausted"
+                else "No OpenAI credits remaining. Add credits in the OpenAI billing dashboard."
+            )
+        else:
+            status = "connected"
+            connection_label = "Connected to OpenAI API"
+            credit_status = probe.get("creditStatus") or "unknown"
+            credit_message = probe.get("creditMessage") or ""
+    else:
+        status = "error"
+        connection_label = "OpenAI API connection error"
+        credit_status = (probe or {}).get("creditStatus") or "unknown"
+        credit_message = (probe or {}).get("probeError") or (probe or {}).get("creditMessage") or "OpenAI probe failed."
+
     return {
         "configured": configured,
-        "available": configured,
+        "available": configured and status == "connected",
         "status": status,
+        "provider": "openai" if configured else None,
+        "connectionLabel": connection_label,
         "model": settings.openai_model if configured else None,
+        "modelAvailable": None if probe is None else probe.get("modelAvailable"),
         "maxOutputTokens": settings.openai_max_output_tokens,
         "maxContextChars": settings.openai_max_context_chars,
         "dataSharingPermitted": settings.openai_data_sharing_permitted,
+        "creditStatus": credit_status,
+        "creditMessage": credit_message,
+        "creditBalanceReadable": False,
+        "billingUrl": "https://platform.openai.com/settings/organization/billing",
         "successCount": int(success_count),
         "errorCount": int(error_count),
         "lastSuccessfulRequestAt": _iso(last_ok.created_at) if last_ok else None,
         "lastErrorAt": _iso(last_err.created_at) if last_err else None,
-        "lastError": (last_err.error_category or last_err.detail) if last_err else None,
+        "lastError": last_error_detail or last_error_category,
+        "probeError": None if probe is None else probe.get("probeError"),
         "message": None if configured else AI_NOT_CONFIGURED,
     }
 

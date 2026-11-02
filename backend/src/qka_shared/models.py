@@ -143,6 +143,78 @@ class McpToolAudit(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class SourceScope(Base):
+    """Approved Synology folder scope with trust classification (personal vs corporate designated)."""
+
+    __tablename__ = "qka_next_source_scope"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    approved_share_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    folder_prefix_normalized: Mapped[str] = mapped_column(String(2048))
+    trust_class: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[int] = mapped_column(Integer, default=0)
+    display_name: Mapped[str] = mapped_column(String(512), default="")
+    source_owner_name: Mapped[str] = mapped_column(String(256), default="")
+    source_owner_email: Mapped[str] = mapped_column(String(256), default="")
+    approval_reference: Mapped[str] = mapped_column(String(512), default="")
+    approval_notes: Mapped[str] = mapped_column(String(2000), default="")
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_by_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    service_read_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    grants: Mapped[list["SourceGrant"]] = relationship(back_populates="scope", cascade="all, delete-orphan")
+
+
+class SourceGrant(Base):
+    """Per-user Read/Search/Preview grant on an approved source scope."""
+
+    __tablename__ = "qka_next_source_grant"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    scope_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("qka_next_source_scope.id", ondelete="CASCADE"), index=True
+    )
+    qka_user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    capability_read: Mapped[bool] = mapped_column(Boolean, default=True)
+    capability_search: Mapped[bool] = mapped_column(Boolean, default=True)
+    capability_preview: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 0 = entire corporate scope; 1 = selected paths only
+    path_mode: Mapped[int] = mapped_column(Integer, default=0)
+    include_subfolders: Mapped[bool] = mapped_column(Boolean, default=True)
+    selected_paths_json: Mapped[str] = mapped_column(Text, default="[]")
+    # Empty list means all file types; otherwise intersection filter (excel/word/pdf/…)
+    file_types_json: Mapped[str] = mapped_column(Text, default="[]")
+    status: Mapped[int] = mapped_column(Integer, default=0)
+    reason: Mapped[str] = mapped_column(String(1024), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+
+    scope: Mapped[SourceScope] = relationship(back_populates="grants")
+
+
+class SourceGrantAudit(Base):
+    """Append-only audit of Super Admin source access configuration actions."""
+
+    __tablename__ = "qka_next_source_grant_audit"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    action: Mapped[str] = mapped_column(String(64))
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    target_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    scope_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    grant_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    detail: Mapped[str] = mapped_column(String(2000), default="")
+    employee_email: Mapped[str] = mapped_column(String(256), default="")
+    share_name: Mapped[str] = mapped_column(String(256), default="")
+    before_detail: Mapped[str] = mapped_column(Text, default="")
+    after_detail: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class SynologyConnectionSettings(Base):
     __tablename__ = "synology_connection_settings"
 
