@@ -585,6 +585,9 @@ export const api = {
         source?: string;
         matchType?: string;
         previewAvailability?: string;
+        canDownload?: boolean;
+        openWithLabel?: string | null;
+        recommendedApp?: string | null;
       }>;
       total: number;
       page: number;
@@ -652,9 +655,13 @@ export const api = {
       fileName?: string;
       requiresDownloadGrant?: boolean;
       recommendedApp?: string;
+      openWithLabel?: string;
     }>(`/api/v1/documents/${id}/download?meta=1`),
-  documentDownload: async (id: string) => {
-    const response = await fetch(`/api/v1/documents/${id}/download`, { credentials: "include" });
+  documentDownload: async (id: string, opts?: { intent?: "download" | "open" }) => {
+    const intent = opts?.intent || "download";
+    const response = await fetch(`/api/v1/documents/${id}/download?intent=${encodeURIComponent(intent)}`, {
+      credentials: "include",
+    });
     const contentType = response.headers.get("content-type") || "";
     if (contentType.includes("application/json")) {
       const body = await response.json();
@@ -664,6 +671,7 @@ export const api = {
         error: body.error || "Download denied.",
         fileName: body.fileName as string | undefined,
         recommendedApp: body.recommendedApp as string | undefined,
+        openWithLabel: body.openWithLabel as string | undefined,
       };
     }
     if (!response.ok) {
@@ -674,7 +682,8 @@ export const api = {
     const match = /filename\*=UTF-8''([^;]+)|filename=\"([^\"]+)\"/i.exec(disposition);
     const fileName = match ? decodeURIComponent(match[1] || match[2]) : "document";
     const recommendedApp = response.headers.get("x-qka-recommended-app") || undefined;
-    return { ok: true as const, blob, fileName, recommendedApp };
+    const openWithLabel = response.headers.get("x-qka-open-with-label") || undefined;
+    return { ok: true as const, blob, fileName, recommendedApp, openWithLabel };
   },
   aiStatus: () => request<AiStatus>("/api/v1/ai/status"),
   aiConversations: () => request<{ items: AiConversationSummary[] }>("/api/v1/ai/conversations"),
@@ -865,6 +874,30 @@ export const api = {
     query.set("pageSize", String(params.pageSize));
     return request<SynologyInventoryPage>(`/api/v1/admin/synology/inventory?${query.toString()}`);
   },
+  synologyExtractionStatus: (connectionId?: string) => {
+    const query = connectionId ? `?connectionId=${encodeURIComponent(connectionId)}` : "";
+    return request<ExtractionStatus>(`/api/v1/admin/synology/extraction/status${query}`);
+  },
+  synologyExtractMissing: (body: { connectionId?: string; folderPrefix?: string; forceOutsidePilot?: boolean }) =>
+    request<ExtractionBatch>("/api/v1/admin/synology/extraction/extract-missing", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  synologyRetryFailed: (body: { connectionId?: string }) =>
+    request<ExtractionBatch>("/api/v1/admin/synology/extraction/retry-failed", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  synologyReindexSelected: (body: { inventoryIds: string[]; forceOutsidePilot?: boolean }) =>
+    request<ExtractionBatch>("/api/v1/admin/synology/extraction/reindex-selected", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  synologyReindexFolder: (body: { connectionId?: string; folderPrefix: string; forceOutsidePilot?: boolean }) =>
+    request<ExtractionBatch>("/api/v1/admin/synology/extraction/reindex-folder", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
 };
 
 export type SynologyConnection = {
@@ -943,6 +976,59 @@ export type SynologyInventoryPage = {
   totalCount: number;
   page: number;
   pageSize: number;
+};
+
+export type ExtractionBatch = {
+  id: string;
+  action: string;
+  status: number;
+  queuedCount: number;
+  processedCount: number;
+  succeededCount: number;
+  failedCount: number;
+  skippedCount: number;
+  unsupportedCount: number;
+  folderPrefixNormalized: string;
+  forceOutsidePilot: boolean;
+  safeError: string | null;
+  createdAt: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+};
+
+export type ExtractionStatus = {
+  stats: {
+    inventoryFiles: number;
+    contentRows: number;
+    missingContentRows: number;
+    pending: number;
+    indexed: number;
+    failed: number;
+    unsupported: number;
+    skipped: number;
+    queuePending: number;
+    extractorVersion: number;
+  };
+  dependencies: {
+    ocr: {
+      available: boolean;
+      engine: string | null;
+      path: string | null;
+      languages: string[];
+      requiredLanguages: string[];
+      missingLanguages: string[];
+      installHint: string | null;
+    };
+    libreOffice: {
+      available: boolean;
+      path: string | null;
+      installHint?: string | null;
+    };
+    extractorVersion: number;
+    supportedExtensions: string[];
+    limits: Record<string, number>;
+  };
+  recentBatches: ExtractionBatch[];
 };
 
 type StatusBlock = {

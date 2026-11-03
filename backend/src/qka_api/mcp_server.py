@@ -150,6 +150,10 @@ def create_mcp_server(
                             "snippet": hit.snippet,
                             "relativePath": hit.relative_path,
                             "extension": hit.extension,
+                            "fileType": hit.file_type,
+                            "matchType": hit.match_type,
+                            "contentAvailable": hit.content_available,
+                            "indexingState": hit.indexing_state,
                         }
                         for hit in hits
                     ],
@@ -159,45 +163,151 @@ def create_mcp_server(
 
     @mcp.tool(
         name="fetch",
-        description="Fetch authorized Synology document text by id from search. Denies inaccessible or unauthorized documents.",
+        description=(
+            "Fetch authorized Synology document text by id from search. "
+            "Use offset or chunkIndex to retrieve subsequent windows of longer documents "
+            "(responses are bounded; follow nextOffset/nextChunkIndex). "
+            "Returns contentUnavailable when extraction is missing/pending/failed. "
+            "OCR-derived amounts/dates may be uncertain — verify against original preview. "
+            "Denies inaccessible documents without disclosing their names."
+        ),
     )
-    def fetch(id: str, ctx: Context) -> str:
+    def fetch(
+        id: str,
+        offset: int = 0,
+        chunkIndex: int | None = None,
+        ctx: Context | None = None,
+    ) -> str:
+        """Fetch tool. Context is injected by MCPServer; keep it last so ChatGPT arg schemas stay simple."""
+        if ctx is None:
+            return json.dumps({"id": id, "denied": True, "text": None, "error": "MCP context unavailable."})
         factory = ctx.request_context.lifespan_context["session_factory"]
         cfg = ctx.request_context.lifespan_context["settings"]
         caller = _caller_user_id()
-        with factory() as session:
-            if caller is None:
-                _audit(session, tool="fetch", user_id=None, succeeded=False, error_category="unauthenticated")
+        try:
+            with factory() as session:
+                if caller is None:
+                    _audit(session, tool="fetch", user_id=None, succeeded=False, error_category="unauthenticated")
+                    session.commit()
+                    return json.dumps({"id": id, "denied": True, "text": None, "error": "Unauthenticated."})
+                channel = require_mcp_chat(session, caller)
+                if not channel.allowed:
+                    msg = channel_deny_message(channel.reason)
+                    _audit(
+                        session,
+                        tool="fetch",
+                        user_id=caller,
+                        succeeded=False,
+                        error_category="mcp_channel_denied",
+                        detail=msg,
+                    )
+                    session.commit()
+                    return json.dumps({"id": id, "denied": True, "text": None, "error": msg})
+                try:
+                    start = max(0, int(offset or 0))
+                except (TypeError, ValueError):
+                    start = 0
+                try:
+                    chunk_idx = int(chunkIndex) if chunkIndex is not None else None
+                except (TypeError, ValueError):
+                    chunk_idx = None
+                result = docs.fetch_document(
+                    session,
+                    cfg,
+                    caller,
+                    id,
+                    offset=start,
+                    chunk_index=chunk_idx,
+                )
+                denied = bool(result.get("denied"))
+                _audit(
+                    session,
+                    tool="fetch",
+                    user_id=caller,
+                    succeeded=not denied,
+                    error_category="fetch_denied" if denied else None,
+                    detail=result.get("error"),
+                )
                 session.commit()
-                return json.dumps({"id": id, "denied": True, "text": None, "error": "Unauthenticated."})
-            channel = require_mcp_chat(session, caller)
-            if not channel.allowed:
-                msg = channel_deny_message(channel.reason)
-                _audit(session, tool="fetch", user_id=caller, succeeded=False, error_category="mcp_channel_denied", detail=msg)
-                session.commit()
-                return json.dumps({"id": id, "denied": True, "text": None, "error": msg})
-            result = docs.fetch_document(session, cfg, caller, id)
-            denied = bool(result.get("denied"))
-            _audit(
-                session,
-                tool="fetch",
-                user_id=caller,
-                succeeded=not denied,
-                error_category="fetch_denied" if denied else None,
-                detail=result.get("error"),
-            )
-            session.commit()
+                if denied:
+                    return json.dumps(
+                        {
+                            "id": result.get("id"),
+                            "title": None,
+                            "text": None,
+                            "url": None,
+                            "relativePath": None,
+                            "extension": None,
+                            "sources": [],
+                            "denied": True,
+                            "error": result.get("error"),
+                            "contentAvailable": None,
+                            "indexingState": None,
+                            "previewKind": None,
+                            "contentUnavailableReason": None,
+                            "ocrAvailable": None,
+                        }
+                    )
+                return json.dumps(
+                    {
+                        "id": result.get("id"),
+                        "title": result.get("title"),
+                        "text": result.get("text"),
+                        "url": result.get("url"),
+                        "relativePath": result.get("relativePath"),
+                        "extension": result.get("extension"),
+                        "sources": [{"url": result.get("url"), "title": result.get("title")}],
+                        "denied": False,
+                        "error": result.get("error"),
+                        "contentAvailable": result.get("contentAvailable"),
+                        "indexingState": result.get("indexingState"),
+                        "previewKind": result.get("previewKind"),
+                        "previewNote": result.get("previewNote"),
+                        "contentUnavailableReason": result.get("contentUnavailableReason"),
+                        "ocrAvailable": result.get("ocrAvailable", False),
+                        "ocrUsed": result.get("ocrUsed", False),
+                        "ocrNote": result.get("ocrNote"),
+                        "extractionMethod": result.get("extractionMethod"),
+                        "extractorVersion": result.get("extractorVersion"),
+                        "truncated": result.get("truncated"),
+                        "incomplete": result.get("incomplete"),
+                        "extractionNotes": result.get("extractionNotes"),
+                        "offset": result.get("offset"),
+                        "chunkIndex": result.get("chunkIndex"),
+                        "totalChars": result.get("totalChars"),
+                        "totalChunks": result.get("totalChunks"),
+                        "hasMore": result.get("hasMore"),
+                        "nextOffset": result.get("nextOffset"),
+                        "nextChunkIndex": result.get("nextChunkIndex"),
+                        "references": result.get("references") or [],
+                        "untrustedContent": True,
+                        "contentGuidance": result.get("contentGuidance"),
+                    }
+                )
+        except Exception:
+            log.exception("mcp.fetch.failed id=%s", id)
+            # Return a tool-level error payload instead of letting the transport raise -32603.
+            try:
+                with factory() as session:
+                    _audit(
+                        session,
+                        tool="fetch",
+                        user_id=caller,
+                        succeeded=False,
+                        error_category="fetch_internal_error",
+                        detail="Internal fetch failure.",
+                    )
+                    session.commit()
+            except Exception:
+                log.exception("mcp.fetch.audit_failed")
             return json.dumps(
                 {
-                    "id": result.get("id"),
-                    "title": result.get("title"),
-                    "text": None if denied else result.get("text"),
-                    "url": result.get("url"),
-                    "relativePath": result.get("relativePath"),
-                    "extension": result.get("extension"),
-                    "sources": [{"url": result.get("url"), "title": result.get("title")}] if not denied else [],
-                    "denied": denied,
-                    "error": result.get("error"),
+                    "id": id,
+                    "denied": True,
+                    "text": None,
+                    "error": "Fetch failed due to an internal server error.",
+                    "contentAvailable": None,
+                    "indexingState": None,
                 }
             )
 

@@ -18,6 +18,7 @@ from qka_api.services.document_preview import (
 from qka_api.services.documents import (
     authorize_download,
     browse_workspace,
+    diagnose_document_access,
     fetch_document,
     list_inventory,
     read_original_bytes,
@@ -105,6 +106,33 @@ def diagnostics_preview_engine(
 ) -> dict:
     require_principal(request, settings)
     return preview_engine_status(settings)
+
+
+@router.get("/diagnostics/document-access")
+def diagnostics_document_access(
+    request: Request,
+    documentId: str = Query(..., min_length=8, max_length=64),
+    forUserId: str | None = Query(default=None, max_length=64),
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    """Super Admin: inventory presence, extraction state, and access decision for one document."""
+    import uuid as _uuid
+
+    principal = require_principal(request, settings)
+    subject: _uuid.UUID | None = None
+    if forUserId:
+        try:
+            subject = _uuid.UUID(forUserId) if "-" in forUserId else _uuid.UUID(hex=forUserId)
+        except ValueError:
+            return {"ok": False, "error": "invalid_for_user_id"}
+    return diagnose_document_access(
+        session,
+        settings,
+        principal.user_id,
+        documentId,
+        for_user_id=subject,
+    )
 
 
 @router.get("/documents/{document_id}/preview")
@@ -203,11 +231,19 @@ def document_detail(
     document_id: str,
     request: Request,
     offset: int = Query(default=0, ge=0),
+    chunkIndex: int | None = Query(default=None, ge=0),
     settings: Settings = Depends(get_settings_dep),
     session: Session = Depends(get_session),
 ) -> dict:
     principal = require_principal(request, settings)
-    return fetch_document(session, settings, principal.user_id, document_id, offset)
+    return fetch_document(
+        session,
+        settings,
+        principal.user_id,
+        document_id,
+        offset,
+        chunk_index=chunkIndex,
+    )
 
 
 @router.get("/documents/{document_id}/download")
@@ -217,7 +253,12 @@ def document_download(
     settings: Settings = Depends(get_settings_dep),
     session: Session = Depends(get_session),
 ) -> Response:
-    """Stream original Synology bytes after rechecking Download Originals permission."""
+    """Stream original Synology bytes after rechecking Download Originals permission.
+
+    intent=download (default) → Content-Disposition: attachment
+    intent=open → Content-Disposition: inline so Windows/browser can use registered apps
+    Never exposes SMB paths or Synology credentials. Never auto-transfers without a user action.
+    """
     principal = require_principal(request, settings)
     # Metadata-only probe used by older clients / unit tests when Accept prefers JSON
     # and no SMB content is requested via download=1. Prefer streaming by default.
@@ -234,7 +275,9 @@ def document_download(
 
     file_name = meta.get("fileName") or "document"
     ascii_name = file_name.encode("ascii", "ignore").decode("ascii") or "document"
-    disposition = f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(file_name)}"
+    intent = (request.query_params.get("intent") or "download").strip().lower()
+    disposition_kind = "inline" if intent == "open" else "attachment"
+    disposition = f"{disposition_kind}; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(file_name)}"
     return Response(
         content=payload,
         media_type=meta.get("mediaType") or "application/octet-stream",
@@ -243,5 +286,6 @@ def document_download(
             "X-Content-Type-Options": "nosniff",
             "Content-Disposition": disposition,
             "X-QKA-Recommended-App": meta.get("recommendedApp") or "",
+            "X-QKA-Open-With-Label": meta.get("openWithLabel") or "",
         },
     )

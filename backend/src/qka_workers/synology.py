@@ -20,6 +20,18 @@ def tick(factory: sessionmaker[Session], settings: Settings, gateway: SmbGateway
         except Exception:
             session.rollback()
             log.exception("synology.worker.tick_failed")
+    # Drain a bounded number of extraction queue items after sync work.
+    from qka_api.services import extraction as extraction_svc
+
+    with factory() as session:
+        try:
+            processed = extraction_svc.process_extraction_queue(session, settings, smb)
+            session.commit()
+            if processed:
+                log.info("extraction.worker.processed count=%s", processed)
+        except Exception:
+            session.rollback()
+            log.exception("extraction.worker.tick_failed")
 
 
 def start_embedded_worker(

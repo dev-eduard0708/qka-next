@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, or_, select, text as sql_text
 from sqlalchemy.orm import Session
 
-from qka_api.extract import EXTRACT_SUCCEEDED, extract_bytes, is_supported
+from qka_api.services import extraction as extraction_svc
 from qka_api.services.inventory_hierarchy import parent_normalized, present_file_filters
 from qka_api.smb import ACL_CAPTURED, EnumeratedFile, SmbCredentials, SmbError, SmbGateway
 from qka_shared.config import Settings
@@ -757,7 +757,7 @@ def _run_job(session: Session, settings: Settings, gateway: SmbGateway, job_id: 
                 seen.update(_ensure_ancestors(session, share.id, job, item.relative_path))
                 if not is_dir:
                     job.files_discovered += 1
-                    if changed:
+                    if changed or _needs_extraction_retry(session, settings, row):
                         _extract_if_needed(session, settings, gateway, connection, share, row, unc, creds)
                     job.files_processed += 1
                     _bump_type(job, classify(item.extension), item.size_bytes)
@@ -936,6 +936,24 @@ def _upsert_inventory(session: Session, share_id: uuid.UUID, job: SynologySyncJo
     return row, changed
 
 
+def _pilot_path(settings: Settings, relative_path_normalized: str) -> bool:
+    prefix = (settings.pilot_folder_prefix or "").replace("/", "\\").strip("\\").upper()
+    path_key = (relative_path_normalized or "").upper()
+    return (not prefix) or path_key == prefix or path_key.startswith(prefix + "\\")
+
+
+def _clear_content_vector(session: Session, content_id: uuid.UUID) -> None:
+    session.execute(
+        sql_text('UPDATE synology_document_content SET search_vector = NULL WHERE "Id" = CAST(:id AS uuid)'),
+        {"id": str(content_id)},
+    )
+
+
+def _needs_extraction_retry(session: Session, settings: Settings, row: SynologyFileInventory) -> bool:
+    """Controlled retry for unchanged files: missing/failed/pending, scope entry, or new support."""
+    return extraction_svc.needs_extraction_retry(session, settings, row)
+
+
 def _extract_if_needed(
     session: Session,
     settings: Settings,
@@ -946,64 +964,11 @@ def _extract_if_needed(
     unc: str,
     creds: SmbCredentials | None,
 ) -> None:
+    """Enqueue extraction for background workers. Does not read file bytes during sync."""
+    _ = gateway, connection, share, unc, creds
     if bool(getattr(row, "is_directory", False)):
         return
-    prefix = (settings.pilot_folder_prefix or "").replace("/", "\\").strip("\\").upper()
-    path_key = row.relative_path_normalized
-    pilot = (not prefix) or path_key == prefix or path_key.startswith(prefix + "\\")
-    content = session.execute(
-        select(SynologyDocumentContent).where(SynologyDocumentContent.inventory_file_id == row.id)
-    ).scalar_one_or_none()
-    now = _now()
-    if content is None:
-        content = SynologyDocumentContent(
-            id=uuid.uuid4(),
-            inventory_file_id=row.id,
-            approved_share_id=share.id,
-            relative_path_normalized=row.relative_path_normalized,
-            file_name=row.file_name,
-            extension=row.extension,
-            created_at=now,
-            updated_at=now,
-        )
-        session.add(content)
-    content.file_name = row.file_name
-    content.extension = row.extension
-    content.relative_path_normalized = row.relative_path_normalized
-    content.pilot_scoped = pilot
-    content.non_confidential = pilot
-    content.updated_at = now
-    if not pilot:
-        content.status = 4
-        content.extracted_text = None
-        content.safe_error = "Outside the approved pilot folder."
-        session.flush()
-        return
-    if not is_supported(row.extension) and (row.extension or "").lower() not in {"ppt", "pptx"}:
-        content.status = 3
-        content.extracted_text = None
-        content.safe_error = "File type is not supported for extraction."
-        session.flush()
-        return
-    try:
-        payload = gateway.open_read(unc, row.relative_path, creds)
-    except Exception:
-        content.status = 2
-        content.safe_error = "Read-only extraction could not open the file."
-        session.flush()
-        return
-    status, extracted, error, digest = extract_bytes(row.extension, payload, settings.max_preview_chars * 20)
-    content.status = status
-    content.extracted_text = extracted if status == EXTRACT_SUCCEEDED else None
-    content.safe_error = error
-    content.content_sha256 = digest
-    content.extracted_at = now if status == EXTRACT_SUCCEEDED else None
-    session.flush()
-    if status == EXTRACT_SUCCEEDED and content.extracted_text:
-        session.execute(
-            sql_text('UPDATE synology_document_content SET search_vector = to_tsvector(\'english\', coalesce("ExtractedText", \'\')) WHERE "Id" = CAST(:id AS uuid)'),
-            {"id": str(content.id)},
-        )
+    extraction_svc.enqueue_from_sync(session, settings, row, force=True)
 
 
 def _clear_search(session: Session, inventory_id: uuid.UUID) -> None:

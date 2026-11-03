@@ -66,6 +66,8 @@
       </div>
       <q-banner v-if="catalog.error" class="bg-negative text-white q-mt-sm">{{ catalog.error }}</q-banner>
       <q-banner v-if="error" class="bg-negative text-white q-mt-sm">{{ error }}</q-banner>
+      <q-banner v-if="openInfo" dense class="bg-primary text-white q-mt-sm">{{ openInfo }}</q-banner>
+      <q-banner v-if="openError" dense class="bg-negative text-white q-mt-sm">{{ openError }}</q-banner>
     </div>
 
     <div v-if="$q.screen.lt.md && selectedId" class="col qka-mobile-preview">
@@ -121,6 +123,28 @@
                 </q-badge>
               </q-td>
             </template>
+            <template #body-cell-actions="props">
+              <q-td :props="props" class="qka-actions-cell" @click.stop>
+                <q-btn
+                  v-if="props.row.canDownload"
+                  flat
+                  dense
+                  round
+                  size="sm"
+                  icon="open_in_new"
+                  :aria-label="openOriginalTooltip(props.row)"
+                  :loading="openingId === props.row.id"
+                  :disable="Boolean(openingId)"
+                  class="qka-open-original"
+                  @click.stop.prevent="openOriginal(props.row)"
+                  @mousedown.stop
+                  @keydown.enter.stop.prevent="openOriginal(props.row)"
+                  @keydown.space.stop.prevent="openOriginal(props.row)"
+                >
+                  <q-tooltip>{{ openOriginalTooltip(props.row) }}</q-tooltip>
+                </q-btn>
+              </q-td>
+            </template>
           </q-table>
           <div v-else-if="loading" class="text-body2 q-pa-md">{{ t("search.loading") }}</div>
           <div v-else-if="ran" class="text-body2 q-pa-md">{{ emptyMessage }}</div>
@@ -170,6 +194,9 @@ type SearchHit = {
   matchType?: string;
   previewAvailability?: string;
   source?: string;
+  canDownload?: boolean;
+  openWithLabel?: string | null;
+  recommendedApp?: string | null;
 };
 
 const SPLITTER_KEY = "qka.search.splitter";
@@ -193,6 +220,9 @@ const catalog = ref<{ sources: CatalogSource[]; totalFiles: number; error: strin
   totalFiles: 0,
   error: null,
 });
+const openingId = ref<string | null>(null);
+const openInfo = ref("");
+const openError = ref("");
 let abort: AbortController | null = null;
 
 const selectedHit = computed(() => results.value.find((item) => item.id === selectedId.value));
@@ -229,6 +259,14 @@ const columns = computed<QTableColumn[]>(() => [
     format: (val: string | null | undefined) => formatDate(val),
   },
   { name: "preview", label: t("search.colPreview"), field: "previewAvailability", align: "left" },
+  {
+    name: "actions",
+    label: "",
+    field: "id",
+    align: "right",
+    style: "width: 48px",
+    headerStyle: "width: 48px",
+  },
 ]);
 
 function persistSplitter(value: number) {
@@ -282,10 +320,64 @@ function previewColor(value: string | undefined) {
 
 function onRowClick(_evt: Event, row: SearchHit) {
   selectedId.value = row.id;
+  openInfo.value = "";
+  openError.value = "";
 }
 
 function closePreview() {
   selectedId.value = null;
+}
+
+function openOriginalTooltip(row: SearchHit) {
+  const ft = (row.fileType || "").toLowerCase();
+  const ext = (row.extension || "").toLowerCase().replace(/^\./, "");
+  if (ft === "excel" || ["xlsx", "xls", "xlsm", "xlsb"].includes(ext)) return t("search.openOriginalExcel");
+  if (ft === "word" || ["docx", "doc"].includes(ext)) return t("search.openOriginalWord");
+  if (ft === "powerpoint" || ["pptx", "ppt"].includes(ext)) return t("search.openOriginalPowerPoint");
+  if (ft === "pdf" || ext === "pdf") return t("search.openOriginalPdf");
+  if (ft === "csv" || ext === "csv") return t("search.openOriginalCsv");
+  if (ft === "text" || ["txt", "md", "log"].includes(ext)) return t("search.openOriginalText");
+  if (ft === "images" || ["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff"].includes(ext)) {
+    return t("search.openOriginalImage");
+  }
+  return t("search.openOriginalGeneric");
+}
+
+function saveBlob(blob: Blob, fileName: string) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function openOriginal(row: SearchHit) {
+  if (!row.canDownload || openingId.value) return;
+  const previousSelected = selectedId.value;
+  openingId.value = row.id;
+  openInfo.value = t("search.openOriginalPreparing");
+  openError.value = "";
+  try {
+    const body = await api.documentDownload(row.id, { intent: "open" });
+    if (!body.ok) {
+      openInfo.value = "";
+      openError.value = body.error || t("search.downloadDenied");
+      return;
+    }
+    saveBlob(body.blob, body.fileName);
+    const app = body.recommendedApp || row.recommendedApp || t("search.systemDefaultApp");
+    openInfo.value = t("search.openWithInstructions", { app, file: body.fileName });
+  } catch (err) {
+    openInfo.value = "";
+    openError.value = err instanceof Error ? err.message : t("search.downloadDenied");
+  } finally {
+    openingId.value = null;
+    // Open Original must not change preview selection.
+    selectedId.value = previousSelected;
+  }
 }
 
 function selectType(key: string) {
@@ -421,5 +513,20 @@ watch(
 }
 .qka-type-active {
   font-weight: 600;
+}
+.qka-actions-cell {
+  width: 48px;
+  padding-left: 0;
+  padding-right: 4px;
+}
+.qka-open-original {
+  opacity: 0.72;
+}
+.qka-open-original:hover,
+.qka-open-original:focus-visible {
+  opacity: 1;
+}
+.body--dark .qka-search-source {
+  border-color: rgba(255, 255, 255, 0.16);
 }
 </style>

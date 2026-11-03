@@ -311,3 +311,165 @@ def list_inventory(
 ) -> dict:
     _require_super_admin(request, settings, session, mutating=False)
     return svc.list_inventory(session, search, fileType, page, pageSize, connectionId)
+
+
+class ExtractMissingRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    connectionId: uuid.UUID | None = None
+    folderPrefix: str | None = None
+    forceOutsidePilot: bool = False
+
+
+class RetryFailedRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    connectionId: uuid.UUID | None = None
+
+
+class ReindexSelectedRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    inventoryIds: list[uuid.UUID] = Field(default_factory=list)
+    forceOutsidePilot: bool = True
+
+
+class ReindexFolderRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    connectionId: uuid.UUID | None = None
+    folderPrefix: str
+    forceOutsidePilot: bool = True
+
+
+def _share_id_for_connection(session: Session, connection_id: uuid.UUID | None) -> uuid.UUID | None:
+    if connection_id is None:
+        return None
+    connection = svc.get_connection(session, connection_id)
+    raw = connection.get("primaryApprovedShareId")
+    return uuid.UUID(raw) if raw else None
+
+
+@router.get("/extraction/status")
+def extraction_status(
+    request: Request,
+    connectionId: uuid.UUID | None = None,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    from sqlalchemy import select
+
+    from qka_api.services import extraction as extraction_svc
+    from qka_shared.models import SynologyExtractionBatch
+
+    _require_super_admin(request, settings, session, mutating=False)
+    share_id = _share_id_for_connection(session, connectionId)
+    batches = session.execute(
+        select(SynologyExtractionBatch).order_by(SynologyExtractionBatch.created_at.desc()).limit(10)
+    ).scalars().all()
+    return {
+        "stats": extraction_svc.content_indexing_stats(session, share_id=share_id),
+        "dependencies": extraction_svc.dependency_health(settings),
+        "recentBatches": [extraction_svc.serialize_batch(row) for row in batches],
+    }
+
+
+@router.post("/extraction/extract-missing")
+def extract_missing(
+    request: Request,
+    body: ExtractMissingRequest | None = None,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    from qka_api.services import extraction as extraction_svc
+
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    _guard_writes(settings)
+    payload = body or ExtractMissingRequest()
+    share_id = _share_id_for_connection(session, payload.connectionId)
+    batch = extraction_svc.start_extract_missing(
+        session,
+        settings,
+        actor_user_id=actor.id,
+        share_id=share_id,
+        folder_prefix=payload.folderPrefix,
+        force_outside_pilot=payload.forceOutsidePilot,
+    )
+    session.commit()
+    return extraction_svc.serialize_batch(batch)
+
+
+@router.post("/extraction/retry-failed")
+def retry_failed(
+    request: Request,
+    body: RetryFailedRequest | None = None,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    from qka_api.services import extraction as extraction_svc
+
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    _guard_writes(settings)
+    payload = body or RetryFailedRequest()
+    share_id = _share_id_for_connection(session, payload.connectionId)
+    batch = extraction_svc.start_retry_failed(
+        session,
+        settings,
+        actor_user_id=actor.id,
+        share_id=share_id,
+    )
+    session.commit()
+    return extraction_svc.serialize_batch(batch)
+
+
+@router.post("/extraction/reindex-selected")
+def reindex_selected(
+    request: Request,
+    body: ReindexSelectedRequest,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    from qka_api.services import extraction as extraction_svc
+
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    _guard_writes(settings)
+    if not body.inventoryIds:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="inventoryIds is required.")
+    batch = extraction_svc.start_reindex_selected(
+        session,
+        settings,
+        actor_user_id=actor.id,
+        inventory_ids=body.inventoryIds,
+        force_outside_pilot=body.forceOutsidePilot,
+    )
+    session.commit()
+    return extraction_svc.serialize_batch(batch)
+
+
+@router.post("/extraction/reindex-folder")
+def reindex_folder(
+    request: Request,
+    body: ReindexFolderRequest,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    from qka_api.services import extraction as extraction_svc
+
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    _guard_writes(settings)
+    share_id = _share_id_for_connection(session, body.connectionId)
+    if share_id is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="connectionId with an approved share is required.")
+    try:
+        batch = extraction_svc.start_reindex_folder(
+            session,
+            settings,
+            actor_user_id=actor.id,
+            share_id=share_id,
+            folder_prefix=body.folderPrefix,
+            force_outside_pilot=body.forceOutsidePilot,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    session.commit()
+    return extraction_svc.serialize_batch(batch)

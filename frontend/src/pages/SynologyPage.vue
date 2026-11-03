@@ -157,6 +157,95 @@
 
       <q-card bordered>
         <q-card-section>
+          <div class="text-subtitle1 q-mb-sm">{{ t("synology.contentIndexing") }}</div>
+          <p class="text-caption">{{ t("synology.contentIndexingHint") }}</p>
+          <div class="row q-col-gutter-sm q-mb-md">
+            <div class="col-6 col-md-3" v-for="card in extractionStatCards" :key="card.label">
+              <div class="text-caption">{{ card.label }}</div>
+              <div class="text-subtitle1">{{ card.value }}</div>
+            </div>
+          </div>
+          <div class="text-caption q-mb-sm">
+            OCR: {{ extractionDeps?.ocr?.available ? t("synology.depReady") : t("synology.depMissing") }}
+            <span v-if="extractionDeps?.ocr?.languages?.length"> ({{ extractionDeps.ocr.languages.join(", ") }})</span>
+            · LibreOffice: {{ extractionDeps?.libreOffice?.available ? t("synology.depReady") : t("synology.depMissing") }}
+            · extractor v{{ extractionDeps?.extractorVersion ?? "—" }}
+          </div>
+          <div v-if="extractionDeps?.ocr?.installHint && !extractionDeps?.ocr?.available" class="text-negative text-caption q-mb-sm">
+            {{ extractionDeps.ocr.installHint }}
+          </div>
+          <div class="row q-col-gutter-sm q-mb-sm">
+            <div class="col-auto">
+              <q-btn
+                color="primary"
+                unelevated
+                no-caps
+                :loading="extractionBusy"
+                :label="t('synology.extractMissing')"
+                @click="runExtractMissing"
+              />
+            </div>
+            <div class="col-auto">
+              <q-btn
+                outline
+                color="primary"
+                no-caps
+                :loading="extractionBusy"
+                :label="t('synology.retryFailed')"
+                @click="runRetryFailed"
+              />
+            </div>
+            <div class="col-auto">
+              <q-btn
+                outline
+                color="primary"
+                no-caps
+                :loading="extractionBusy"
+                :disable="!selectedInventoryIds.length"
+                :label="t('synology.reindexSelected')"
+                @click="runReindexSelected"
+              />
+            </div>
+          </div>
+          <div class="row q-col-gutter-sm items-center">
+            <div class="col-12 col-md-8">
+              <q-input
+                v-model="reindexFolderPrefix"
+                outlined
+                dense
+                :label="t('synology.reindexFolderPrefix')"
+                :hint="t('synology.reindexFolderHint')"
+              />
+            </div>
+            <div class="col-auto">
+              <q-btn
+                outline
+                color="primary"
+                no-caps
+                :loading="extractionBusy"
+                :disable="!reindexFolderPrefix.trim()"
+                :label="t('synology.reindexFolder')"
+                @click="runReindexFolder"
+              />
+            </div>
+          </div>
+          <div v-if="extractionMessage" class="text-caption q-mt-sm" :class="extractionOk ? 'text-positive' : 'text-negative'">
+            {{ extractionMessage }}
+          </div>
+          <div v-if="extractionStatus?.recentBatches?.length" class="text-caption q-mt-sm">
+            {{ t("synology.lastExtractionBatch") }}:
+            {{ extractionStatus.recentBatches[0].action }} ·
+            q{{ extractionStatus.recentBatches[0].queuedCount }} /
+            p{{ extractionStatus.recentBatches[0].processedCount }} /
+            ok{{ extractionStatus.recentBatches[0].succeededCount }} /
+            fail{{ extractionStatus.recentBatches[0].failedCount }} /
+            skip{{ extractionStatus.recentBatches[0].skippedCount }}
+          </div>
+        </q-card-section>
+      </q-card>
+
+      <q-card bordered>
+        <q-card-section>
           <div class="text-subtitle1 q-mb-sm">{{ t("synology.sync") }}</div>
           <p class="text-caption">{{ t("synology.syncHint") }}</p>
           <div class="row q-col-gutter-sm q-mb-md">
@@ -304,6 +393,15 @@
                 </div>
               </div>
             </template>
+            <template #body-cell-select="props">
+              <q-td :props="props">
+                <q-checkbox
+                  dense
+                  :model-value="selectedInventoryIds.includes(props.row.id)"
+                  @update:model-value="(v: boolean) => toggleInventorySelect(props.row.id, v)"
+                />
+              </q-td>
+            </template>
             <template #body-cell-fileName="props">
               <q-td :props="props" class="qka-ellipsis-cell">
                 <button type="button" class="qka-file-link" @click="preview(props.row.id)">
@@ -341,7 +439,15 @@
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import type { QTableColumn, QTableProps } from "quasar";
-import { api, type SourceScope, type SourceSource, type SynologyConnection, type SynologyInventoryPage, type SynologyMonitor } from "@/api";
+import {
+  api,
+  type ExtractionStatus,
+  type SourceScope,
+  type SourceSource,
+  type SynologyConnection,
+  type SynologyInventoryPage,
+  type SynologyMonitor,
+} from "@/api";
 import { useSessionStore } from "@/stores/session";
 
 const { t } = useI18n();
@@ -354,6 +460,25 @@ const testing = ref(false);
 const starting = ref(false);
 const cancelling = ref(false);
 const loadingInventory = ref(false);
+const extractionStatus = ref<ExtractionStatus | null>(null);
+const extractionBusy = ref(false);
+const extractionMessage = ref("");
+const extractionOk = ref(false);
+const selectedInventoryIds = ref<string[]>([]);
+const reindexFolderPrefix = ref("");
+const extractionDeps = computed(() => extractionStatus.value?.dependencies ?? null);
+const extractionStatCards = computed(() => {
+  const stats = extractionStatus.value?.stats;
+  return [
+    { label: t("synology.indexed"), value: stats?.indexed ?? "—" },
+    { label: t("synology.pending"), value: stats?.pending ?? "—" },
+    { label: t("synology.failed"), value: stats?.failed ?? "—" },
+    { label: t("synology.skipped"), value: stats?.skipped ?? "—" },
+    { label: t("synology.unsupported"), value: stats?.unsupported ?? "—" },
+    { label: t("synology.missingContent"), value: stats?.missingContentRows ?? "—" },
+    { label: t("synology.queuePending"), value: stats?.queuePending ?? "—" },
+  ];
+});
 const connections = ref<SynologyConnection[]>([]);
 const selectedId = ref<string | null>(null);
 const policySources = ref<SourceSource[]>([]);
@@ -398,6 +523,7 @@ const fileTypeOptions = computed(() => [
 ]);
 
 const columns = computed<QTableColumn[]>(() => [
+  { name: "select", label: "", field: "id", align: "left", style: "width: 36px" },
   { name: "fileName", label: t("synology.colName"), field: "fileName", align: "left", classes: "qka-col-name", headerClasses: "qka-col-name" },
   { name: "relativeFolderPath", label: t("synology.colFolder"), field: "relativeFolderPath", align: "left", classes: "qka-col-folder", headerClasses: "qka-col-folder" },
   { name: "extension", label: t("synology.colExt"), field: "extension", align: "left", classes: "qka-col-ext", headerClasses: "qka-col-ext" },
@@ -555,8 +681,108 @@ async function loadMonitor() {
   if (monitor.value.connection) {
     connection.value = monitor.value.connection;
   }
+  await loadExtractionStatus();
   if (jobBusy.value) startPoll();
   else stopPoll();
+}
+
+async function loadExtractionStatus() {
+  if (!selectedId.value) {
+    extractionStatus.value = null;
+    return;
+  }
+  try {
+    extractionStatus.value = await api.synologyExtractionStatus(selectedId.value);
+  } catch {
+    extractionStatus.value = null;
+  }
+}
+
+function toggleInventorySelect(id: string, selected: boolean) {
+  if (selected) {
+    if (!selectedInventoryIds.value.includes(id)) selectedInventoryIds.value = [...selectedInventoryIds.value, id];
+  } else {
+    selectedInventoryIds.value = selectedInventoryIds.value.filter((item) => item !== id);
+  }
+}
+
+async function runExtractMissing() {
+  if (!selectedId.value) return;
+  extractionBusy.value = true;
+  extractionMessage.value = "";
+  try {
+    const batch = await api.synologyExtractMissing({
+      connectionId: selectedId.value,
+      forceOutsidePilot: false,
+    });
+    extractionOk.value = true;
+    extractionMessage.value = `${t("synology.extractQueued")}: ${batch.queuedCount}`;
+    await loadExtractionStatus();
+  } catch (err) {
+    extractionOk.value = false;
+    extractionMessage.value = err instanceof Error ? err.message : t("synology.extractError");
+  } finally {
+    extractionBusy.value = false;
+  }
+}
+
+async function runRetryFailed() {
+  if (!selectedId.value) return;
+  extractionBusy.value = true;
+  extractionMessage.value = "";
+  try {
+    const batch = await api.synologyRetryFailed({ connectionId: selectedId.value });
+    extractionOk.value = true;
+    extractionMessage.value = `${t("synology.extractQueued")}: ${batch.queuedCount}`;
+    await loadExtractionStatus();
+  } catch (err) {
+    extractionOk.value = false;
+    extractionMessage.value = err instanceof Error ? err.message : t("synology.extractError");
+  } finally {
+    extractionBusy.value = false;
+  }
+}
+
+async function runReindexSelected() {
+  if (!selectedInventoryIds.value.length) return;
+  extractionBusy.value = true;
+  extractionMessage.value = "";
+  try {
+    const batch = await api.synologyReindexSelected({
+      inventoryIds: selectedInventoryIds.value,
+      forceOutsidePilot: true,
+    });
+    extractionOk.value = true;
+    extractionMessage.value = `${t("synology.extractQueued")}: ${batch.queuedCount}`;
+    selectedInventoryIds.value = [];
+    await loadExtractionStatus();
+  } catch (err) {
+    extractionOk.value = false;
+    extractionMessage.value = err instanceof Error ? err.message : t("synology.extractError");
+  } finally {
+    extractionBusy.value = false;
+  }
+}
+
+async function runReindexFolder() {
+  if (!selectedId.value || !reindexFolderPrefix.value.trim()) return;
+  extractionBusy.value = true;
+  extractionMessage.value = "";
+  try {
+    const batch = await api.synologyReindexFolder({
+      connectionId: selectedId.value,
+      folderPrefix: reindexFolderPrefix.value.trim(),
+      forceOutsidePilot: true,
+    });
+    extractionOk.value = true;
+    extractionMessage.value = `${t("synology.extractQueued")}: ${batch.queuedCount}`;
+    await loadExtractionStatus();
+  } catch (err) {
+    extractionOk.value = false;
+    extractionMessage.value = err instanceof Error ? err.message : t("synology.extractError");
+  } finally {
+    extractionBusy.value = false;
+  }
 }
 
 async function loadInventory(page = pagination.value.page, pageSize = pagination.value.rowsPerPage) {

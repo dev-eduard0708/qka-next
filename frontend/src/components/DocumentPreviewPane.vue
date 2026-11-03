@@ -49,7 +49,7 @@
           dense
           no-caps
           icon="open_in_new"
-          :label="t('search.openWith')"
+          :label="openWithLabel"
           :loading="busy"
           @click="tryDownload(true)"
         />
@@ -231,6 +231,15 @@ const viewOptions = computed(() => [
   { label: t("search.previewDataView"), value: "data" },
 ]);
 
+const openWithLabel = computed(() => {
+  const ft = (preview.value?.fileType || props.hitFileType || "").toLowerCase();
+  if (ft === "excel" || ft === "csv") return t("search.openWithExcel");
+  if (ft === "word") return t("search.openWithWord");
+  if (ft === "powerpoint") return t("search.openWithPowerPoint");
+  if (ft === "pdf") return t("search.openWithPdf");
+  return t("search.openWith");
+});
+
 function iconFor(type: string | undefined) {
   if (type === "excel" || type === "csv") return "table_chart";
   if (type === "pdf") return "picture_as_pdf";
@@ -298,25 +307,21 @@ async function tryDownload(openWith: boolean) {
   banner.value = "";
   info.value = "";
   try {
-    const body = await api.documentDownload(props.documentId);
+    // Always transfer only after an explicit user click. intent=open asks for inline
+    // disposition so Windows can use registered Office/PDF associations when possible.
+    const body = await api.documentDownload(props.documentId, {
+      intent: openWith ? "open" : "download",
+    });
     if (!body.ok) {
       banner.value = body.error || t("search.downloadDenied");
       return;
     }
+    const app = body.recommendedApp || t("search.systemDefaultApp");
     if (openWith) {
-      const url = URL.createObjectURL(body.blob);
-      const opened = window.open(url, "_blank", "noopener,noreferrer");
-      if (!opened) {
-        saveBlob(body.blob, body.fileName);
-        info.value = t("search.openWithFallback", {
-          app: body.recommendedApp || t("search.systemDefaultApp"),
-        });
-      } else {
-        info.value = t("search.openWithHint", {
-          app: body.recommendedApp || t("search.systemDefaultApp"),
-        });
-        window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
-      }
+      // Browsers cannot launch desktop Office directly from a blob URL. Download the
+      // authorized original, then guide the user to open with the registered app.
+      saveBlob(body.blob, body.fileName);
+      info.value = t("search.openWithInstructions", { app, file: body.fileName });
     } else {
       saveBlob(body.blob, body.fileName);
       info.value = t("search.downloadStarted");

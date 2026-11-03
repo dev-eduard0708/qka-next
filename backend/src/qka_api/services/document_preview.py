@@ -773,8 +773,12 @@ def preview_page_image(
 
 
 def preview_engine_status(settings: Settings) -> dict:
+    from qka_api.services.office_desktop import detect_microsoft_office, microsoft_graph_preview_feasibility
+
     return {
         "libreOffice": libreoffice_status(settings),
+        "microsoftOffice": detect_microsoft_office(),
+        "microsoftGraphPreview": microsoft_graph_preview_feasibility(),
         "pdfRenderer": "pymupdf",
         "officeConversion": "libreoffice-headless",
         "cacheDirConfigured": bool((settings.preview_cache_dir or "").strip()),

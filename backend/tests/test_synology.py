@@ -48,9 +48,20 @@ def _gateway(client) -> FakeSmbGateway:
 
 
 def _run_worker(client) -> None:
+    from qka_api.services import extraction as extraction_svc
+
     settings = client.app.state.settings
     with client.app.state.session_factory() as session:
         process_next_job(session, settings, client.app.state.smb_gateway)
+        session.commit()
+        # Drain extraction queue so sync tests observe indexed content.
+        for _ in range(50):
+            n = extraction_svc.process_extraction_queue(
+                session, settings, client.app.state.smb_gateway, max_items=10
+            )
+            session.commit()
+            if n == 0:
+                break
         session.commit()
 
 
@@ -208,7 +219,8 @@ def test_sync_resync_extraction_and_incomplete_scan_safety(client) -> None:
     assert "deck.pptx" in names
     ppt = next(row for row in items if row["fileName"] == "deck.pptx")
     notes = next(row for row in items if row["fileName"] == "notes.txt")
-    assert ppt["indexingState"] == "unsupported"
+    # PPTX is supported; garbage bytes fail extraction rather than marking unsupported.
+    assert ppt["indexingState"] in {"failed", "pending"}
     assert notes["indexingState"] == "indexed"
 
     stats = client.get("/api/v1/admin/synology/sync/stats", params={"connectionId": connection_id})

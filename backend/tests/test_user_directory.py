@@ -57,6 +57,20 @@ def test_unknown_membership_is_not_nonmember(client):
     assert pending["chatgptMembership"] == "unknown"
 
 
+def test_existing_allowlist_emails_appear_as_directory_users(client):
+    headers = _admin_headers(client)
+    rows = client.get("/api/v1/access/users", headers=headers, params={"pageSize": 100}).json()["items"]
+    by_email = {row["primaryEmail"]: row for row in rows}
+    assert "eduard@qehc.edu.sa" in by_email
+    assert "dev.eduard@qehc.edu.sa" in by_email
+    assert by_email["eduard@qehc.edu.sa"]["displayName"] == "Eduard Pilot"
+    assert by_email["eduard@qehc.edu.sa"]["identityStatus"] == "linked"
+    assert by_email["dev.eduard@qehc.edu.sa"]["displayName"] == "Dev Eduard"
+    assert by_email["dev.eduard@qehc.edu.sa"]["identityStatus"] == "pending"
+    assert " " in by_email["eduard@qehc.edu.sa"]["displayName"]
+    assert " " in by_email["dev.eduard@qehc.edu.sa"]["displayName"]
+
+
 def test_membership_sync_is_manual_csv_only(client):
     headers = _admin_headers(client)
     info = client.get("/api/v1/access/users/membership-sync", headers=headers).json()

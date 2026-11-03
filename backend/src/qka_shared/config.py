@@ -55,6 +55,15 @@ class Settings(BaseSettings):
     preview_max_pages: int = 100
     libreoffice_path: str = ""
     libreoffice_timeout_seconds: int = 120
+    tesseract_path: str = ""
+    ocr_timeout_seconds: int = 120
+    ocr_max_pixels: int = 40_000_000
+    extraction_max_pages: int = 100
+    extraction_max_file_bytes: int = 40_000_000
+    extraction_max_chars: int = 500_000
+    extraction_concurrency: int = 1
+    extraction_max_attempts: int = 5
+    extraction_lease_minutes: int = 15
     log_level: str = "INFO"
     credential_key: str = ""
     worker_embedded: bool = True

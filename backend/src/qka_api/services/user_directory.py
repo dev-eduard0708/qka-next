@@ -140,6 +140,51 @@ def _membership_label(status: int) -> str:
     return "unknown"
 
 
+def _compact_name(value: str) -> str:
+    return "".join(ch for ch in (value or "").lower() if ch.isalnum())
+
+
+def _looks_like_email_local_part(name: str, email_normalized: str) -> bool:
+    local = email_normalized.split("@", 1)[0]
+    return _compact_name(name) == _compact_name(local)
+
+
+def _humanize_local_part(email_normalized: str) -> str:
+    local = email_normalized.split("@", 1)[0]
+    parts = [p for p in local.replace("_", ".").replace("-", ".").split(".") if p]
+    return " ".join(p.capitalize() for p in parts) or local
+
+
+def directory_display_name(row: AllowedEmail, user: QkaUser | None) -> str:
+    """Prefer an admin Full Name; never leave a row looking like a raw email local-part."""
+    admin = (row.display_name or "").strip()
+    if admin and not _looks_like_email_local_part(admin, row.email_normalized):
+        return admin[:256]
+    if user is not None:
+        linked = (user.display_name or "").strip()
+        if linked and not _looks_like_email_local_part(linked, row.email_normalized):
+            return linked[:256]
+    profile = (row.google_profile_name or "").strip()
+    if profile:
+        return profile[:256]
+    if admin:
+        return admin[:256]
+    return _humanize_local_part(row.email_normalized)[:256]
+
+
+def promote_allowlist_row_to_user(session: Session, row: AllowedEmail, user: QkaUser | None) -> None:
+    """Existing Allowed Emails are directory users — persist a Full Name and channel row."""
+    name = directory_display_name(row, user)
+    if (row.display_name or "").strip() != name:
+        row.display_name = name
+        row.updated_at = _now()
+    if user is not None and not (row.google_profile_name or "").strip():
+        linked = (user.display_name or "").strip()
+        if linked:
+            row.google_profile_name = linked[:256]
+    get_or_create_chat_access(session, row.id)
+
+
 def _user_dto(
     row: AllowedEmail,
     *,
@@ -156,7 +201,7 @@ def _user_dto(
     else:
         identity_status = "pending"
         account_status = "pending"
-    admin_name = (row.display_name or "").strip() or row.email_normalized.split("@", 1)[0]
+    admin_name = directory_display_name(row, user)
     mem_status = membership.status if membership is not None else MEMBERSHIP_UNKNOWN
     return {
         "allowlistId": str(row.id),
@@ -212,7 +257,10 @@ def list_users(
     for row in rows:
         linked = by_email.get(row.email_normalized) or []
         user = linked[0] if linked else None
-        dto = _user_dto(row, user=user, chat=chat_by_id.get(row.id), membership=mem_by_id.get(row.id))
+        promote_allowlist_row_to_user(session, row, user)
+        chat = chat_by_id.get(row.id) or get_or_create_chat_access(session, row.id)
+        chat_by_id[row.id] = chat
+        dto = _user_dto(row, user=user, chat=chat, membership=mem_by_id.get(row.id))
         items.append(dto)
 
     q = (search or "").strip().lower()

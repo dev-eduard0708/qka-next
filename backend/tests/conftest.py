@@ -285,6 +285,68 @@ def seed_db():
         session.execute(text('ALTER TABLE synology_approved_share ADD COLUMN IF NOT EXISTS "QkaManagedServiceReadVerified" BOOLEAN NOT NULL DEFAULT FALSE'))
         session.execute(text('ALTER TABLE synology_approved_share ADD COLUMN IF NOT EXISTS "QkaManagedEnabledAt" TIMESTAMPTZ NULL'))
         session.execute(text('ALTER TABLE synology_approved_share ADD COLUMN IF NOT EXISTS "QkaManagedEnabledByUserId" UUID NULL'))
+        session.execute(text('ALTER TABLE synology_document_content ADD COLUMN IF NOT EXISTS "ChunksJson" TEXT NULL'))
+        session.execute(text('ALTER TABLE synology_document_content ADD COLUMN IF NOT EXISTS "ExtractionMethod" VARCHAR(64) NULL'))
+        session.execute(text('ALTER TABLE synology_document_content ADD COLUMN IF NOT EXISTS "ExtractorVersion" INTEGER NOT NULL DEFAULT 0'))
+        session.execute(text('ALTER TABLE synology_document_content ADD COLUMN IF NOT EXISTS "OcrUsed" BOOLEAN NOT NULL DEFAULT FALSE'))
+        session.execute(text('ALTER TABLE synology_document_content ADD COLUMN IF NOT EXISTS "Truncated" BOOLEAN NOT NULL DEFAULT FALSE'))
+        session.execute(text('ALTER TABLE synology_document_content ADD COLUMN IF NOT EXISTS "Incomplete" BOOLEAN NOT NULL DEFAULT FALSE'))
+        session.execute(text('ALTER TABLE synology_document_content ADD COLUMN IF NOT EXISTS "AttemptCount" INTEGER NOT NULL DEFAULT 0'))
+        session.execute(text('ALTER TABLE synology_document_content ADD COLUMN IF NOT EXISTS "NextAttemptAt" TIMESTAMPTZ NULL'))
+        session.execute(text('ALTER TABLE synology_document_content ADD COLUMN IF NOT EXISTS "LeaseOwner" VARCHAR(256) NULL'))
+        session.execute(text('ALTER TABLE synology_document_content ADD COLUMN IF NOT EXISTS "LeaseExpiresAt" TIMESTAMPTZ NULL'))
+        session.execute(text('ALTER TABLE synology_document_content ADD COLUMN IF NOT EXISTS "SourceLastWriteUtc" TIMESTAMPTZ NULL'))
+        session.execute(text('ALTER TABLE synology_document_content ADD COLUMN IF NOT EXISTS "ExtractionNotes" VARCHAR(2000) NULL'))
+        session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS synology_extraction_batch (
+                    "Id" UUID PRIMARY KEY,
+                    "Action" VARCHAR(64) NOT NULL,
+                    "Status" INTEGER NOT NULL DEFAULT 0,
+                    "ActorUserId" UUID NULL,
+                    "ApprovedShareId" UUID NULL,
+                    "FolderPrefixNormalized" VARCHAR(2048) NOT NULL DEFAULT '',
+                    "ForceOutsidePilot" BOOLEAN NOT NULL DEFAULT FALSE,
+                    "QueuedCount" INTEGER NOT NULL DEFAULT 0,
+                    "ProcessedCount" INTEGER NOT NULL DEFAULT 0,
+                    "SucceededCount" INTEGER NOT NULL DEFAULT 0,
+                    "FailedCount" INTEGER NOT NULL DEFAULT 0,
+                    "SkippedCount" INTEGER NOT NULL DEFAULT 0,
+                    "UnsupportedCount" INTEGER NOT NULL DEFAULT 0,
+                    "CancelRequested" BOOLEAN NOT NULL DEFAULT FALSE,
+                    "SafeError" VARCHAR(1024) NULL,
+                    "CreatedAt" TIMESTAMPTZ NOT NULL,
+                    "StartedAt" TIMESTAMPTZ NULL,
+                    "CompletedAt" TIMESTAMPTZ NULL
+                )
+                """
+            )
+        )
+        session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS synology_extraction_queue (
+                    "Id" UUID PRIMARY KEY,
+                    "BatchId" UUID NULL,
+                    "InventoryFileId" UUID NOT NULL,
+                    "ApprovedShareId" UUID NOT NULL,
+                    "Status" INTEGER NOT NULL DEFAULT 0,
+                    "ForceOutsidePilot" BOOLEAN NOT NULL DEFAULT FALSE,
+                    "AttemptCount" INTEGER NOT NULL DEFAULT 0,
+                    "Priority" INTEGER NOT NULL DEFAULT 100,
+                    "LeaseOwner" VARCHAR(256) NULL,
+                    "LeaseExpiresAt" TIMESTAMPTZ NULL,
+                    "NextAttemptAt" TIMESTAMPTZ NULL,
+                    "SafeError" VARCHAR(1024) NULL,
+                    "CreatedAt" TIMESTAMPTZ NOT NULL,
+                    "UpdatedAt" TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+        )
+        session.execute(text("DELETE FROM synology_extraction_queue"))
+        session.execute(text("DELETE FROM synology_extraction_batch"))
         session.execute(
             text(
                 """
@@ -422,7 +484,7 @@ def seed_db():
 
         backfill_inventory_hierarchy(session)
         session.commit()
-        session.execute(text("""UPDATE synology_document_content SET search_vector = to_tsvector('english', coalesce("ExtractedText", ''))"""))
+        session.execute(text("""UPDATE synology_document_content SET search_vector = to_tsvector('simple', coalesce("ExtractedText", ''))"""))
         session.commit()
     yield
     engine.dispose()
