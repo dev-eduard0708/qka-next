@@ -147,10 +147,16 @@ def _metadata_snippet(*, file_name: str, relative_path: str, needle: str, limit:
     return name[:limit]
 
 
+def _indexing_scope_mode(settings: Settings) -> str:
+    mode = (getattr(settings, "indexing_scope_mode", None) or "connection").strip().lower()
+    return mode if mode in {"connection", "pilot"} else "connection"
+
+
 def _scope_configuration(settings: Settings) -> dict:
     """Safe, non-secret view of search/extraction scope config."""
     prefix = _prefix_normalized(settings.pilot_folder_prefix)
     share = settings.approved_share_id
+    mode = _indexing_scope_mode(settings)
     return {
         "pilotFolderPrefixConfigured": bool(prefix),
         "pilotFolderPrefix": prefix or None,
@@ -159,7 +165,9 @@ def _scope_configuration(settings: Settings) -> dict:
         # Inventory authorization (grants/ACL) is authoritative for discovery.
         # PilotScoped/NonConfidential remain extraction-scope markers, not search gates.
         "searchAuthorization": "inventory_grants_and_source_acl",
-        "extractionScope": "pilot_folder_prefix",
+        "indexingScopeMode": mode,
+        # connection = configured Synology UNC/share; pilot = legacy prefix only.
+        "extractionScope": "connection_configured_share" if mode == "connection" else "pilot_folder_prefix",
         "metadataSearchRequiresExtraction": False,
     }
 
@@ -1264,13 +1272,16 @@ def list_inventory(
         return [], 0, deny_message("no_verified_email")
 
     prefix = _prefix_normalized(settings.pilot_folder_prefix)
+    pilot_only = _indexing_scope_mode(settings) == "pilot"
     stmt = select(SynologyFileInventory).where(
         SynologyFileInventory.is_present.is_(True),
         SynologyFileInventory.is_directory.is_(False),
     )
     if settings.approved_share_id:
         stmt = stmt.where(SynologyFileInventory.approved_share_id == settings.approved_share_id)
-    if prefix:
+    # Legacy pilot mode only: restrict listing to QKA_PILOT_FOLDER_PREFIX.
+    # Connection mode uses the configured share inventory + per-document authorization.
+    if pilot_only and prefix:
         stmt = stmt.where(
             or_(
                 SynologyFileInventory.relative_path_normalized == prefix,
@@ -1291,7 +1302,7 @@ def list_inventory(
     rows = session.execute(stmt.order_by(SynologyFileInventory.file_name).limit(400)).scalars().all()
     authorized: list[SynologyFileInventory] = []
     for inventory in rows:
-        if not _under_prefix(inventory.relative_path_normalized, prefix):
+        if pilot_only and not _under_prefix(inventory.relative_path_normalized, prefix):
             continue
         content = session.execute(
             select(SynologyDocumentContent).where(SynologyDocumentContent.inventory_file_id == inventory.id)

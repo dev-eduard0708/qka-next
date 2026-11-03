@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from qka_api.services import extraction as extraction_svc
 from qka_api.services.inventory_hierarchy import parent_normalized, present_file_filters
 from qka_api.smb import ACL_CAPTURED, EnumeratedFile, SmbCredentials, SmbError, SmbGateway
-from qka_shared.config import Settings
+from qka_shared.config import Settings, get_settings
 from qka_shared.models import (
     SynologyApprovedShare,
     SynologyConnectionSettings,
@@ -242,16 +242,66 @@ def share_dto(row: SynologyApprovedShare, host: str) -> dict:
     }
 
 
-def job_dto(job: SynologySyncJob) -> dict:
-    percent = None
-    if job.discovery_total and job.discovery_total > 0:
-        percent = round(min(100.0, 100.0 * job.files_processed / job.discovery_total), 1)
-    elif job.status == JOB_COMPLETED:
-        percent = 100.0
+def job_dto(job: SynologySyncJob, session: Session | None = None) -> dict:
+    # Discovery progress stays indeterminate until enumeration finishes (no fake %).
+    discovery_percent = None
+    if job.enumeration_complete and job.discovery_total and job.discovery_total > 0:
+        discovery_percent = 100.0
+    indexing = {
+        "batchId": str(job.extraction_batch_id) if job.extraction_batch_id else None,
+        "provisional": not job.enumeration_complete,
+        "queued": 0,
+        "processing": 0,
+        "processed": 0,
+        "indexed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "unsupported": 0,
+        "unchanged": int(job.files_unchanged or 0),
+        "percentComplete": None,
+        "status": None,
+    }
+    if session is not None and job.extraction_batch_id is not None:
+        from qka_shared.models import SynologyExtractionBatch, SynologyExtractionQueue
+
+        batch = session.get(SynologyExtractionBatch, job.extraction_batch_id)
+        if batch is not None:
+            processing = session.execute(
+                select(func.count())
+                .select_from(SynologyExtractionQueue)
+                .where(
+                    SynologyExtractionQueue.batch_id == batch.id,
+                    SynologyExtractionQueue.status == extraction_svc.QUEUE_PROCESSING,
+                )
+            ).scalar_one()
+            indexing.update(
+                {
+                    "queued": int(batch.queued_count or 0),
+                    "processing": int(processing or 0),
+                    "processed": int(batch.processed_count or 0),
+                    "indexed": int(batch.succeeded_count or 0),
+                    "failed": int(batch.failed_count or 0),
+                    "skipped": int(batch.skipped_count or 0),
+                    "unsupported": int(batch.unsupported_count or 0),
+                    "status": int(batch.status),
+                }
+            )
+            queued_total = int(batch.queued_count or 0)
+            if job.enumeration_complete and queued_total > 0:
+                indexing["percentComplete"] = round(
+                    min(100.0, 100.0 * int(batch.processed_count or 0) / queued_total),
+                    1,
+                )
+            elif not job.enumeration_complete:
+                indexing["percentComplete"] = None  # provisional while discovery adds jobs
+            elif job.enumeration_complete and queued_total == 0:
+                indexing["percentComplete"] = 100.0
+    overall_complete = job.status == JOB_COMPLETED and job.enumeration_complete
     return {
         "id": str(job.id),
         "trigger": job.trigger,
         "status": job.status,
+        "runStage": job.run_stage or ("discovering" if not job.enumeration_complete else "indexing"),
         "approvedShareId": str(job.approved_share_id) if job.approved_share_id else None,
         "createdAt": job.created_at.isoformat() if job.created_at else None,
         "startedAt": job.started_at.isoformat() if job.started_at else None,
@@ -276,9 +326,13 @@ def job_dto(job: SynologySyncJob) -> dict:
         "otherCount": job.other_count,
         "totalBytes": job.total_bytes,
         "discoveryTotal": job.discovery_total,
-        "percentComplete": percent,
+        "discoveryPercentComplete": discovery_percent,
+        "percentComplete": 100.0 if overall_complete else None,
+        "indexing": indexing,
+        "completedWithErrors": bool(job.status == JOB_COMPLETED and indexing.get("failed", 0) > 0),
         "safeError": job.safe_error,
         "cancelRequested": job.cancel_requested,
+        "extractionBatchId": str(job.extraction_batch_id) if job.extraction_batch_id else None,
     }
 
 
@@ -509,12 +563,25 @@ def get_monitor(session: Session, connection_id: uuid.UUID | None = None) -> dic
         job = session.get(SynologySyncJob, settings.current_job_id)
         if job:
             if connection.primary_approved_share_id and job.approved_share_id == connection.primary_approved_share_id:
-                current = job_dto(job)
+                current = job_dto(job, session)
             if job.status in {JOB_COMPLETED, JOB_FAILED, JOB_CANCELLED}:
                 settings.current_job_id = None
                 session.flush()
                 if current is not None and job.status != JOB_QUEUED:
-                    current = job_dto(job)
+                    current = job_dto(job, session)
+    # Keep the latest terminal job visible so progress + "Completed with errors" survive refresh.
+    if current is None and connection.primary_approved_share_id is not None:
+        latest = session.execute(
+            select(SynologySyncJob)
+            .where(
+                SynologySyncJob.approved_share_id == connection.primary_approved_share_id,
+                SynologySyncJob.status.in_([JOB_COMPLETED, JOB_FAILED, JOB_CANCELLED]),
+            )
+            .order_by(SynologySyncJob.created_at.desc())
+            .limit(1)
+        ).scalars().first()
+        if latest is not None:
+            current = job_dto(latest, session)
     share_last_sync = primary["lastSuccessfulSyncAt"] if primary else None
     has_completed = bool(share_last_sync or (settings.last_successful_job_id and connection.primary_approved_share_id))
     return {
@@ -558,14 +625,24 @@ def start_sync(session: Session, actor_id: uuid.UUID, connection_id: uuid.UUID |
         created_at=_now(),
         scope_unc_root=build_unc(connection.host_name, share.share_name, share.folder_relative_path),
         current_operation="Queued",
+        run_stage="discovering",
     )
     session.add(job)
+    session.flush()
+    batch = extraction_svc.create_sync_index_batch(
+        session,
+        get_settings(),
+        sync_job_id=job.id,
+        actor_user_id=actor_id,
+        approved_share_id=share.id,
+    )
+    job.extraction_batch_id = batch.id
     settings.current_job_id = job.id
     settings.last_attempted_sync_at = _now()
     settings.updated_at = _now()
     settings.updated_by_user_id = actor_id
     session.flush()
-    return job_dto(job)
+    return job_dto(job, session)
 
 
 def cancel_job(session: Session, job_id: uuid.UUID) -> None:
@@ -575,18 +652,44 @@ def cancel_job(session: Session, job_id: uuid.UUID) -> None:
     if job.status in {JOB_COMPLETED, JOB_FAILED, JOB_CANCELLED}:
         return
     job.cancel_requested = True
+    if job.extraction_batch_id is not None:
+        from qka_shared.models import SynologyExtractionBatch, SynologyExtractionQueue
+
+        batch = session.get(SynologyExtractionBatch, job.extraction_batch_id)
+        if batch is not None and batch.status in {
+            extraction_svc.BATCH_QUEUED,
+            extraction_svc.BATCH_RUNNING,
+        }:
+            batch.cancel_requested = True
+            now = _now()
+            pending = session.execute(
+                select(SynologyExtractionQueue).where(
+                    SynologyExtractionQueue.batch_id == batch.id,
+                    SynologyExtractionQueue.status.in_(
+                        [extraction_svc.QUEUE_PENDING, extraction_svc.QUEUE_PROCESSING]
+                    ),
+                )
+            ).scalars().all()
+            for item in pending:
+                item.status = extraction_svc.QUEUE_SKIPPED
+                item.safe_error = "Cancelled with sync job. Completed results were kept."
+                item.lease_owner = None
+                item.lease_expires_at = None
+                item.updated_at = now
+                batch.skipped_count += 1
+                batch.processed_count += 1
     session.flush()
 
 
 def list_history(session: Session, take: int = 50) -> list[dict]:
     limit = max(1, min(take, 100))
     jobs = session.execute(select(SynologySyncJob).order_by(SynologySyncJob.created_at.desc()).limit(limit)).scalars().all()
-    return [job_dto(job) for job in jobs]
+    return [job_dto(job, session) for job in jobs]
 
 
 def get_job(session: Session, job_id: uuid.UUID) -> dict | None:
     job = session.get(SynologySyncJob, job_id)
-    return None if job is None else job_dto(job)
+    return None if job is None else job_dto(job, session)
 
 
 def list_inventory(
@@ -757,10 +860,11 @@ def _run_job(session: Session, settings: Settings, gateway: SmbGateway, job_id: 
                 seen.update(_ensure_ancestors(session, share.id, job, item.relative_path))
                 if not is_dir:
                     job.files_discovered += 1
-                    if changed or _needs_extraction_retry(session, settings, row):
-                        _extract_if_needed(session, settings, gateway, connection, share, row, unc, creds)
+                    # Always evaluate extraction: new/changed/missing/failed retry; unchanged indexed skips.
+                    _extract_if_needed(session, settings, job, row)
                     job.files_processed += 1
                     _bump_type(job, classify(item.extension), item.size_bytes)
+                _ = changed
             except Exception:
                 log.exception("Failed to inventory Synology file name=%s", item.file_name)
                 job.files_failed += 1
@@ -770,8 +874,11 @@ def _run_job(session: Session, settings: Settings, gateway: SmbGateway, job_id: 
                 since_flush = 0
                 _renew_lease(session, job.id)
                 session.flush()
+        # Deletion only after a successful complete scan — never on interrupt/failure.
         job.enumeration_complete = True
         job.discovery_total = job.files_discovered
+        job.run_stage = "indexing"
+        job.current_operation = "Extracting and indexing content"
         existing = session.execute(
             select(SynologyFileInventory).where(
                 SynologyFileInventory.approved_share_id == share.id,
@@ -786,15 +893,7 @@ def _run_job(session: Session, settings: Settings, gateway: SmbGateway, job_id: 
                 row.last_seen_job_id = job.id
                 job.files_removed += 1
                 _clear_search(session, row.id)
-        job.status = JOB_COMPLETED
-        job.completed_at = _now()
-        job.current_operation = "Completed"
-        job.safe_error = None
-        share.last_successful_sync_at = job.completed_at
         sync_settings = _get_or_create_settings(session)
-        sync_settings.last_successful_sync_at = job.completed_at
-        sync_settings.last_successful_job_id = job.id
-        sync_settings.current_job_id = None
         sync_settings.last_excel_count = job.excel_count
         sync_settings.last_pdf_count = job.pdf_count
         sync_settings.last_word_count = job.word_count
@@ -804,22 +903,80 @@ def _run_job(session: Session, settings: Settings, gateway: SmbGateway, job_id: 
         sync_settings.last_total_files = job.files_discovered
         sync_settings.last_total_bytes = job.total_bytes
         sync_settings.updated_at = _now()
+        # Stay SCANNING until linked extraction batch reaches a terminal state.
+        session.flush()
+        extraction_svc._finalize_batches(session)
         session.flush()
     except InterruptedError:
         job.status = JOB_CANCELLED
         job.completed_at = _now()
+        job.run_stage = "cancelled"
         job.current_operation = "Cancelled"
-        job.safe_error = "Synchronization was cancelled."
+        job.safe_error = (
+            "Synchronization was cancelled. Completed extraction results were kept; "
+            "unscanned paths were not marked deleted."
+        )
         job.enumeration_complete = False
+        if job.extraction_batch_id is not None:
+            from qka_shared.models import SynologyExtractionBatch, SynologyExtractionQueue
+
+            batch = session.get(SynologyExtractionBatch, job.extraction_batch_id)
+            if batch is not None:
+                batch.cancel_requested = True
+                now = _now()
+                pending = session.execute(
+                    select(SynologyExtractionQueue).where(
+                        SynologyExtractionQueue.batch_id == batch.id,
+                        SynologyExtractionQueue.status.in_(
+                            [extraction_svc.QUEUE_PENDING, extraction_svc.QUEUE_PROCESSING]
+                        ),
+                    )
+                ).scalars().all()
+                for item in pending:
+                    item.status = extraction_svc.QUEUE_SKIPPED
+                    item.safe_error = "Cancelled with sync job. Completed results were kept."
+                    item.lease_owner = None
+                    item.lease_expires_at = None
+                    item.updated_at = now
+                    batch.skipped_count += 1
+                    batch.processed_count += 1
+                batch.status = extraction_svc.BATCH_CANCELLED
+                batch.completed_at = now
         _get_or_create_settings(session).current_job_id = None
         session.flush()
     except Exception as exc:
         log.exception("Synology sync job failed job_id=%s", job.id)
         job.status = JOB_FAILED
         job.completed_at = _now()
+        job.run_stage = "failed"
         job.current_operation = "Failed"
         job.safe_error = "Synchronization failed. Inventory was not marked removed because enumeration did not complete."
         job.enumeration_complete = False
+        if job.extraction_batch_id is not None:
+            from qka_shared.models import SynologyExtractionBatch, SynologyExtractionQueue
+
+            batch = session.get(SynologyExtractionBatch, job.extraction_batch_id)
+            if batch is not None:
+                batch.cancel_requested = True
+                now = _now()
+                pending = session.execute(
+                    select(SynologyExtractionQueue).where(
+                        SynologyExtractionQueue.batch_id == batch.id,
+                        SynologyExtractionQueue.status.in_(
+                            [extraction_svc.QUEUE_PENDING, extraction_svc.QUEUE_PROCESSING]
+                        ),
+                    )
+                ).scalars().all()
+                for item in pending:
+                    item.status = extraction_svc.QUEUE_SKIPPED
+                    item.safe_error = "Sync failed before enumeration completed."
+                    item.lease_owner = None
+                    item.lease_expires_at = None
+                    item.updated_at = now
+                    batch.skipped_count += 1
+                    batch.processed_count += 1
+                batch.status = extraction_svc.BATCH_CANCELLED
+                batch.completed_at = now
         _get_or_create_settings(session).current_job_id = None
         session.flush()
         _ = exc
@@ -957,18 +1114,19 @@ def _needs_extraction_retry(session: Session, settings: Settings, row: SynologyF
 def _extract_if_needed(
     session: Session,
     settings: Settings,
-    gateway: SmbGateway,
-    connection: SynologyConnectionSettings,
-    share: SynologyApprovedShare,
+    job: SynologySyncJob,
     row: SynologyFileInventory,
-    unc: str,
-    creds: SmbCredentials | None,
-) -> None:
+) -> str:
     """Enqueue extraction for background workers. Does not read file bytes during sync."""
-    _ = gateway, connection, share, unc, creds
     if bool(getattr(row, "is_directory", False)):
-        return
-    extraction_svc.enqueue_from_sync(session, settings, row, force=True)
+        return "skipped"
+    return extraction_svc.enqueue_from_sync(
+        session,
+        settings,
+        row,
+        force=False,
+        batch_id=job.extraction_batch_id,
+    )
 
 
 def _clear_search(session: Session, inventory_id: uuid.UUID) -> None:

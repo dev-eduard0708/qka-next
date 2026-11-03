@@ -60,9 +60,32 @@ def _now() -> datetime:
 
 
 def _pilot_path(settings: Settings, relative_path_normalized: str) -> bool:
+    """Legacy EDUARDTESTCLOUD-style prefix check (used when indexing_scope_mode=pilot)."""
     prefix = (settings.pilot_folder_prefix or "").replace("/", "\\").strip("\\").upper()
     path_key = (relative_path_normalized or "").upper()
     return (not prefix) or path_key == prefix or path_key.startswith(prefix + "\\")
+
+
+def indexing_scope_mode(settings: Settings) -> str:
+    mode = (getattr(settings, "indexing_scope_mode", None) or "connection").strip().lower()
+    return mode if mode in {"connection", "pilot"} else "connection"
+
+
+def in_indexing_scope(settings: Settings, relative_path_normalized: str) -> bool:
+    """Whether a discovered inventory path is eligible for automatic content indexing.
+
+    connection mode: Sync already limited discovery to the configured connection share/folders,
+    so every present inventory file is in scope.
+    pilot mode: restrict to QKA_PILOT_FOLDER_PREFIX (legacy).
+    """
+    if indexing_scope_mode(settings) == "connection":
+        return True
+    return _pilot_path(settings, relative_path_normalized)
+
+
+def connection_scope_forces_outside_pilot(settings: Settings) -> bool:
+    """Sync/connection indexing must bypass legacy pilot skip gates."""
+    return indexing_scope_mode(settings) == "connection"
 
 
 def _credentials(settings: Settings, connection: SynologyConnectionSettings) -> SmbCredentials | None:
@@ -172,7 +195,7 @@ def ensure_content_row(
         select(SynologyDocumentContent).where(SynologyDocumentContent.inventory_file_id == row.id)
     ).scalar_one_or_none()
     now = _now()
-    pilot = _pilot_path(settings, row.relative_path_normalized)
+    scoped = in_indexing_scope(settings, row.relative_path_normalized) or force_outside_pilot
     if content is None:
         content = SynologyDocumentContent(
             id=uuid.uuid4(),
@@ -190,11 +213,11 @@ def ensure_content_row(
     content.extension = row.extension
     content.relative_path_normalized = row.relative_path_normalized
     content.approved_share_id = row.approved_share_id
-    content.pilot_scoped = pilot
-    content.non_confidential = pilot
+    content.pilot_scoped = scoped
+    content.non_confidential = scoped
     content.source_last_write_utc = row.last_write_utc
     content.updated_at = now
-    if not pilot and not force_outside_pilot:
+    if not scoped:
         content.status = EXTRACT_SKIPPED
         content.extracted_text = None
         content.chunks_json = None
@@ -239,18 +262,23 @@ def needs_extraction_retry(
     if content is None:
         return True
     status = int(content.status or 0)
-    pilot = _pilot_path(settings, row.relative_path_normalized)
-    if status == EXTRACT_SKIPPED and (pilot or force_outside_pilot):
+    scoped = in_indexing_scope(settings, row.relative_path_normalized) or force_outside_pilot
+    if status == EXTRACT_SKIPPED and scoped:
         return True
     if status in {EXTRACT_PENDING, EXTRACT_FAILED}:
         return is_extractable(row.extension)
     if status == EXTRACT_UNSUPPORTED:
         return is_supported(row.extension) and int(content.extractor_version or 0) < EXTRACTOR_VERSION
     if status == EXTRACT_SUCCEEDED:
+        # Re-extract when the source file changed since last successful index.
+        if row.last_write_utc and content.source_last_write_utc and row.last_write_utc != content.source_last_write_utc:
+            return True
         if int(content.extractor_version or 0) != EXTRACTOR_VERSION:
             return True
         marker = content.safe_error or ""
         if marker.startswith("extractor_v=") and marker.split("|", 1)[0] != f"extractor_v={EXTRACTOR_VERSION}":
+            return True
+        if not (content.extracted_text or "").strip():
             return True
         return False
     return False
@@ -287,7 +315,7 @@ def enqueue_inventory_ids(
         if row is None or not row.is_present or row.is_directory:
             continue
         content = ensure_content_row(session, settings, row, force_outside_pilot=force_outside_pilot)
-        if not force_outside_pilot and not _pilot_path(settings, row.relative_path_normalized):
+        if not force_outside_pilot and not in_indexing_scope(settings, row.relative_path_normalized):
             content.status = EXTRACT_SKIPPED
             batch.skipped_count += 1
             continue
@@ -602,8 +630,8 @@ def _process_one(
         _bump_batch(session, item.batch_id, skipped=1)
         return
     content = ensure_content_row(session, settings, row, force_outside_pilot=item.force_outside_pilot)
-    pilot = _pilot_path(settings, row.relative_path_normalized)
-    if not pilot and not item.force_outside_pilot:
+    scoped = in_indexing_scope(settings, row.relative_path_normalized) or item.force_outside_pilot
+    if not scoped:
         content.status = EXTRACT_SKIPPED
         content.extracted_text = None
         content.chunks_json = None
@@ -679,8 +707,8 @@ def _process_one(
     content.lease_owner = None
     content.lease_expires_at = None
     content.updated_at = now
-    content.pilot_scoped = pilot
-    content.non_confidential = pilot
+    content.pilot_scoped = scoped
+    content.non_confidential = scoped
 
     if result.status == EXTRACT_SUCCEEDED and content.extracted_text:
         _update_search_vector(session, content)
@@ -774,8 +802,11 @@ def _bump_batch(
 
 def _finalize_batches(session: Session) -> None:
     now = _now()
+    # Include queued sync batches that never claimed an item (enumeration finished with 0 extractables).
     batches = session.execute(
-        select(SynologyExtractionBatch).where(SynologyExtractionBatch.status == BATCH_RUNNING)
+        select(SynologyExtractionBatch).where(
+            SynologyExtractionBatch.status.in_([BATCH_QUEUED, BATCH_RUNNING])
+        )
     ).scalars().all()
     for batch in batches:
         pending = session.execute(
@@ -786,9 +817,107 @@ def _finalize_batches(session: Session) -> None:
                 SynologyExtractionQueue.status.in_([QUEUE_PENDING, QUEUE_PROCESSING]),
             )
         ).scalar_one()
-        if int(pending or 0) == 0:
+        # Sync-linked batches stay open while discovery is still adding jobs.
+        if batch.sync_job_id is not None:
+            from qka_shared.models import SynologySyncJob
+
+            job = session.get(SynologySyncJob, batch.sync_job_id)
+            if job is not None and not job.enumeration_complete and not job.cancel_requested:
+                continue
+        if int(pending or 0) == 0 and (batch.queued_count > 0 or batch.sync_job_id is not None):
+            # Empty sync batch (nothing to extract) can complete once discovery finishes.
+            if batch.status == BATCH_QUEUED and batch.queued_count == 0 and batch.sync_job_id is not None:
+                batch.started_at = batch.started_at or now
             batch.status = BATCH_CANCELLED if batch.cancel_requested else BATCH_COMPLETED
             batch.completed_at = now
+    _finalize_sync_jobs_for_batches(session)
+
+
+def _finalize_sync_jobs_for_batches(session: Session) -> None:
+    """Complete sync/resync jobs only after discovery finishes and linked extraction is terminal."""
+    from qka_api.services.synology import JOB_CANCELLED, JOB_COMPLETED, JOB_FAILED, JOB_SCANNING
+    from qka_shared.models import SynologySyncJob, SynologySyncSettings
+
+    now = _now()
+    jobs = session.execute(
+        select(SynologySyncJob).where(
+            SynologySyncJob.status == JOB_SCANNING,
+            SynologySyncJob.enumeration_complete.is_(True),
+            SynologySyncJob.extraction_batch_id.is_not(None),
+        )
+    ).scalars().all()
+    for job in jobs:
+        batch = session.get(SynologyExtractionBatch, job.extraction_batch_id) if job.extraction_batch_id else None
+        if batch is None:
+            continue
+        if batch.status not in {BATCH_COMPLETED, BATCH_CANCELLED}:
+            job.run_stage = "indexing"
+            job.current_operation = "Extracting and indexing content"
+            continue
+        if job.cancel_requested or batch.cancel_requested:
+            job.status = JOB_CANCELLED
+            job.run_stage = "cancelled"
+            job.current_operation = "Cancelled"
+            job.safe_error = (
+                "Synchronization was cancelled. Completed extraction results were kept; "
+                "unscanned paths were not marked deleted."
+            )
+        elif batch.failed_count > 0:
+            job.status = JOB_COMPLETED
+            job.run_stage = "completed"
+            job.current_operation = "Completed with errors"
+            job.safe_error = (
+                f"Discovery finished. Extraction completed with {batch.failed_count} failed file(s). "
+                "Use Retry Failed to requeue failures."
+            )
+        else:
+            job.status = JOB_COMPLETED
+            job.run_stage = "completed"
+            job.current_operation = "Completed"
+            job.safe_error = None
+        job.completed_at = now
+        if job.status == JOB_COMPLETED and job.approved_share_id is not None:
+            share = session.get(SynologyApprovedShare, job.approved_share_id)
+            if share is not None:
+                share.last_successful_sync_at = now
+        settings_row = session.execute(select(SynologySyncSettings)).scalars().first()
+        if settings_row is not None:
+            if job.status == JOB_COMPLETED:
+                settings_row.last_successful_job_id = job.id
+                settings_row.last_successful_sync_at = now
+            if settings_row.current_job_id == job.id and job.status in {
+                JOB_COMPLETED,
+                JOB_CANCELLED,
+                JOB_FAILED,
+            }:
+                settings_row.current_job_id = None
+            settings_row.updated_at = now
+
+
+def create_sync_index_batch(
+    session: Session,
+    settings: Settings,
+    *,
+    sync_job_id: uuid.UUID,
+    actor_user_id: uuid.UUID | None,
+    approved_share_id: uuid.UUID | None,
+) -> SynologyExtractionBatch:
+    """Create the extraction batch that Sync/Resync fills while discovering files."""
+    now = _now()
+    force = connection_scope_forces_outside_pilot(settings)
+    batch = SynologyExtractionBatch(
+        id=uuid.uuid4(),
+        action="sync_index",
+        status=BATCH_QUEUED,
+        actor_user_id=actor_user_id,
+        approved_share_id=approved_share_id,
+        sync_job_id=sync_job_id,
+        force_outside_pilot=force,
+        created_at=now,
+    )
+    session.add(batch)
+    session.flush()
+    return batch
 
 
 def enqueue_from_sync(
@@ -797,18 +926,26 @@ def enqueue_from_sync(
     row: SynologyFileInventory,
     *,
     force: bool = False,
-) -> None:
-    """Called by Synology sync: mark pending/skipped and enqueue when in pilot scope."""
-    content = ensure_content_row(session, settings, row, force_outside_pilot=False)
-    pilot = _pilot_path(settings, row.relative_path_normalized)
-    if not pilot:
+    batch_id: uuid.UUID | None = None,
+) -> str:
+    """Enqueue extraction during Sync/Resync.
+
+    Returns: queued | unchanged | skipped | unsupported
+    """
+    force_scope = connection_scope_forces_outside_pilot(settings)
+    content = ensure_content_row(session, settings, row, force_outside_pilot=force_scope)
+    if not in_indexing_scope(settings, row.relative_path_normalized) and not force_scope:
         content.status = EXTRACT_SKIPPED
         content.extracted_text = None
         content.chunks_json = None
         content.safe_error = f"extractor_v={EXTRACTOR_VERSION}|Outside the approved extraction scope."
         content.extractor_version = EXTRACTOR_VERSION
         _clear_content_vector(session, content.id)
-        return
+        if batch_id is not None:
+            batch = session.get(SynologyExtractionBatch, batch_id)
+            if batch is not None:
+                batch.skipped_count += 1
+        return "skipped"
     if not is_extractable(row.extension):
         content.status = EXTRACT_UNSUPPORTED
         content.extracted_text = None
@@ -816,9 +953,14 @@ def enqueue_from_sync(
         content.safe_error = f"extractor_v={EXTRACTOR_VERSION}|File type is not supported for extraction."
         content.extractor_version = EXTRACTOR_VERSION
         _clear_content_vector(session, content.id)
-        return
-    if not force and not needs_extraction_retry(session, settings, row):
-        return
+        if batch_id is not None:
+            batch = session.get(SynologyExtractionBatch, batch_id)
+            if batch is not None:
+                batch.unsupported_count += 1
+        return "unsupported"
+    if not force and not needs_extraction_retry(session, settings, row, force_outside_pilot=force_scope):
+        return "unchanged"
+    # Mark stale while pending so search/fetch do not treat old text as current.
     content.status = EXTRACT_PENDING
     content.extracted_text = None
     content.chunks_json = None
@@ -835,18 +977,31 @@ def enqueue_from_sync(
     if existing is not None:
         existing.updated_at = now
         existing.next_attempt_at = now
-        return
+        existing.force_outside_pilot = force_scope or existing.force_outside_pilot
+        if batch_id is not None and existing.batch_id != batch_id:
+            existing.batch_id = batch_id
+            batch = session.get(SynologyExtractionBatch, batch_id)
+            if batch is not None:
+                batch.queued_count += 1
+        elif batch_id is not None:
+            existing.batch_id = batch_id
+        return "queued"
     session.add(
         SynologyExtractionQueue(
             id=uuid.uuid4(),
-            batch_id=None,
+            batch_id=batch_id,
             inventory_file_id=row.id,
             approved_share_id=row.approved_share_id,
             status=QUEUE_PENDING,
-            force_outside_pilot=False,
-            priority=100,
+            force_outside_pilot=force_scope,
+            priority=80,
             next_attempt_at=now,
             created_at=now,
             updated_at=now,
         )
     )
+    if batch_id is not None:
+        batch = session.get(SynologyExtractionBatch, batch_id)
+        if batch is not None:
+            batch.queued_count += 1
+    return "queued"

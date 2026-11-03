@@ -49,18 +49,34 @@ def _gateway(client) -> FakeSmbGateway:
 
 def _run_worker(client) -> None:
     from qka_api.services import extraction as extraction_svc
+    from qka_api.services.synology import JOB_SCANNING, JOB_QUEUED
+    from qka_shared.models import SynologyExtractionQueue, SynologySyncJob
+    from sqlalchemy import select
 
     settings = client.app.state.settings
     with client.app.state.session_factory() as session:
         process_next_job(session, settings, client.app.state.smb_gateway)
         session.commit()
-        # Drain extraction queue so sync tests observe indexed content.
-        for _ in range(50):
+        # Drain extraction (including bounded retries) until the sync job leaves scanning.
+        for _ in range(100):
+            now = datetime.now(timezone.utc)
+            pending = session.execute(
+                select(SynologyExtractionQueue).where(
+                    SynologyExtractionQueue.status == extraction_svc.QUEUE_PENDING
+                )
+            ).scalars().all()
+            for item in pending:
+                item.next_attempt_at = now
+            session.flush()
             n = extraction_svc.process_extraction_queue(
                 session, settings, client.app.state.smb_gateway, max_items=10
             )
+            extraction_svc._finalize_batches(session)
             session.commit()
-            if n == 0:
+            active = session.execute(
+                select(SynologySyncJob).where(SynologySyncJob.status.in_([JOB_QUEUED, JOB_SCANNING]))
+            ).scalars().first()
+            if active is None and n == 0:
                 break
         session.commit()
 
@@ -207,6 +223,11 @@ def test_sync_resync_extraction_and_incomplete_scan_safety(client) -> None:
     assert body["filesNew"] >= 2
     assert body["filesFailed"] == 0
     assert body["percentComplete"] == 100.0
+    assert body["runStage"] == "completed"
+    assert body["extractionBatchId"]
+    assert body["indexing"]["queued"] >= 1
+    assert body["indexing"]["indexed"] >= 1
+    assert body["indexing"]["provisional"] is False
 
     inventory = client.get(
         "/api/v1/admin/synology/inventory",

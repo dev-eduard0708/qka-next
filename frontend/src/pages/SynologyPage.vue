@@ -260,22 +260,62 @@
             </div>
           </div>
           <div v-if="monitor?.currentJob">
-            <div class="text-body2">{{ monitor.currentJob.currentOperation || jobStatusLabel(monitor.currentJob.status) }}</div>
+            <div class="text-body2">
+              {{ syncStageLabel(monitor.currentJob) }}
+              <span v-if="monitor.currentJob.completedWithErrors" class="text-warning"> — {{ t("synology.completedWithErrors") }}</span>
+            </div>
+            <div class="text-caption q-mt-md">{{ t("synology.stageDiscover") }}</div>
             <q-linear-progress
-              v-if="monitor.currentJob.percentComplete != null"
-              :value="monitor.currentJob.percentComplete / 100"
-              class="q-mt-sm"
+              class="q-mt-xs"
               color="primary"
+              :indeterminate="!monitor.currentJob.enumerationComplete"
+              :value="monitor.currentJob.enumerationComplete ? 1 : 0"
             />
-            <div class="text-caption q-mt-sm">
+            <div class="text-caption q-mt-xs">
               {{ t("synology.discovered") }}: {{ monitor.currentJob.filesDiscovered }} ·
-              {{ t("synology.processed") }}: {{ monitor.currentJob.filesProcessed }} ·
+              {{ t("synology.scanned") }}: {{ monitor.currentJob.filesProcessed }} ·
               {{ t("synology.added") }}: {{ monitor.currentJob.filesNew }} ·
               {{ t("synology.updated") }}: {{ monitor.currentJob.filesModified }} ·
               {{ t("synology.unchanged") }}: {{ monitor.currentJob.filesUnchanged }} ·
-              {{ t("synology.removed") }}: {{ monitor.currentJob.filesRemoved }}
+              {{ t("synology.removed") }}: {{ monitor.currentJob.filesRemoved }} ·
+              {{ t("synology.failed") }}: {{ monitor.currentJob.filesFailed ?? 0 }}
+            </div>
+
+            <div class="text-caption q-mt-md">
+              {{ t("synology.stageIndex") }}
+              <span v-if="monitor.currentJob.indexing?.provisional" class="text-grey-7"> ({{ t("synology.provisional") }})</span>
+              <span v-if="monitor.currentJob.indexing?.percentComplete != null" class="text-grey-7">
+                — {{ monitor.currentJob.indexing.percentComplete }}%
+              </span>
+            </div>
+            <q-linear-progress
+              class="q-mt-xs"
+              :color="(monitor.currentJob.indexing?.failed || 0) > 0 ? 'warning' : 'secondary'"
+              :indeterminate="Boolean(monitor.currentJob.indexing?.provisional && (monitor.currentJob.indexing?.queued || 0) === 0)"
+              :value="indexProgressValue(monitor.currentJob)"
+            />
+            <div class="text-caption q-mt-xs">
+              {{ t("synology.eligible") }}: {{ monitor.currentJob.indexing?.queued ?? 0 }} ·
+              {{ t("synology.queued") }}: {{ indexRemaining(monitor.currentJob) }} ·
+              {{ t("synology.processing") }}: {{ monitor.currentJob.indexing?.processing ?? 0 }} ·
+              {{ t("synology.indexed") }}: {{ monitor.currentJob.indexing?.indexed ?? 0 }} ·
+              {{ t("synology.skipped") }}: {{ monitor.currentJob.indexing?.skipped ?? 0 }} ·
+              {{ t("synology.failed") }}: {{ monitor.currentJob.indexing?.failed ?? 0 }} ·
+              {{ t("synology.unsupported") }}: {{ monitor.currentJob.indexing?.unsupported ?? 0 }} ·
+              {{ t("synology.remaining") }}: {{ indexRemaining(monitor.currentJob) }} ·
+              {{ t("synology.unchanged") }}: {{ monitor.currentJob.indexing?.unchanged ?? monitor.currentJob.filesUnchanged }}
             </div>
             <div v-if="monitor.currentJob.safeError" class="text-negative q-mt-sm">{{ monitor.currentJob.safeError }}</div>
+            <div v-if="monitor.currentJob.completedWithErrors" class="q-mt-sm">
+              <q-btn
+                outline
+                dense
+                color="warning"
+                :loading="extractionBusy"
+                :label="t('synology.retryFailed')"
+                @click="runRetryFailed"
+              />
+            </div>
           </div>
           <div v-else class="text-caption">{{ t("synology.noJob") }}</div>
         </q-card-section>
@@ -641,6 +681,24 @@ function aclLabel(value: number) {
 }
 function jobStatusLabel(value: number) {
   return [t("synology.queued"), t("synology.scanning"), t("synology.completed"), t("synology.failed"), t("synology.cancelled")][value] ?? String(value);
+}
+function syncStageLabel(job: NonNullable<SynologyMonitor["currentJob"]>) {
+  if (job.completedWithErrors) return t("synology.completedWithErrors");
+  if (job.runStage === "indexing" || (job.enumerationComplete && job.status === 1)) return t("synology.stageIndex");
+  if (job.runStage === "discovering" || job.status === 0 || (job.status === 1 && !job.enumerationComplete)) {
+    return t("synology.stageDiscover");
+  }
+  return job.currentOperation || jobStatusLabel(job.status);
+}
+function indexProgressValue(job: NonNullable<SynologyMonitor["currentJob"]>) {
+  const pct = job.indexing?.percentComplete;
+  if (pct == null) return 0;
+  return Math.max(0, Math.min(1, pct / 100));
+}
+function indexRemaining(job: NonNullable<SynologyMonitor["currentJob"]>) {
+  const queued = job.indexing?.queued ?? 0;
+  const processed = job.indexing?.processed ?? 0;
+  return Math.max(0, queued - processed);
 }
 
 async function loadConnections(preferId?: string | null) {

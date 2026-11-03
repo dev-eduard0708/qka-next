@@ -68,6 +68,8 @@ def seed_db():
     os.environ["QKA_LOCAL_ADMIN_USERNAME"] = "super"
     os.environ["QKA_LOCAL_ADMIN_PASSWORD"] = "123"
     os.environ["QKA_PILOT_FOLDER_PREFIX"] = "EDUARDTESTCLOUD"
+    # Keep pilot mode in tests so outside-prefix skip behavior stays covered.
+    os.environ["QKA_INDEXING_SCOPE_MODE"] = "pilot"
     os.environ["QKA_APPROVED_SHARE_ID"] = str(SHARE_ID)
     os.environ["QKA_WORKER_EMBEDDED"] = "false"
     os.environ["QKA_CREDENTIAL_KEY"] = "test-credential-key-not-for-production"
@@ -306,6 +308,7 @@ def seed_db():
                     "Status" INTEGER NOT NULL DEFAULT 0,
                     "ActorUserId" UUID NULL,
                     "ApprovedShareId" UUID NULL,
+                    "SyncJobId" UUID NULL,
                     "FolderPrefixNormalized" VARCHAR(2048) NOT NULL DEFAULT '',
                     "ForceOutsidePilot" BOOLEAN NOT NULL DEFAULT FALSE,
                     "QueuedCount" INTEGER NOT NULL DEFAULT 0,
@@ -321,6 +324,13 @@ def seed_db():
                     "CompletedAt" TIMESTAMPTZ NULL
                 )
                 """
+            )
+        )
+        session.execute(text('ALTER TABLE synology_extraction_batch ADD COLUMN IF NOT EXISTS "SyncJobId" UUID NULL'))
+        session.execute(text('ALTER TABLE synology_sync_job ADD COLUMN IF NOT EXISTS "ExtractionBatchId" UUID NULL'))
+        session.execute(
+            text(
+                "ALTER TABLE synology_sync_job ADD COLUMN IF NOT EXISTS \"RunStage\" VARCHAR(32) NOT NULL DEFAULT 'discovering'"
             )
         )
         session.execute(

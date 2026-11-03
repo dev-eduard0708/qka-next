@@ -216,24 +216,52 @@ def _split_user(username: str) -> tuple[str, str | None]:
     return username, None
 
 
+# Synology recycle / trash directories. Must never be enumerated — scandir often fails
+# with WinError 59 and would abort the entire Sync/Resync run.
+_SYNOLOGY_SKIP_DIR_NAMES = frozenset(
+    {
+        "#recycle",
+        "@recycle",
+        "#recycled",
+        "@recycled",
+        "recycle bin",
+        "$recycle.bin",
+    }
+)
+
+
+def is_synology_recycle_dir(name: str) -> bool:
+    """True for Synology (and Windows) recycle/trash folder names — always skip."""
+    key = (name or "").strip().lower()
+    return key in _SYNOLOGY_SKIP_DIR_NAMES
+
+
 def _walk(scope_root: str, current: str) -> Iterator[EnumeratedFile]:
     if not path_inside_root(scope_root, current):
+        return
+    current_name = os.path.basename(current.rstrip("\\/"))
+    if is_synology_recycle_dir(current_name):
         return
     try:
         entries = list(os.scandir(current))
     except PermissionError:
         return
+    except OSError:
+        # Unreadable / flaky network dirs must not fail the whole sync job.
+        return
     for entry in entries:
         path = entry.path
         if not path_inside_root(scope_root, path):
             continue
+        name = entry.name
         try:
             is_dir = entry.is_dir(follow_symlinks=False)
         except OSError:
             continue
+        if is_dir and is_synology_recycle_dir(name):
+            continue
         relative = path[len(scope_root.rstrip("\\")) + 1 :] if len(path) > len(scope_root.rstrip("\\")) else entry.name
         relative = relative.replace("/", "\\").lstrip("\\")
-        name = entry.name
         try:
             stat = entry.stat(follow_symlinks=False)
         except OSError:

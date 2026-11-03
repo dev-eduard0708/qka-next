@@ -374,6 +374,9 @@ class SynologySyncJob(Base):
     discovery_total: Mapped[int | None] = mapped_column("DiscoveryTotal", Integer, nullable=True)
     safe_error: Mapped[str | None] = mapped_column("SafeError", String(1024), nullable=True)
     cancel_requested: Mapped[bool] = mapped_column("CancelRequested", Boolean, default=False)
+    extraction_batch_id: Mapped[uuid.UUID | None] = mapped_column("ExtractionBatchId", Uuid(as_uuid=True), nullable=True)
+    # discovering | indexing | completed | failed | cancelled
+    run_stage: Mapped[str] = mapped_column("RunStage", String(32), default="discovering")
 
 
 class SynologySyncJobLease(Base):
@@ -449,6 +452,7 @@ class SynologyExtractionBatch(Base):
     status: Mapped[int] = mapped_column("Status", Integer, default=0)
     actor_user_id: Mapped[uuid.UUID | None] = mapped_column("ActorUserId", Uuid(as_uuid=True), nullable=True)
     approved_share_id: Mapped[uuid.UUID | None] = mapped_column("ApprovedShareId", Uuid(as_uuid=True), nullable=True)
+    sync_job_id: Mapped[uuid.UUID | None] = mapped_column("SyncJobId", Uuid(as_uuid=True), nullable=True, index=True)
     folder_prefix_normalized: Mapped[str] = mapped_column("FolderPrefixNormalized", String(2048), default="")
     force_outside_pilot: Mapped[bool] = mapped_column("ForceOutsidePilot", Boolean, default=False)
     queued_count: Mapped[int] = mapped_column("QueuedCount", Integer, default=0)

@@ -657,6 +657,19 @@ export const api = {
       recommendedApp?: string;
       openWithLabel?: string;
     }>(`/api/v1/documents/${id}/download?meta=1`),
+  documentDesktopOpen: (id: string) =>
+    request<{
+      ok: boolean;
+      denied?: boolean;
+      error?: string | null;
+      fileName?: string;
+      recommendedApp?: string;
+      openWithLabel?: string;
+      openUrl?: string | null;
+      protocolUrl?: string | null;
+      mode?: "local-launch" | "office-protocol" | "browser";
+      expiresInSeconds?: number | null;
+    }>(`/api/v1/documents/${id}/desktop-open`, { method: "POST", body: "{}" }),
   documentDownload: async (id: string, opts?: { intent?: "download" | "open" }) => {
     const intent = opts?.intent || "download";
     const response = await fetch(`/api/v1/documents/${id}/download?intent=${encodeURIComponent(intent)}`, {
@@ -924,18 +937,40 @@ export type SynologyTestResult = {
   diagnostics: string[];
 };
 
+export type SynologyJobIndexing = {
+  batchId: string | null;
+  provisional: boolean;
+  queued: number;
+  processing: number;
+  processed: number;
+  indexed: number;
+  failed: number;
+  skipped: number;
+  unsupported: number;
+  unchanged: number;
+  percentComplete: number | null;
+  status: number | null;
+};
+
 export type SynologyJob = {
   id: string;
   trigger: number;
   status: number;
+  runStage?: string;
   currentOperation: string | null;
+  enumerationComplete?: boolean;
   filesDiscovered: number;
   filesProcessed: number;
   filesNew: number;
   filesModified: number;
   filesUnchanged: number;
   filesRemoved: number;
+  filesFailed?: number;
+  discoveryPercentComplete?: number | null;
   percentComplete: number | null;
+  indexing?: SynologyJobIndexing;
+  completedWithErrors?: boolean;
+  extractionBatchId?: string | null;
   safeError: string | null;
 };
 

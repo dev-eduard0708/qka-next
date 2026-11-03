@@ -46,7 +46,11 @@ class Settings(BaseSettings):
     local_admin_password: str = ""
     legacy_pilot_user_id: OptionalUuid = None
     acl_allow_principal_contains: str = ""
+    # Legacy pilot prefix. Used only when indexing_scope_mode=pilot.
     pilot_folder_prefix: str = "EDUARDTESTCLOUD"
+    # connection = index everything Sync discovers under the configured connection share/folders.
+    # pilot = restrict extraction to pilot_folder_prefix (legacy EDUARDTESTCLOUD behavior).
+    indexing_scope_mode: str = "connection"
     approved_share_id: OptionalUuid = None
     max_search_results: int = 20
     max_preview_chars: int = 4000
@@ -74,6 +78,9 @@ class Settings(BaseSettings):
     mcp_resource_path: str = "/mcp"
     mcp_documents_scope: str = "mcp:documents.read"
     mcp_google_redirect_path: str = "/oauth/google/callback"
+    # 0 = no wall-clock expiry (company-domain Google login once). API restart still clears in-memory tokens.
+    mcp_oauth_access_token_seconds: int = 0
+    mcp_oauth_refresh_token_seconds: int = 0
     mcp_inspector_bearer: str = ""
     mcp_inspector_user_id: OptionalUuid = None
     mcp_additional_allowed_resources: str = ""
