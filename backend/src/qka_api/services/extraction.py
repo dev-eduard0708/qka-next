@@ -800,8 +800,58 @@ def _bump_batch(
     batch.unsupported_count += unsupported
 
 
+def _pending_for_batch(session: Session, batch_id: uuid.UUID) -> int:
+    return int(
+        session.execute(
+            select(func.count())
+            .select_from(SynologyExtractionQueue)
+            .where(
+                SynologyExtractionQueue.batch_id == batch_id,
+                SynologyExtractionQueue.status.in_([QUEUE_PENDING, QUEUE_PROCESSING]),
+            )
+        ).scalar_one()
+        or 0
+    )
+
+
+def _reopen_batch_if_work_remains(session: Session) -> None:
+    """Recover batches/jobs marked terminal while queue work is still pending."""
+    from qka_api.services.synology import JOB_SCANNING
+    from qka_shared.models import SynologySyncJob, SynologySyncSettings
+
+    now = _now()
+    closed = session.execute(
+        select(SynologyExtractionBatch).where(
+            SynologyExtractionBatch.status.in_([BATCH_COMPLETED, BATCH_CANCELLED]),
+            SynologyExtractionBatch.cancel_requested.is_(False),
+        )
+    ).scalars().all()
+    for batch in closed:
+        pending = _pending_for_batch(session, batch.id)
+        if pending <= 0:
+            continue
+        batch.status = BATCH_RUNNING
+        batch.completed_at = None
+        batch.started_at = batch.started_at or now
+        if batch.sync_job_id is None:
+            continue
+        job = session.get(SynologySyncJob, batch.sync_job_id)
+        if job is None:
+            continue
+        job.status = JOB_SCANNING
+        job.run_stage = "indexing"
+        job.current_operation = "Extracting and indexing content"
+        job.completed_at = None
+        job.safe_error = None
+        settings_row = session.execute(select(SynologySyncSettings)).scalars().first()
+        if settings_row is not None:
+            settings_row.current_job_id = job.id
+            settings_row.updated_at = now
+
+
 def _finalize_batches(session: Session) -> None:
     now = _now()
+    _reopen_batch_if_work_remains(session)
     # Include queued sync batches that never claimed an item (enumeration finished with 0 extractables).
     batches = session.execute(
         select(SynologyExtractionBatch).where(
@@ -809,14 +859,7 @@ def _finalize_batches(session: Session) -> None:
         )
     ).scalars().all()
     for batch in batches:
-        pending = session.execute(
-            select(func.count())
-            .select_from(SynologyExtractionQueue)
-            .where(
-                SynologyExtractionQueue.batch_id == batch.id,
-                SynologyExtractionQueue.status.in_([QUEUE_PENDING, QUEUE_PROCESSING]),
-            )
-        ).scalar_one()
+        pending = _pending_for_batch(session, batch.id)
         # Sync-linked batches stay open while discovery is still adding jobs.
         if batch.sync_job_id is not None:
             from qka_shared.models import SynologySyncJob
@@ -824,7 +867,7 @@ def _finalize_batches(session: Session) -> None:
             job = session.get(SynologySyncJob, batch.sync_job_id)
             if job is not None and not job.enumeration_complete and not job.cancel_requested:
                 continue
-        if int(pending or 0) == 0 and (batch.queued_count > 0 or batch.sync_job_id is not None):
+        if pending == 0 and (batch.queued_count > 0 or batch.sync_job_id is not None):
             # Empty sync batch (nothing to extract) can complete once discovery finishes.
             if batch.status == BATCH_QUEUED and batch.queued_count == 0 and batch.sync_job_id is not None:
                 batch.started_at = batch.started_at or now

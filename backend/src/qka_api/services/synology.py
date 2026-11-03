@@ -243,10 +243,21 @@ def share_dto(row: SynologyApprovedShare, host: str) -> dict:
 
 
 def job_dto(job: SynologySyncJob, session: Session | None = None) -> dict:
-    # Discovery progress stays indeterminate until enumeration finishes (no fake %).
-    discovery_percent = None
-    if job.enumeration_complete and job.discovery_total and job.discovery_total > 0:
+    # Discovery %: 100 when enum complete; otherwise provisional vs prior inventory size (capped 99).
+    prior_total = 0
+    if session is not None:
+        sync_settings = _get_or_create_settings(session)
+        prior_total = int(sync_settings.last_total_files or 0)
+    discovery_percent = 0.0
+    if job.enumeration_complete:
         discovery_percent = 100.0
+    else:
+        denom = int(job.discovery_total or 0) or prior_total
+        if denom > 0:
+            discovery_percent = round(
+                min(99.0, 100.0 * int(job.files_processed or 0) / denom),
+                1,
+            )
     indexing = {
         "batchId": str(job.extraction_batch_id) if job.extraction_batch_id else None,
         "provisional": not job.enumeration_complete,
@@ -258,7 +269,7 @@ def job_dto(job: SynologySyncJob, session: Session | None = None) -> dict:
         "skipped": 0,
         "unsupported": 0,
         "unchanged": int(job.files_unchanged or 0),
-        "percentComplete": None,
+        "percentComplete": 0.0,
         "status": None,
     }
     if session is not None and job.extraction_batch_id is not None:
@@ -287,15 +298,18 @@ def job_dto(job: SynologySyncJob, session: Session | None = None) -> dict:
                 }
             )
             queued_total = int(batch.queued_count or 0)
-            if job.enumeration_complete and queued_total > 0:
+            processed = int(batch.processed_count or 0)
+            if queued_total > 0:
+                raw = 100.0 * processed / queued_total
+                # Cap under 100 while discovery can still enqueue more jobs.
                 indexing["percentComplete"] = round(
-                    min(100.0, 100.0 * int(batch.processed_count or 0) / queued_total),
+                    min(100.0 if job.enumeration_complete else 99.0, raw),
                     1,
                 )
-            elif not job.enumeration_complete:
-                indexing["percentComplete"] = None  # provisional while discovery adds jobs
-            elif job.enumeration_complete and queued_total == 0:
+            elif job.enumeration_complete:
                 indexing["percentComplete"] = 100.0
+            else:
+                indexing["percentComplete"] = 0.0
     overall_complete = job.status == JOB_COMPLETED and job.enumeration_complete
     return {
         "id": str(job.id),
@@ -329,7 +343,11 @@ def job_dto(job: SynologySyncJob, session: Session | None = None) -> dict:
         "discoveryPercentComplete": discovery_percent,
         "percentComplete": 100.0 if overall_complete else None,
         "indexing": indexing,
-        "completedWithErrors": bool(job.status == JOB_COMPLETED and indexing.get("failed", 0) > 0),
+        "completedWithErrors": bool(
+            job.status == JOB_COMPLETED
+            and indexing.get("failed", 0) > 0
+            and int(indexing.get("processed", 0)) >= int(indexing.get("queued", 0))
+        ),
         "safeError": job.safe_error,
         "cancelRequested": job.cancel_requested,
         "extractionBatchId": str(job.extraction_batch_id) if job.extraction_batch_id else None,

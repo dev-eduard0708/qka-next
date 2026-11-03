@@ -260,17 +260,24 @@
             </div>
           </div>
           <div v-if="monitor?.currentJob">
-            <div class="text-body2">
+            <div class="text-body2" :class="{ 'text-warning': monitor.currentJob.completedWithErrors }">
               {{ syncStageLabel(monitor.currentJob) }}
-              <span v-if="monitor.currentJob.completedWithErrors" class="text-warning"> — {{ t("synology.completedWithErrors") }}</span>
             </div>
-            <div class="text-caption q-mt-md">{{ t("synology.stageDiscover") }}</div>
+            <div class="text-caption q-mt-md row items-center no-wrap">
+              <div class="col">{{ t("synology.stageDiscover") }}</div>
+              <div class="col-auto text-weight-medium">{{ discoveryPercentLabel(monitor.currentJob) }}%</div>
+            </div>
             <q-linear-progress
               class="q-mt-xs"
+              size="22px"
               color="primary"
-              :indeterminate="!monitor.currentJob.enumerationComplete"
-              :value="monitor.currentJob.enumerationComplete ? 1 : 0"
-            />
+              :indeterminate="false"
+              :value="discoveryProgressValue(monitor.currentJob)"
+            >
+              <div class="absolute-full flex flex-center">
+                <span class="text-white text-caption text-weight-medium">{{ discoveryPercentLabel(monitor.currentJob) }}%</span>
+              </div>
+            </q-linear-progress>
             <div class="text-caption q-mt-xs">
               {{ t("synology.discovered") }}: {{ monitor.currentJob.filesDiscovered }} ·
               {{ t("synology.scanned") }}: {{ monitor.currentJob.filesProcessed }} ·
@@ -281,19 +288,24 @@
               {{ t("synology.failed") }}: {{ monitor.currentJob.filesFailed ?? 0 }}
             </div>
 
-            <div class="text-caption q-mt-md">
-              {{ t("synology.stageIndex") }}
-              <span v-if="monitor.currentJob.indexing?.provisional" class="text-grey-7"> ({{ t("synology.provisional") }})</span>
-              <span v-if="monitor.currentJob.indexing?.percentComplete != null" class="text-grey-7">
-                — {{ monitor.currentJob.indexing.percentComplete }}%
-              </span>
+            <div class="text-caption q-mt-md row items-center no-wrap">
+              <div class="col">
+                {{ t("synology.stageIndex") }}
+                <span v-if="monitor.currentJob.indexing?.provisional" class="text-grey-7"> ({{ t("synology.provisional") }})</span>
+              </div>
+              <div class="col-auto text-weight-medium">{{ indexPercentLabel(monitor.currentJob) }}%</div>
             </div>
             <q-linear-progress
               class="q-mt-xs"
+              size="22px"
               :color="(monitor.currentJob.indexing?.failed || 0) > 0 ? 'warning' : 'secondary'"
-              :indeterminate="Boolean(monitor.currentJob.indexing?.provisional && (monitor.currentJob.indexing?.queued || 0) === 0)"
+              :indeterminate="false"
               :value="indexProgressValue(monitor.currentJob)"
-            />
+            >
+              <div class="absolute-full flex flex-center">
+                <span class="text-white text-caption text-weight-medium">{{ indexPercentLabel(monitor.currentJob) }}%</span>
+              </div>
+            </q-linear-progress>
             <div class="text-caption q-mt-xs">
               {{ t("synology.eligible") }}: {{ monitor.currentJob.indexing?.queued ?? 0 }} ·
               {{ t("synology.queued") }}: {{ indexRemaining(monitor.currentJob) }} ·
@@ -683,17 +695,31 @@ function jobStatusLabel(value: number) {
   return [t("synology.queued"), t("synology.scanning"), t("synology.completed"), t("synology.failed"), t("synology.cancelled")][value] ?? String(value);
 }
 function syncStageLabel(job: NonNullable<SynologyMonitor["currentJob"]>) {
+  const indexingIncomplete = job.enumerationComplete && indexRemaining(job) > 0;
+  if (indexingIncomplete || (job.enumerationComplete && job.status === 1)) {
+    return t("synology.stageIndex");
+  }
   if (job.completedWithErrors) return t("synology.completedWithErrors");
-  if (job.runStage === "indexing" || (job.enumerationComplete && job.status === 1)) return t("synology.stageIndex");
   if (job.runStage === "discovering" || job.status === 0 || (job.status === 1 && !job.enumerationComplete)) {
     return t("synology.stageDiscover");
   }
   return job.currentOperation || jobStatusLabel(job.status);
 }
-function indexProgressValue(job: NonNullable<SynologyMonitor["currentJob"]>) {
+function discoveryPercentLabel(job: NonNullable<SynologyMonitor["currentJob"]>) {
+  const pct = job.discoveryPercentComplete;
+  if (pct == null) return job.enumerationComplete ? 100 : 0;
+  return Math.max(0, Math.min(100, Number(pct)));
+}
+function discoveryProgressValue(job: NonNullable<SynologyMonitor["currentJob"]>) {
+  return discoveryPercentLabel(job) / 100;
+}
+function indexPercentLabel(job: NonNullable<SynologyMonitor["currentJob"]>) {
   const pct = job.indexing?.percentComplete;
   if (pct == null) return 0;
-  return Math.max(0, Math.min(1, pct / 100));
+  return Math.max(0, Math.min(100, Number(pct)));
+}
+function indexProgressValue(job: NonNullable<SynologyMonitor["currentJob"]>) {
+  return indexPercentLabel(job) / 100;
 }
 function indexRemaining(job: NonNullable<SynologyMonitor["currentJob"]>) {
   const queued = job.indexing?.queued ?? 0;
