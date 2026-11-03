@@ -29,6 +29,7 @@ dependencies = [
   "mcp>=2.3",
   "openai>=1.66",
   "ldap3>=2.9",
+  "pywin32>=306; platform_system=='Windows'",
 ]
 
 [project.optional-dependencies]

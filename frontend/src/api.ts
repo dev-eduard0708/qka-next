@@ -558,12 +558,7 @@ export const api = {
   },
   adTestConnection: (body: AdConnectionBody, connectionId?: string) => {
     const q = connectionId ? `?connectionId=${encodeURIComponent(connectionId)}` : "";
-    return request<{
-      succeeded: boolean;
-      safeError?: string | null;
-      discoveredBaseDn?: string | null;
-      checks: Array<{ name: string; status: string; detail?: string }>;
-    }>(`/api/v1/admin/active-directory/connections/test${q}`, {
+    return request<AdConnectionTestResult>(`/api/v1/admin/active-directory/connections/test${q}`, {
       method: "POST",
       body: JSON.stringify(body),
     });
@@ -1332,12 +1327,22 @@ export type AiStreamDone = {
   sources: AiStreamMeta["sources"];
 };
 
+export type AdServiceIdentity = {
+  samCompatible?: string;
+  userPrincipalName?: string;
+  dnsDomain?: string;
+  username?: string;
+  userDomain?: string;
+  computerName?: string;
+};
+
 export type AdConnection = {
   id: string;
   connectionName: string;
   domainDnsName: string;
   domainController: string;
   protocol: string;
+  authMode?: string;
   port: number;
   baseDn: string;
   bindUsername: string;
@@ -1346,6 +1351,7 @@ export type AdConnection = {
   verifyTls: boolean;
   connectionStatus: number;
   statusLabel?: string;
+  serviceIdentity?: AdServiceIdentity | null;
   lastSuccessfulTestAt?: string | null;
   lastSafeError?: string | null;
   lastSuccessfulSyncAt?: string | null;
@@ -1356,6 +1362,7 @@ export type AdConnectionBody = {
   connectionName?: string;
   domainDnsName?: string;
   domainController?: string;
+  authMode?: string;
   protocol?: string;
   port?: number;
   baseDn?: string;
@@ -1363,6 +1370,17 @@ export type AdConnectionBody = {
   bindPassword?: string;
   timeoutSeconds?: number;
   verifyTls?: boolean;
+};
+
+export type AdConnectionTestResult = {
+  succeeded: boolean;
+  safeError?: string | null;
+  discoveredBaseDn?: string | null;
+  authMode?: string;
+  serviceIdentity?: AdServiceIdentity | null;
+  ldapSigning?: boolean;
+  ldapSealing?: boolean;
+  checks: Array<{ name: string; status: string; detail?: string }>;
 };
 
 export type AdOverview = {

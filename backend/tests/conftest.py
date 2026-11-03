@@ -309,13 +309,17 @@ def seed_db():
         )
         for stmt in (
             """
+            ALTER TABLE IF EXISTS qka_next_ad_connection
+                ALTER COLUMN protocol TYPE VARCHAR(32)
+            """,
+            """
             CREATE TABLE IF NOT EXISTS qka_next_ad_connection (
                 id UUID PRIMARY KEY,
                 connection_name VARCHAR(256) NOT NULL DEFAULT '',
                 domain_dns_name VARCHAR(256) NOT NULL DEFAULT '',
                 domain_controller VARCHAR(256) NOT NULL DEFAULT '',
-                protocol VARCHAR(16) NOT NULL DEFAULT 'ldaps',
-                port INTEGER NOT NULL DEFAULT 636,
+                protocol VARCHAR(32) NOT NULL DEFAULT 'windows_integrated',
+                port INTEGER NOT NULL DEFAULT 389,
                 base_dn VARCHAR(1024) NOT NULL DEFAULT '',
                 bind_username VARCHAR(512) NOT NULL DEFAULT '',
                 bind_secret_protected BYTEA NULL,

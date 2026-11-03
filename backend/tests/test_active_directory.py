@@ -25,6 +25,34 @@ def _install_fake(client) -> FakeLdapGateway:
     return gateway
 
 
+def _ldaps_body(**extra):
+    body = {
+        "connectionName": "Corp AD",
+        "domainDnsName": "ad.example.local",
+        "domainController": "dc01.ad.example.local",
+        "authMode": "ldaps",
+        "protocol": "ldaps",
+        "port": 636,
+        "bindUsername": "DOMAIN\\reader",
+        "bindPassword": "secret-value",
+        "verifyTls": True,
+    }
+    body.update(extra)
+    return body
+
+
+def _windows_body(**extra):
+    body = {
+        "connectionName": "QEHC AD",
+        "domainDnsName": "qehc.edu.sa",
+        "domainController": "DC1.qehc.edu.sa",
+        "authMode": "windows_integrated",
+        "protocol": "windows_integrated",
+    }
+    body.update(extra)
+    return body
+
+
 def test_non_admin_cannot_administer_ad(client):
     from tests.conftest import ALLOWED_USER, auth_cookies
 
@@ -44,14 +72,7 @@ def test_connection_validation_tls_and_bind(client):
     failed = client.post(
         "/api/v1/admin/active-directory/connections/test",
         headers=headers,
-        json={
-            "connectionName": "AD",
-            "domainDnsName": "ad.example.local",
-            "domainController": "dc01.ad.example.local",
-            "bindUsername": "DOMAIN\\reader",
-            "bindPassword": "secret",
-            "verifyTls": True,
-        },
+        json=_ldaps_body(bindPassword="secret"),
     )
     assert failed.status_code == 200, failed.text
     body = failed.json()
@@ -65,15 +86,58 @@ def test_connection_validation_tls_and_bind(client):
     bind_fail = client.post(
         "/api/v1/admin/active-directory/connections/test",
         headers=headers,
-        json={
-            "domainDnsName": "ad.example.local",
-            "domainController": "dc01.ad.example.local",
-            "bindUsername": "DOMAIN\\reader",
-            "bindPassword": "bad",
-        },
+        json=_ldaps_body(bindPassword="bad"),
     )
     assert bind_fail.json()["succeeded"] is False
     assert any(c["name"] == "bind" and c["status"] == "failed" for c in bind_fail.json()["checks"])
+
+
+def test_windows_integrated_test_and_save(client):
+    gateway = _install_fake(client)
+    headers = _admin(client)
+
+    gateway.fail_kerberos = True
+    failed = client.post(
+        "/api/v1/admin/active-directory/connections/test",
+        headers=headers,
+        json=_windows_body(),
+    )
+    assert failed.status_code == 200, failed.text
+    assert failed.json()["succeeded"] is False
+    assert failed.json()["authMode"] == "windows_integrated"
+    assert failed.json()["ldapSigning"] is True
+    assert failed.json()["ldapSealing"] is True
+    assert any(c["name"] == "kerberos" and c["status"] == "failed" for c in failed.json()["checks"])
+
+    gateway.fail_kerberos = False
+    ad._TEST_RATE.clear()
+    ok = client.post(
+        "/api/v1/admin/active-directory/connections/test",
+        headers=headers,
+        json=_windows_body(),
+    )
+    assert ok.status_code == 200, ok.text
+    payload = ok.json()
+    assert payload["succeeded"] is True
+    assert payload["discoveredBaseDn"]
+    assert payload["serviceIdentity"] is not None
+    assert any(c["name"] == "signing" and c["status"] == "pass" for c in payload["checks"])
+    assert any(c["name"] == "sealing" and c["status"] == "pass" for c in payload["checks"])
+
+    ad._TEST_RATE.clear()
+    created = client.post(
+        "/api/v1/admin/active-directory/connections",
+        headers=headers,
+        json=_windows_body(),
+    )
+    assert created.status_code == 200, created.text
+    row = created.json()
+    assert row["authMode"] == "windows_integrated"
+    assert row["protocol"] == "windows_integrated"
+    assert row["port"] == 389
+    assert row["bindSecretConfigured"] is False
+    assert row["baseDn"]
+    assert "password" not in created.text.lower() or "secret" not in created.text.lower()
 
 
 def test_save_requires_successful_test_and_hides_secret(client):
@@ -83,13 +147,7 @@ def test_save_requires_successful_test_and_hides_secret(client):
     denied = client.post(
         "/api/v1/admin/active-directory/connections",
         headers=headers,
-        json={
-            "connectionName": "Corp AD",
-            "domainDnsName": "ad.example.local",
-            "domainController": "dc01.ad.example.local",
-            "bindUsername": "DOMAIN\\reader",
-            "bindPassword": "secret-value",
-        },
+        json=_ldaps_body(),
     )
     assert denied.status_code == 400
 
@@ -98,13 +156,7 @@ def test_save_requires_successful_test_and_hides_secret(client):
     created = client.post(
         "/api/v1/admin/active-directory/connections",
         headers=headers,
-        json={
-            "connectionName": "Corp AD",
-            "domainDnsName": "ad.example.local",
-            "domainController": "dc01.ad.example.local",
-            "bindUsername": "DOMAIN\\reader",
-            "bindPassword": "secret-value",
-        },
+        json=_ldaps_body(),
     )
     assert created.status_code == 200, created.text
     payload = created.json()
@@ -112,6 +164,7 @@ def test_save_requires_successful_test_and_hides_secret(client):
     assert "bindPassword" not in payload
     assert "secret-value" not in created.text
     assert payload["protocol"] == "ldaps"
+    assert payload["authMode"] == "ldaps"
     assert payload["connectionStatus"] == ad.STATUS_CONNECTED
 
 
@@ -121,13 +174,7 @@ def test_ou_user_group_sync_and_identity_link(client):
     created = client.post(
         "/api/v1/admin/active-directory/connections",
         headers=headers,
-        json={
-            "connectionName": "Corp AD",
-            "domainDnsName": "ad.example.local",
-            "domainController": "dc01.ad.example.local",
-            "bindUsername": "DOMAIN\\reader",
-            "bindPassword": "secret-value",
-        },
+        json=_windows_body(),
     )
     assert created.status_code == 200, created.text
     cid = created.json()["id"]
@@ -175,7 +222,6 @@ def test_ou_user_group_sync_and_identity_link(client):
                 primary_email="employee1@qehc.edu.sa",
             )
         )
-        # Preserve existing Google rows for other users — just adding.
         google_before = session.scalar(
             select(ExternalIdentity).where(ExternalIdentity.provider == PROVIDER_GOOGLE)
         )

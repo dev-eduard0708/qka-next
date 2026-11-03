@@ -25,26 +25,44 @@
           <div class="text-subtitle1 q-mb-sm">{{ t("ad.connectionSettings") }}</div>
           <div class="row q-col-gutter-md">
             <div class="col-12 col-md-6">
-              <q-input v-model="form.connectionName" outlined dense :label="t('ad.connectionName')" :disable="!editing" />
+              <q-input v-model="form.domainDnsName" outlined dense :label="t('ad.domainDns')" :disable="!editing" hint="e.g. qehc.edu.sa" />
             </div>
             <div class="col-12 col-md-6">
-              <q-input v-model="form.domainDnsName" outlined dense :label="t('ad.domainDns')" :disable="!editing" hint="e.g. ad.example.local" />
+              <q-input
+                v-model="form.domainController"
+                outlined
+                dense
+                :label="t('ad.domainController')"
+                :disable="!editing"
+                :hint="t('ad.domainControllerHint')"
+              />
             </div>
             <div class="col-12 col-md-6">
-              <q-input v-model="form.domainController" outlined dense :label="t('ad.domainController')" :disable="!editing" hint="e.g. dc01.ad.example.local" />
-            </div>
-            <div class="col-12 col-md-3">
-              <q-select v-model="form.protocol" outlined dense emit-value map-options :options="protocolOptions" :label="t('ad.protocol')" :disable="!editing" />
-            </div>
-            <div class="col-12 col-md-3">
-              <q-input v-model.number="form.port" type="number" outlined dense :label="t('ad.port')" :disable="!editing" />
+              <q-select
+                v-model="form.authMode"
+                outlined
+                dense
+                emit-value
+                map-options
+                :options="authModeOptions"
+                :label="t('ad.authMethod')"
+                :disable="!editing"
+                @update:model-value="onAuthModeChange"
+              />
             </div>
             <div class="col-12">
-              <q-input v-model="form.baseDn" outlined dense :label="t('ad.baseDn')" :disable="!editing" :hint="t('ad.baseDnHint')" />
+              <div class="row items-center q-gutter-xs text-positive">
+                <q-icon name="verified_user" size="18px" />
+                <span class="text-body2">{{ isWindowsIntegrated ? t("ad.securityNoticeWindows") : t("ad.securityNotice") }}</span>
+              </div>
+            </div>
+            <div v-if="isWindowsIntegrated && serviceIdentityLabel" class="col-12">
+              <div class="text-caption text-grey-7">{{ t("ad.serviceIdentity") }}</div>
+              <div class="text-body2">{{ serviceIdentityLabel }}</div>
             </div>
           </div>
         </q-card-section>
-        <q-card-section>
+        <q-card-section v-if="!isWindowsIntegrated">
           <div class="text-subtitle1 q-mb-sm">{{ t("ad.credentials") }}</div>
           <div class="row q-col-gutter-md">
             <div class="col-12 col-md-6">
@@ -62,14 +80,8 @@
                 :hint="connection?.bindSecretConfigured ? t('ad.passwordKeep') : t('ad.passwordRequired')"
               />
             </div>
-            <div class="col-12 col-md-4">
-              <q-input v-model.number="form.timeoutSeconds" type="number" outlined dense :label="t('ad.timeout')" :disable="!editing" />
-            </div>
-            <div class="col-12">
-              <div class="row items-center q-gutter-xs text-positive">
-                <q-icon name="verified_user" size="18px" />
-                <span class="text-body2">{{ t("ad.securityNotice") }}</span>
-              </div>
+            <div class="col-12 col-md-3">
+              <q-input v-model.number="form.port" type="number" outlined dense :label="t('ad.port')" :disable="!editing" />
             </div>
           </div>
         </q-card-section>
@@ -77,13 +89,16 @@
           <div class="text-subtitle1 q-mb-sm">{{ t("ad.diagnostics") }}</div>
           <q-list bordered separator>
             <q-item v-for="check in checks" :key="check.name">
-              <q-item-section>{{ checkLabel(check.name) }}</q-item-section>
+              <q-item-section>
+                <q-item-label>{{ checkLabel(check.name) }}</q-item-label>
+                <q-item-label v-if="check.detail" caption>{{ check.detail }}</q-item-label>
+              </q-item-section>
               <q-item-section side>
                 <q-badge :color="checkColor(check.status)">{{ checkStatusLabel(check.status) }}</q-badge>
               </q-item-section>
             </q-item>
           </q-list>
-          <div v-if="testDetail" class="text-caption text-grey-7 q-mt-sm">{{ testDetail }}</div>
+          <div v-if="form.baseDn" class="text-caption text-grey-7 q-mt-sm">{{ t("ad.baseDn") }}: {{ form.baseDn }}</div>
         </q-card-section>
         <q-card-actions align="right" class="q-gutter-sm">
           <q-btn v-if="!editing" outline color="primary" :label="t('ad.editConnection')" @click="editing = true" />
@@ -230,12 +245,14 @@ const overview = ref<AdOverview | null>(null);
 const checks = ref<Array<{ name: string; status: string; detail?: string }>>([
   { name: "dns", status: "not_tested" },
   { name: "tcp", status: "not_tested" },
-  { name: "tls", status: "not_tested" },
-  { name: "bind", status: "not_tested" },
+  { name: "identity", status: "not_tested" },
+  { name: "kerberos", status: "not_tested" },
+  { name: "signing", status: "not_tested" },
+  { name: "sealing", status: "not_tested" },
   { name: "rootdse", status: "not_tested" },
   { name: "search", status: "not_tested" },
 ]);
-const testDetail = ref("");
+const serviceIdentity = ref<{ samCompatible?: string; userPrincipalName?: string } | null>(null);
 const lastTestOk = ref(false);
 const users = ref<any[]>([]);
 const usersLoading = ref(false);
@@ -248,10 +265,10 @@ const audit = ref<any[]>([]);
 
 const form = reactive({
   connectionName: "Active Directory",
-  domainDnsName: "",
-  domainController: "",
-  protocol: "ldaps",
-  port: 636,
+  domainDnsName: "qehc.edu.sa",
+  domainController: "DC1.qehc.edu.sa",
+  authMode: "windows_integrated",
+  port: 389,
   baseDn: "",
   bindUsername: "",
   bindPassword: "",
@@ -259,9 +276,47 @@ const form = reactive({
   verifyTls: true,
 });
 
-const protocolOptions = [{ label: "LDAPS (636)", value: "ldaps" }];
+const authModeOptions = computed(() => [
+  { label: t("ad.authWindowsIntegrated"), value: "windows_integrated" },
+  { label: t("ad.authLdaps"), value: "ldaps" },
+]);
+const isWindowsIntegrated = computed(() => form.authMode === "windows_integrated");
+const serviceIdentityLabel = computed(() => {
+  const id = serviceIdentity.value || connection.value?.serviceIdentity;
+  if (!id) return "";
+  return id.samCompatible || id.userPrincipalName || "";
+});
 const connectionId = computed(() => connection.value?.id || null);
 const canSave = computed(() => editing.value && lastTestOk.value);
+
+function onAuthModeChange(mode: string) {
+  lastTestOk.value = false;
+  if (mode === "windows_integrated") {
+    form.port = 389;
+    form.bindUsername = "";
+    form.bindPassword = "";
+    checks.value = [
+      { name: "dns", status: "not_tested" },
+      { name: "tcp", status: "not_tested" },
+      { name: "identity", status: "not_tested" },
+      { name: "kerberos", status: "not_tested" },
+      { name: "signing", status: "not_tested" },
+      { name: "sealing", status: "not_tested" },
+      { name: "rootdse", status: "not_tested" },
+      { name: "search", status: "not_tested" },
+    ];
+  } else {
+    form.port = 636;
+    checks.value = [
+      { name: "dns", status: "not_tested" },
+      { name: "tcp", status: "not_tested" },
+      { name: "tls", status: "not_tested" },
+      { name: "bind", status: "not_tested" },
+      { name: "rootdse", status: "not_tested" },
+      { name: "search", status: "not_tested" },
+    ];
+  }
+}
 const syncBusy = computed(() => false);
 const badgeColor = computed(() => {
   const s = connection.value?.connectionStatus;
@@ -325,6 +380,10 @@ function checkLabel(name: string) {
   const map: Record<string, string> = {
     dns: t("ad.checkDns"),
     tcp: t("ad.checkTcp"),
+    identity: t("ad.checkIdentity"),
+    kerberos: t("ad.checkKerberos"),
+    signing: t("ad.checkSigning"),
+    sealing: t("ad.checkSealing"),
     tls: t("ad.checkTls"),
     bind: t("ad.checkBind"),
     rootdse: t("ad.checkRootDse"),
@@ -357,12 +416,13 @@ function applyConnection(row: AdConnection | null) {
   form.connectionName = row.connectionName;
   form.domainDnsName = row.domainDnsName;
   form.domainController = row.domainController;
-  form.protocol = row.protocol || "ldaps";
-  form.port = row.port || 636;
+  form.authMode = row.authMode || row.protocol || "windows_integrated";
+  form.port = row.port || (form.authMode === "ldaps" ? 636 : 389);
   form.baseDn = row.baseDn || "";
   form.bindUsername = row.bindUsername;
   form.bindPassword = "";
   form.timeoutSeconds = row.timeoutSeconds || 15;
+  serviceIdentity.value = row.serviceIdentity || null;
   editing.value = row.connectionStatus !== 1;
 }
 
@@ -375,30 +435,37 @@ async function refresh() {
   }
 }
 
+function connectionBody() {
+  const body: Record<string, unknown> = {
+    connectionName: form.connectionName,
+    domainDnsName: form.domainDnsName,
+    domainController: form.domainController || undefined,
+    authMode: form.authMode,
+    protocol: form.authMode,
+    baseDn: form.baseDn || undefined,
+    timeoutSeconds: form.timeoutSeconds,
+  };
+  if (form.authMode === "ldaps") {
+    body.port = form.port || 636;
+    body.bindUsername = form.bindUsername;
+    body.bindPassword = form.bindPassword || undefined;
+    body.verifyTls = true;
+  } else {
+    body.port = 389;
+  }
+  return body;
+}
+
 async function testConnection() {
   testing.value = true;
   error.value = "";
   info.value = "";
   try {
-    const result = await api.adTestConnection(
-      {
-        connectionName: form.connectionName,
-        domainDnsName: form.domainDnsName,
-        domainController: form.domainController,
-        protocol: form.protocol,
-        port: form.port,
-        baseDn: form.baseDn,
-        bindUsername: form.bindUsername,
-        bindPassword: form.bindPassword || undefined,
-        timeoutSeconds: form.timeoutSeconds,
-        verifyTls: true,
-      },
-      connectionId.value || undefined,
-    );
+    const result = await api.adTestConnection(connectionBody() as any, connectionId.value || undefined);
     checks.value = result.checks;
     lastTestOk.value = result.succeeded;
-    testDetail.value = result.checks.map((c) => c.detail).filter(Boolean).join(" · ");
-    if (result.discoveredBaseDn && !form.baseDn) form.baseDn = result.discoveredBaseDn;
+    serviceIdentity.value = result.serviceIdentity || null;
+    if (result.discoveredBaseDn) form.baseDn = result.discoveredBaseDn;
     info.value = result.succeeded ? t("ad.testOk") : result.safeError || t("ad.testFail");
     if (!result.succeeded) error.value = result.safeError || t("ad.testFail");
   } catch (err) {
@@ -413,21 +480,10 @@ async function saveConnection() {
   saving.value = true;
   error.value = "";
   try {
-    const body = {
-      connectionName: form.connectionName,
-      domainDnsName: form.domainDnsName,
-      domainController: form.domainController,
-      protocol: "ldaps",
-      port: form.port,
-      baseDn: form.baseDn,
-      bindUsername: form.bindUsername,
-      bindPassword: form.bindPassword || undefined,
-      timeoutSeconds: form.timeoutSeconds,
-      verifyTls: true,
-    };
+    const body = connectionBody();
     const row = connectionId.value
-      ? await api.adUpdateConnection(connectionId.value, body)
-      : await api.adCreateConnection(body);
+      ? await api.adUpdateConnection(connectionId.value, body as any)
+      : await api.adCreateConnection(body as any);
     applyConnection(row);
     form.bindPassword = "";
     lastTestOk.value = true;

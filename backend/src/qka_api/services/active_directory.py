@@ -14,9 +14,15 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from qka_api.ldap_client import (
+    AUTH_LDAPS,
+    AUTH_WINDOWS_INTEGRATED,
     AdUserRecord,
     LdapConnectParams,
     LdapGateway,
+    LdapError,
+    current_windows_identity,
+    domain_dns_to_base_dn,
+    normalize_auth_mode,
 )
 from qka_shared.allowlist import ACCOUNT_ENABLED, LINKED, PROVIDER_AD, PROVIDER_GOOGLE
 from qka_shared.config import Settings
@@ -91,20 +97,23 @@ def _rate_limit_test(key: str) -> None:
 
 
 def connection_dto(row: AdConnection) -> dict:
+    auth_mode = normalize_auth_mode(row.protocol)
     return {
         "id": str(row.id),
         "connectionName": row.connection_name,
         "domainDnsName": row.domain_dns_name,
         "domainController": row.domain_controller,
-        "protocol": row.protocol or "ldaps",
-        "port": int(row.port or 636),
+        "protocol": auth_mode,
+        "authMode": auth_mode,
+        "port": int(row.port or (389 if auth_mode == AUTH_WINDOWS_INTEGRATED else 636)),
         "baseDn": row.base_dn,
-        "bindUsername": row.bind_username,
-        "bindSecretConfigured": bool(row.bind_secret_protected),
+        "bindUsername": row.bind_username if auth_mode == AUTH_LDAPS else "",
+        "bindSecretConfigured": bool(row.bind_secret_protected) if auth_mode == AUTH_LDAPS else False,
         "timeoutSeconds": int(row.timeout_seconds or 15),
-        "verifyTls": bool(row.verify_tls),
+        "verifyTls": bool(row.verify_tls) if auth_mode == AUTH_LDAPS else False,
         "connectionStatus": int(row.connection_status or 0),
         "statusLabel": _status_label(row.connection_status),
+        "serviceIdentity": current_windows_identity() if auth_mode == AUTH_WINDOWS_INTEGRATED else None,
         "lastSuccessfulTestAt": row.last_successful_test_at.isoformat() if row.last_successful_test_at else None,
         "lastSafeError": row.last_safe_error,
         "lastSuccessfulSyncAt": row.last_successful_sync_at.isoformat() if row.last_successful_sync_at else None,
@@ -137,36 +146,69 @@ def get_connection(session: Session, connection_id: uuid.UUID) -> AdConnection:
 
 
 def _params_from_body(body: dict, *, existing: AdConnection | None, settings: Settings) -> LdapConnectParams:
-    protocol = str(body.get("protocol") or (existing.protocol if existing else "ldaps")).lower()
-    if protocol != "ldaps":
-        raise AdValidationError("Only LDAPS is supported. Insecure LDAP is not allowed.")
+    raw_mode = body.get("authMode")
+    if raw_mode is None or str(raw_mode).strip() == "":
+        raw_mode = body.get("protocol")
+    if raw_mode is None or str(raw_mode).strip() == "":
+        raw_mode = existing.protocol if existing else AUTH_WINDOWS_INTEGRATED
+    try:
+        auth_mode = normalize_auth_mode(str(raw_mode))
+    except LdapError as exc:
+        raise AdValidationError(str(exc)) from exc
+
+    domain_dns = str(body.get("domainDnsName") or (existing.domain_dns_name if existing else "")).strip()
+    domain_controller = str(
+        body.get("domainController") or (existing.domain_controller if existing else "")
+    ).strip()
+    base_dn = str(body.get("baseDn") or (existing.base_dn if existing else "")).strip()
+    timeout = max(
+        5,
+        min(int(body.get("timeoutSeconds") or (existing.timeout_seconds if existing else 15) or 15), 60),
+    )
+
+    if auth_mode == AUTH_WINDOWS_INTEGRATED:
+        # Process identity + LDAP signing/sealing. No bind secret. Port 389 (not LDAPS).
+        port = int(body.get("port") or (existing.port if existing and existing.protocol == AUTH_WINDOWS_INTEGRATED else 389) or 389)
+        if port == 636:
+            port = 389
+        if not base_dn and domain_dns:
+            base_dn = domain_dns_to_base_dn(domain_dns)
+        return LdapConnectParams(
+            domain_dns_name=domain_dns,
+            domain_controller=domain_controller,
+            port=port,
+            bind_username="",
+            bind_password="",
+            base_dn=base_dn,
+            timeout_seconds=timeout,
+            verify_tls=False,
+            auth_mode=AUTH_WINDOWS_INTEGRATED,
+        )
+
+    # Optional LDAPS path — certificate validation required; no silent downgrade.
     verify = body.get("verifyTls")
     if verify is None:
         verify = existing.verify_tls if existing else True
     if not verify:
-        raise AdValidationError("TLS certificate validation is required.")
+        raise AdValidationError("TLS certificate validation is required for LDAPS.")
     password = body.get("bindPassword") or body.get("password")
     if password is None or password == "":
-        if existing is None:
-            raise AdValidationError("Bind password is required.")
+        if existing is None or normalize_auth_mode(existing.protocol) != AUTH_LDAPS:
+            raise AdValidationError("Bind password is required for LDAPS.")
         password = unprotect_secret(settings, existing.bind_secret_protected) or ""
         if not password:
             raise AdValidationError("Stored bind password could not be decrypted. Re-enter the password.")
     port = int(body.get("port") or (existing.port if existing else 636) or 636)
-    if port != 636 and protocol == "ldaps":
-        # Allow custom LDAPS ports but default expectation is 636.
-        pass
     return LdapConnectParams(
-        domain_dns_name=str(body.get("domainDnsName") or (existing.domain_dns_name if existing else "")).strip(),
-        domain_controller=str(
-            body.get("domainController") or (existing.domain_controller if existing else "")
-        ).strip(),
+        domain_dns_name=domain_dns,
+        domain_controller=domain_controller,
         port=port,
         bind_username=str(body.get("bindUsername") or (existing.bind_username if existing else "")).strip(),
         bind_password=str(password),
-        base_dn=str(body.get("baseDn") or (existing.base_dn if existing else "")).strip(),
-        timeout_seconds=max(5, min(int(body.get("timeoutSeconds") or (existing.timeout_seconds if existing else 15) or 15), 60)),
+        base_dn=base_dn,
+        timeout_seconds=timeout,
         verify_tls=True,
+        auth_mode=AUTH_LDAPS,
     )
 
 
@@ -185,14 +227,18 @@ def test_connection_payload(
     params = _params_from_body(body, existing=existing, settings=settings)
     if not params.domain_dns_name and not params.domain_controller:
         raise AdValidationError("Domain DNS name or domain controller is required.")
-    if not params.bind_username:
-        raise AdValidationError("Bind username is required.")
+    if params.auth_mode == AUTH_LDAPS and not params.bind_username:
+        raise AdValidationError("Bind username is required for LDAPS.")
     succeeded, safe_error, checks, discovered = gateway.diagnose(params)
-    base_dn = (params.base_dn or discovered or "").strip()
+    identity = current_windows_identity() if params.auth_mode == AUTH_WINDOWS_INTEGRATED else None
     payload = {
         "succeeded": succeeded,
         "safeError": safe_error,
         "discoveredBaseDn": discovered or None,
+        "authMode": params.auth_mode,
+        "serviceIdentity": identity,
+        "ldapSigning": params.auth_mode == AUTH_WINDOWS_INTEGRATED,
+        "ldapSealing": params.auth_mode == AUTH_WINDOWS_INTEGRATED,
         "checks": [{"name": c.name, "status": c.status, "detail": c.detail} for c in checks],
     }
     if persist_on_row and existing is not None:
@@ -235,7 +281,7 @@ def save_connection(
     *,
     connection_id: uuid.UUID | None = None,
 ) -> dict:
-    """Validate LDAPS+bind first; only then persist. Never returns secrets."""
+    """Validate auth (Windows Integrated or LDAPS) first; only then persist. Never returns secrets."""
     existing = session.get(AdConnection, connection_id) if connection_id else None
     if existing and existing.connection_status == STATUS_DISABLED:
         raise AdValidationError("Re-enable the connection before saving changes.")
@@ -250,20 +296,21 @@ def save_connection(
     discovered = result.get("discoveredBaseDn") or ""
     base_dn = (params.base_dn or discovered or "").strip()
     now = _now()
-    password = params.bind_password
     if existing is None:
         row = AdConnection(
             id=uuid.uuid4(),
             connection_name=name,
             domain_dns_name=params.domain_dns_name,
             domain_controller=params.domain_controller,
-            protocol="ldaps",
+            protocol=params.auth_mode,
             port=params.port,
             base_dn=base_dn,
-            bind_username=params.bind_username,
-            bind_secret_protected=protect_secret(settings, password),
+            bind_username=params.bind_username if params.auth_mode == AUTH_LDAPS else "",
+            bind_secret_protected=(
+                protect_secret(settings, params.bind_password) if params.auth_mode == AUTH_LDAPS else None
+            ),
             timeout_seconds=params.timeout_seconds,
-            verify_tls=True,
+            verify_tls=params.auth_mode == AUTH_LDAPS,
             connection_status=STATUS_CONNECTED,
             last_successful_test_at=now,
             last_safe_error=None,
@@ -274,27 +321,44 @@ def save_connection(
             updated_by_user_id=actor_id,
         )
         session.add(row)
-        _audit(session, action="connection_create", actor_id=actor_id, connection_id=row.id, detail=f"name={name}")
+        _audit(
+            session,
+            action="connection_create",
+            actor_id=actor_id,
+            connection_id=row.id,
+            detail=f"name={name}; auth={params.auth_mode}",
+        )
     else:
         row = existing
         row.connection_name = name
         row.domain_dns_name = params.domain_dns_name
         row.domain_controller = params.domain_controller
-        row.protocol = "ldaps"
+        row.protocol = params.auth_mode
         row.port = params.port
         row.base_dn = base_dn
-        row.bind_username = params.bind_username
-        if body.get("bindPassword") or body.get("password"):
-            row.bind_secret_protected = protect_secret(settings, password)
+        if params.auth_mode == AUTH_LDAPS:
+            row.bind_username = params.bind_username
+            if body.get("bindPassword") or body.get("password"):
+                row.bind_secret_protected = protect_secret(settings, params.bind_password)
+            row.verify_tls = True
+        else:
+            row.bind_username = ""
+            row.bind_secret_protected = None
+            row.verify_tls = False
         row.timeout_seconds = params.timeout_seconds
-        row.verify_tls = True
         row.connection_status = STATUS_CONNECTED
         row.last_successful_test_at = now
         row.last_safe_error = None
         row.last_diagnostics_json = json.dumps(result["checks"])
         row.updated_at = now
         row.updated_by_user_id = actor_id
-        _audit(session, action="connection_update", actor_id=actor_id, connection_id=row.id, detail=f"name={name}")
+        _audit(
+            session,
+            action="connection_update",
+            actor_id=actor_id,
+            connection_id=row.id,
+            detail=f"name={name}; auth={params.auth_mode}",
+        )
     session.flush()
     return connection_dto(row)
 
@@ -441,6 +505,19 @@ def integrations_hub_status(session: Session) -> dict:
 
 
 def _bind_params(session: Session, settings: Settings, row: AdConnection) -> LdapConnectParams:
+    auth_mode = normalize_auth_mode(row.protocol)
+    if auth_mode == AUTH_WINDOWS_INTEGRATED:
+        return LdapConnectParams(
+            domain_dns_name=row.domain_dns_name,
+            domain_controller=row.domain_controller,
+            port=int(row.port or 389),
+            bind_username="",
+            bind_password="",
+            base_dn=row.base_dn,
+            timeout_seconds=row.timeout_seconds,
+            verify_tls=False,
+            auth_mode=AUTH_WINDOWS_INTEGRATED,
+        )
     secret = unprotect_secret(settings, row.bind_secret_protected)
     if not secret:
         raise AdValidationError("Bind password is not available. Edit the connection and re-enter the password.")
@@ -453,6 +530,7 @@ def _bind_params(session: Session, settings: Settings, row: AdConnection) -> Lda
         base_dn=row.base_dn,
         timeout_seconds=row.timeout_seconds,
         verify_tls=True,
+        auth_mode=AUTH_LDAPS,
     )
 
 

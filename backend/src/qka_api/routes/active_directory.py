@@ -25,13 +25,15 @@ class ConnectionBody(BaseModel):
     connectionName: str | None = None
     domainDnsName: str | None = None
     domainController: str | None = None
-    protocol: str = "ldaps"
-    port: int = 636
+    # windows_integrated (recommended) | ldaps (optional). Prefer authMode; protocol kept for compatibility.
+    authMode: str | None = None
+    protocol: str | None = None
+    port: int | None = None
     baseDn: str | None = None
     bindUsername: str | None = None
     bindPassword: str | None = None
     timeoutSeconds: int = 15
-    verifyTls: bool = True
+    verifyTls: bool | None = None
 
 
 class OuSelectionBody(BaseModel):

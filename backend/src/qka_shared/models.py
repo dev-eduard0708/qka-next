@@ -601,7 +601,11 @@ class AiUsageAudit(Base):
 
 
 class AdConnection(Base):
-    """QKA-Next Active Directory connection (LDAPS). Bind password encrypted at rest."""
+    """QKA-Next Active Directory connection.
+
+    protocol/auth mode: windows_integrated (Kerberos/SSPI + signing/sealing) or ldaps.
+    Bind password is used only for LDAPS and is encrypted at rest.
+    """
 
     __tablename__ = "qka_next_ad_connection"
 
@@ -609,8 +613,8 @@ class AdConnection(Base):
     connection_name: Mapped[str] = mapped_column(String(256), default="")
     domain_dns_name: Mapped[str] = mapped_column(String(256), default="")
     domain_controller: Mapped[str] = mapped_column(String(256), default="")
-    protocol: Mapped[str] = mapped_column(String(16), default="ldaps")
-    port: Mapped[int] = mapped_column(Integer, default=636)
+    protocol: Mapped[str] = mapped_column(String(32), default="windows_integrated")
+    port: Mapped[int] = mapped_column(Integer, default=389)
     base_dn: Mapped[str] = mapped_column(String(1024), default="")
     bind_username: Mapped[str] = mapped_column(String(512), default="")
     bind_secret_protected: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)

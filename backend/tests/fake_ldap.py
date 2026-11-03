@@ -1,13 +1,16 @@
-"""Mock LDAPS gateway for Active Directory tests (no live directory)."""
+"""Mock LDAP gateway for Active Directory tests (no live directory)."""
 
 from __future__ import annotations
 
 from qka_api.ldap_client import (
+    AUTH_LDAPS,
+    AUTH_WINDOWS_INTEGRATED,
     AdGroupRecord,
     AdOuNode,
     AdUserRecord,
     CheckResult,
     LdapConnectParams,
+    normalize_auth_mode,
 )
 
 
@@ -16,6 +19,7 @@ class FakeLdapGateway:
         self.fail_tls = False
         self.fail_bind = False
         self.fail_dns = False
+        self.fail_kerberos = False
         self.users = [
             AdUserRecord(
                 object_guid="11111111-1111-1111-1111-111111111111",
@@ -56,6 +60,50 @@ class FakeLdapGateway:
         ]
 
     def diagnose(self, params: LdapConnectParams):
+        mode = normalize_auth_mode(params.auth_mode)
+        if mode == AUTH_WINDOWS_INTEGRATED:
+            return self._diagnose_windows(params)
+        return self._diagnose_ldaps(params)
+
+    def _diagnose_windows(self, params: LdapConnectParams):
+        checks = [
+            CheckResult("dns", "not_tested"),
+            CheckResult("tcp", "not_tested"),
+            CheckResult("identity", "not_tested"),
+            CheckResult("kerberos", "not_tested"),
+            CheckResult("signing", "not_tested"),
+            CheckResult("sealing", "not_tested"),
+            CheckResult("rootdse", "not_tested"),
+            CheckResult("search", "not_tested"),
+        ]
+        if self.fail_dns:
+            checks[0].status = "failed"
+            checks[0].detail = "Domain DNS resolution failed."
+            return False, checks[0].detail, checks, ""
+        checks[0].status = "pass"
+        checks[0].detail = "Resolved"
+        checks[1].status = "pass"
+        checks[1].detail = "TCP ok"
+        checks[2].status = "pass"
+        checks[2].detail = "Service identity: QEHC\\qka-reader"
+        if self.fail_kerberos or self.fail_bind:
+            checks[3].status = "failed"
+            checks[3].detail = "Kerberos/SSPI authentication failed for the Windows service identity."
+            return False, checks[3].detail, checks, ""
+        checks[3].status = "pass"
+        checks[3].detail = "Kerberos/SSPI bind succeeded"
+        checks[4].status = "pass"
+        checks[4].detail = "LDAP signing required"
+        checks[5].status = "pass"
+        checks[5].detail = "LDAP sealing required"
+        base = params.base_dn or "DC=qehc,DC=edu,DC=sa"
+        checks[6].status = "pass"
+        checks[6].detail = f"Base DN: {base}"
+        checks[7].status = "pass"
+        checks[7].detail = "Search ok"
+        return True, None, checks, base
+
+    def _diagnose_ldaps(self, params: LdapConnectParams):
         checks = [
             CheckResult("dns", "not_tested"),
             CheckResult("tcp", "not_tested"),
