@@ -246,6 +246,44 @@
 
       <q-card bordered>
         <q-card-section>
+          <div class="text-subtitle1 q-mb-sm">MCP indexing confirmation</div>
+          <p class="text-caption">
+            Create a short-lived, single-use confirmation before ChatGPT may call start_indexing.
+            Paste the confirmation ID into the MCP tool. Does not start a job by itself.
+          </p>
+          <div class="row q-col-gutter-sm items-end">
+            <div class="col-12 col-md-4">
+              <q-select
+                v-model="mcpConfirmOp"
+                outlined
+                dense
+                emit-value
+                map-options
+                :options="mcpConfirmOps"
+                label="Operation"
+              />
+            </div>
+            <div class="col-12 col-md-5">
+              <q-input
+                v-model="mcpConfirmDocs"
+                outlined
+                dense
+                label="Document IDs (reindex_selected, comma-separated)"
+              />
+            </div>
+            <div class="col-auto">
+              <q-btn color="secondary" unelevated :loading="mcpConfirmBusy" label="Create confirmation" @click="createMcpConfirm" />
+            </div>
+          </div>
+          <q-banner v-if="mcpConfirmId" class="bg-grey-2 q-mt-md" dense>
+            confirmation_id: <code>{{ mcpConfirmId }}</code>
+            <div class="text-caption">Expires: {{ mcpConfirmExpires }}</div>
+          </q-banner>
+        </q-card-section>
+      </q-card>
+
+      <q-card bordered>
+        <q-card-section>
           <div class="text-subtitle1 q-mb-sm">{{ t("synology.sync") }}</div>
           <p class="text-caption">{{ t("synology.syncHint") }}</p>
           <div class="row q-col-gutter-sm q-mb-md">
@@ -511,6 +549,18 @@ const saving = ref(false);
 const testing = ref(false);
 const starting = ref(false);
 const cancelling = ref(false);
+const mcpConfirmOp = ref("extract_missing");
+const mcpConfirmDocs = ref("");
+const mcpConfirmBusy = ref(false);
+const mcpConfirmId = ref("");
+const mcpConfirmExpires = ref("");
+const mcpConfirmOps = [
+  { label: "sync", value: "sync" },
+  { label: "resync", value: "resync" },
+  { label: "extract_missing", value: "extract_missing" },
+  { label: "retry_failed", value: "retry_failed" },
+  { label: "reindex_selected", value: "reindex_selected" },
+];
 const loadingInventory = ref(false);
 const extractionStatus = ref<ExtractionStatus | null>(null);
 const extractionBusy = ref(false);
@@ -993,6 +1043,32 @@ async function test() {
     testMessage.value = err instanceof Error ? err.message : t("synology.testFail");
   } finally {
     testing.value = false;
+  }
+}
+
+async function createMcpConfirm() {
+  mcpConfirmBusy.value = true;
+  mcpConfirmId.value = "";
+  mcpConfirmExpires.value = "";
+  error.value = "";
+  try {
+    const docs = mcpConfirmDocs.value
+      .split(/[,;\s]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const shareId =
+      connections.value.find((item) => item.id === selectedId.value)?.primaryApprovedShareId || null;
+    const result = await api.createMcpIndexingConfirmation({
+      operation: mcpConfirmOp.value,
+      sourceId: shareId,
+      documentIds: docs,
+    });
+    mcpConfirmId.value = result.confirmationId;
+    mcpConfirmExpires.value = result.expiresAt || "";
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : "Failed to create MCP confirmation.";
+  } finally {
+    mcpConfirmBusy.value = false;
   }
 }
 

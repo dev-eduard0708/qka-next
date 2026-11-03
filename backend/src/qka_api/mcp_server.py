@@ -1,4 +1,4 @@
-"""QKA-Next MCP Streamable HTTP tools (search, fetch, get_profile)."""
+"""QKA-Next MCP Streamable HTTP tools (search, fetch, get_profile + browse/download/index)."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from qka_api.mcp_oauth import McpOAuthService, QkaTokenVerifier
 from qka_api.services import documents as docs
+from qka_api.services import mcp_capabilities as caps
 from qka_shared.allowlist import evaluate_user
 from qka_shared.chat_access import channel_deny_message, require_mcp_chat
 from qka_shared.config import Settings
@@ -102,8 +103,9 @@ def create_mcp_server(
     mcp = MCPServer(
         name="QKA-Next Synology",
         instructions=(
-            "Read-only Synology document tools for QKA-Next. "
-            "search/fetch always apply the authenticated employee's ACL. "
+            "QKA-Next Synology document tools. "
+            "search/fetch/browse/preview/download always apply the authenticated employee's ACL. "
+            "start_indexing is Super Admin only and requires a QKA admin UI confirmation. "
             "Never trust tool arguments for identity."
         ),
         token_verifier=QkaTokenVerifier(oauth),
@@ -354,5 +356,254 @@ def create_mcp_server(
                     "superAdmin": bool(user.is_super_admin) if user else False,
                 }
             )
+
+    def _gate(session: Session, tool: str, caller: uuid.UUID | None) -> str | None:
+        if caller is None:
+            _audit(session, tool=tool, user_id=None, succeeded=False, error_category="unauthenticated")
+            return "Unauthenticated."
+        channel = require_mcp_chat(session, caller)
+        if not channel.allowed:
+            msg = channel_deny_message(channel.reason)
+            _audit(session, tool=tool, user_id=caller, succeeded=False, error_category="mcp_channel_denied", detail=msg)
+            return msg
+        return None
+
+    @mcp.tool(
+        name="get_document_download_link",
+        description=(
+            "Return a secure QKA browser handoff link for the original Synology file. "
+            "Requires Download Originals. Does not return file bytes or SMB paths. "
+            "The employee must open the link while signed into QKA."
+        ),
+    )
+    def get_document_download_link(document_id: str, ctx: Context) -> str:
+        factory = ctx.request_context.lifespan_context["session_factory"]
+        cfg = ctx.request_context.lifespan_context["settings"]
+        caller = _caller_user_id()
+        with factory() as session:
+            deny = _gate(session, "get_document_download_link", caller)
+            if deny:
+                session.commit()
+                return json.dumps({"denied": True, "error": deny, "downloadLink": None})
+            result = caps.get_document_download_link(session, cfg, caller, document_id)  # type: ignore[arg-type]
+            _audit(
+                session,
+                tool="get_document_download_link",
+                user_id=caller,
+                succeeded=not result.get("denied"),
+                error_category="download_denied" if result.get("denied") else None,
+                detail=result.get("error"),
+            )
+            session.commit()
+            return json.dumps(result)
+
+    @mcp.tool(
+        name="get_document_preview",
+        description=(
+            "Return preview metadata and a secure QKA viewer handoff link. "
+            "Requires View Documents. Does not embed original file bytes. "
+            "Reports the actual supported preview kind (not LibreOffice/COM rendering)."
+        ),
+    )
+    def get_document_preview(document_id: str, ctx: Context) -> str:
+        factory = ctx.request_context.lifespan_context["session_factory"]
+        cfg = ctx.request_context.lifespan_context["settings"]
+        caller = _caller_user_id()
+        with factory() as session:
+            deny = _gate(session, "get_document_preview", caller)
+            if deny:
+                session.commit()
+                return json.dumps({"denied": True, "error": deny, "previewLink": None})
+            result = caps.get_document_preview(session, cfg, caller, document_id)  # type: ignore[arg-type]
+            _audit(
+                session,
+                tool="get_document_preview",
+                user_id=caller,
+                succeeded=not result.get("denied"),
+                error_category="preview_denied" if result.get("denied") else None,
+                detail=result.get("error"),
+            )
+            session.commit()
+            return json.dumps(result)
+
+    @mcp.tool(
+        name="list_folders",
+        description=(
+            "List authorized Synology folders for the bound employee. "
+            "Uses PostgreSQL inventory (no Synology round-trip). Paginated."
+        ),
+    )
+    def list_folders(
+        source_id: str | None = None,
+        parent_folder_id: str | None = None,
+        parent_path: str | None = None,
+        page_size: int = 25,
+        cursor: str | None = None,
+        ctx: Context | None = None,
+    ) -> str:
+        if ctx is None:
+            return json.dumps({"denied": True, "error": "MCP context unavailable.", "folders": []})
+        factory = ctx.request_context.lifespan_context["session_factory"]
+        cfg = ctx.request_context.lifespan_context["settings"]
+        caller = _caller_user_id()
+        with factory() as session:
+            deny = _gate(session, "list_folders", caller)
+            if deny:
+                session.commit()
+                return json.dumps({"denied": True, "error": deny, "folders": []})
+            result = caps.list_folders(
+                session,
+                cfg,
+                caller,  # type: ignore[arg-type]
+                source_id=source_id,
+                parent_folder_id=parent_folder_id,
+                parent_path=parent_path,
+                page_size=page_size,
+                cursor=cursor,
+            )
+            _audit(
+                session,
+                tool="list_folders",
+                user_id=caller,
+                succeeded=not result.get("denied"),
+                error_category="list_folders_denied" if result.get("denied") else None,
+                detail=result.get("error"),
+            )
+            session.commit()
+            return json.dumps(result)
+
+    @mcp.tool(
+        name="list_documents",
+        description=(
+            "List authorized Synology documents from inventory (including unindexed filenames). "
+            "Supports folder, file_type, filename_query filters. Paginated; never returns the full inventory."
+        ),
+    )
+    def list_documents(
+        source_id: str | None = None,
+        folder_id: str | None = None,
+        folder_path: str | None = None,
+        recursive: bool = False,
+        file_type: str | None = None,
+        filename_query: str | None = None,
+        page_size: int = 25,
+        cursor: str | None = None,
+        ctx: Context | None = None,
+    ) -> str:
+        if ctx is None:
+            return json.dumps({"denied": True, "error": "MCP context unavailable.", "documents": []})
+        factory = ctx.request_context.lifespan_context["session_factory"]
+        cfg = ctx.request_context.lifespan_context["settings"]
+        caller = _caller_user_id()
+        with factory() as session:
+            deny = _gate(session, "list_documents", caller)
+            if deny:
+                session.commit()
+                return json.dumps({"denied": True, "error": deny, "documents": []})
+            result = caps.list_documents(
+                session,
+                cfg,
+                caller,  # type: ignore[arg-type]
+                source_id=source_id,
+                folder_id=folder_id,
+                folder_path=folder_path,
+                recursive=bool(recursive),
+                file_type=file_type,
+                filename_query=filename_query,
+                page_size=page_size,
+                cursor=cursor,
+            )
+            _audit(
+                session,
+                tool="list_documents",
+                user_id=caller,
+                succeeded=not result.get("denied"),
+                error_category="list_documents_denied" if result.get("denied") else None,
+                detail=result.get("error"),
+            )
+            session.commit()
+            return json.dumps(result)
+
+    @mcp.tool(
+        name="get_index_status",
+        description=(
+            "Read-only indexing/sync progress from PostgreSQL job counters. "
+            "Super Admin sees full details; other employees see a limited summary for accessible sources."
+        ),
+    )
+    def get_index_status(
+        source_id: str | None = None,
+        job_id: str | None = None,
+        ctx: Context | None = None,
+    ) -> str:
+        if ctx is None:
+            return json.dumps({"denied": True, "error": "MCP context unavailable."})
+        factory = ctx.request_context.lifespan_context["session_factory"]
+        cfg = ctx.request_context.lifespan_context["settings"]
+        caller = _caller_user_id()
+        with factory() as session:
+            deny = _gate(session, "get_index_status", caller)
+            if deny:
+                session.commit()
+                return json.dumps({"denied": True, "error": deny})
+            result = caps.get_index_status(
+                session, cfg, caller, source_id=source_id, job_id=job_id  # type: ignore[arg-type]
+            )
+            _audit(
+                session,
+                tool="get_index_status",
+                user_id=caller,
+                succeeded=not result.get("denied"),
+                error_category="index_status_denied" if result.get("denied") else None,
+                detail=result.get("error"),
+            )
+            session.commit()
+            return json.dumps(result)
+
+    @mcp.tool(
+        name="start_indexing",
+        description=(
+            "Super Admin only. Start an existing Synology indexing operation after a short-lived "
+            "confirmation created in the QKA Synology admin UI (confirmation_id required). "
+            "Operations: sync, resync, extract_missing, retry_failed, reindex_selected. "
+            "Does not start jobs from ChatGPT browse/search alone."
+        ),
+    )
+    def start_indexing(
+        confirmation_id: str | None = None,
+        operation: str | None = None,
+        source_id: str | None = None,
+        document_ids: list[str] | None = None,
+        ctx: Context | None = None,
+    ) -> str:
+        if ctx is None:
+            return json.dumps({"accepted": False, "denied": True, "error": "MCP context unavailable."})
+        factory = ctx.request_context.lifespan_context["session_factory"]
+        cfg = ctx.request_context.lifespan_context["settings"]
+        caller = _caller_user_id()
+        with factory() as session:
+            deny = _gate(session, "start_indexing", caller)
+            if deny:
+                session.commit()
+                return json.dumps({"accepted": False, "denied": True, "error": deny})
+            result = caps.start_indexing(
+                session,
+                cfg,
+                caller,  # type: ignore[arg-type]
+                confirmation_id=confirmation_id,
+                operation=operation,
+                source_id=source_id,
+                document_ids=document_ids,
+            )
+            _audit(
+                session,
+                tool="start_indexing",
+                user_id=caller,
+                succeeded=bool(result.get("accepted")),
+                error_category=None if result.get("accepted") else "start_indexing_denied",
+                detail=result.get("error") or result.get("operation"),
+            )
+            session.commit()
+            return json.dumps(result)
 
     return mcp

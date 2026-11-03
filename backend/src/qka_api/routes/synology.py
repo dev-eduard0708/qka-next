@@ -38,6 +38,14 @@ class StartSyncRequest(BaseModel):
     connectionId: uuid.UUID | None = None
 
 
+class McpIndexingConfirmRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    operation: str
+    sourceId: uuid.UUID | None = None
+    documentIds: list[str] = Field(default_factory=list)
+
+
 def _require_super_admin(
     request: Request,
     settings: Settings,
@@ -473,3 +481,28 @@ def reindex_folder(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     session.commit()
     return extraction_svc.serialize_batch(batch)
+
+
+@router.post("/mcp-indexing-confirmations")
+def create_mcp_indexing_confirmation(
+    request: Request,
+    body: McpIndexingConfirmRequest,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    """Super Admin UI: mint a short-lived confirmation for MCP start_indexing."""
+    from qka_api.services import mcp_capabilities as mcp_caps
+
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    _guard_writes(settings)
+    result = mcp_caps.create_indexing_confirmation(
+        session,
+        actor_id=actor.id,
+        operation=body.operation,
+        source_id=str(body.sourceId) if body.sourceId else None,
+        document_ids=list(body.documentIds or []),
+    )
+    if result.get("denied"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result.get("error") or "Denied.")
+    session.commit()
+    return result

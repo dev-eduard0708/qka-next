@@ -177,6 +177,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useQuasar, type QTableColumn } from "quasar";
 import { useI18n } from "vue-i18n";
+import { useRoute, useRouter } from "vue-router";
 import DocumentPreviewPane from "@/components/DocumentPreviewPane.vue";
 import { api } from "@/api";
 import { openOriginalInDesktopApp } from "@/openOriginal";
@@ -209,6 +210,8 @@ type SearchHit = {
 const SPLITTER_KEY = "qka.search.splitter";
 const { t } = useI18n();
 const $q = useQuasar();
+const route = useRoute();
+const router = useRouter();
 const session = useSessionStore();
 const query = ref("");
 const results = ref<SearchHit[]>([]);
@@ -462,9 +465,42 @@ async function run(nextPage = 1) {
   }
 }
 
+async function redeemMcpHandoff() {
+  const handoff = typeof route.query.handoff === "string" ? route.query.handoff : "";
+  if (!handoff || !session.user) return;
+  const purpose = typeof route.query.purpose === "string" ? route.query.purpose : "preview";
+  try {
+    if (purpose === "download") {
+      // Cookie-authenticated stream; browser handles download / Open With.
+      window.location.assign(`/api/v1/mcp/handoff/${encodeURIComponent(handoff)}`);
+      return;
+    }
+    const meta = await api.mcpHandoffMeta(handoff);
+    if (meta.denied) {
+      openError.value = meta.error || t("search.downloadDenied");
+      return;
+    }
+    if (meta.documentId) {
+      selectedId.value = meta.documentId;
+    }
+  } catch (err) {
+    openError.value = err instanceof Error ? err.message : t("search.downloadDenied");
+  } finally {
+    if (purpose !== "download") {
+      const nextQuery = { ...route.query };
+      delete nextQuery.handoff;
+      delete nextQuery.purpose;
+      void router.replace({ query: nextQuery });
+    }
+  }
+}
+
 onMounted(async () => {
   await loadCatalog();
-  if (session.user) void run(1);
+  if (session.user) {
+    await run(1);
+    await redeemMcpHandoff();
+  }
 });
 
 watch(

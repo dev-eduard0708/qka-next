@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -26,6 +27,7 @@ from qka_api.services.documents import (
     search_catalog,
     summary,
 )
+from qka_api.services import mcp_capabilities as mcp_caps
 from qka_api.smb import SmbGateway, default_gateway
 from qka_shared.config import Settings
 
@@ -244,6 +246,60 @@ def document_detail(
         document_id,
         offset,
         chunk_index=chunkIndex,
+    )
+
+
+@router.get("/mcp/handoff/{handoff_id}")
+def mcp_document_handoff(
+    handoff_id: str,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> Response:
+    """Redeem an MCP browser handoff. Rechecks intended user + permissions. No SMB secrets."""
+    principal = require_principal(request, settings)
+    meta = mcp_caps.redeem_handoff(session, settings, principal.user_id, handoff_id)
+    if meta.get("denied"):
+        session.commit()
+        return JSONResponse(meta, status_code=403)
+
+    if meta.get("purpose") == "preview":
+        session.commit()
+        return JSONResponse(meta)
+
+    # Download: stream original bytes after a fresh Download Originals check inside read_original_bytes.
+    document_id = str(meta.get("documentId") or "")
+    payload, file_meta = read_original_bytes(
+        session, settings, principal.user_id, document_id, _gateway(request)
+    )
+    if payload is None:
+        session.commit()
+        status_code = 403 if file_meta.get("requiresDownloadGrant") or file_meta.get("denied") else 404
+        return JSONResponse(file_meta, status_code=status_code)
+    from datetime import datetime, timezone
+
+    from qka_shared.models import McpDocumentHandoff
+
+    hid = meta.get("handoffId")
+    if hid:
+        try:
+            row = session.get(McpDocumentHandoff, uuid.UUID(str(hid)))
+        except Exception:
+            row = None
+        if row is not None and row.consumed_at is None:
+            row.consumed_at = datetime.now(timezone.utc)
+    session.commit()
+    file_name = file_meta.get("fileName") or "document"
+    ascii_name = file_name.encode("ascii", "ignore").decode("ascii") or "document"
+    disposition = f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(file_name)}"
+    return Response(
+        content=payload,
+        media_type=file_meta.get("mediaType") or "application/octet-stream",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": disposition,
+        },
     )
 
 

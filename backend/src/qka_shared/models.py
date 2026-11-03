@@ -198,6 +198,36 @@ class McpToolAudit(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class McpDocumentHandoff(Base):
+    """Short-lived browser handoff for MCP download/preview (bound to QKA user + document)."""
+
+    __tablename__ = "qka_next_mcp_document_handoff"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    qka_user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    inventory_file_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    purpose: Mapped[str] = mapped_column(String(32))  # download | preview
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class McpIndexingConfirmation(Base):
+    """Super Admin UI confirmation required before MCP may start indexing jobs."""
+
+    __tablename__ = "qka_next_mcp_indexing_confirmation"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    qka_user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    operation: Mapped[str] = mapped_column(String(64))
+    source_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    document_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_by_user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True))
+
+
 class SourceScope(Base):
     """Approved Synology folder scope with trust classification (personal vs corporate designated)."""
 

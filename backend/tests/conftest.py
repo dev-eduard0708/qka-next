@@ -275,6 +275,38 @@ def seed_db():
         session.execute(text("ALTER TABLE qka_next_source_grant_audit ADD COLUMN IF NOT EXISTS share_name VARCHAR(256) NOT NULL DEFAULT ''"))
         session.execute(text("ALTER TABLE qka_next_source_grant_audit ADD COLUMN IF NOT EXISTS before_detail TEXT NOT NULL DEFAULT ''"))
         session.execute(text("ALTER TABLE qka_next_source_grant_audit ADD COLUMN IF NOT EXISTS after_detail TEXT NOT NULL DEFAULT ''"))
+        session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS qka_next_mcp_document_handoff (
+                    id UUID PRIMARY KEY,
+                    qka_user_id UUID NOT NULL,
+                    inventory_file_id UUID NOT NULL,
+                    purpose VARCHAR(32) NOT NULL,
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    consumed_at TIMESTAMPTZ NULL,
+                    created_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+        )
+        session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS qka_next_mcp_indexing_confirmation (
+                    id UUID PRIMARY KEY,
+                    qka_user_id UUID NOT NULL,
+                    operation VARCHAR(64) NOT NULL,
+                    source_id UUID NULL,
+                    document_ids_json TEXT NOT NULL DEFAULT '[]',
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    consumed_at TIMESTAMPTZ NULL,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    created_by_user_id UUID NOT NULL
+                )
+                """
+            )
+        )
         session.execute(text('ALTER TABLE allowed_email ADD COLUMN IF NOT EXISTS "DisplayName" VARCHAR(256) NOT NULL DEFAULT \'\''))
         session.execute(text('ALTER TABLE allowed_email ADD COLUMN IF NOT EXISTS "GoogleProfileName" VARCHAR(256) NOT NULL DEFAULT \'\''))
         session.execute(text('ALTER TABLE synology_file_inventory ADD COLUMN IF NOT EXISTS "IsDirectory" BOOLEAN NOT NULL DEFAULT FALSE'))

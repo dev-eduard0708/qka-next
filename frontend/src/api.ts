@@ -647,6 +647,37 @@ export const api = {
   },
   documentPreviewMedia: (id: string) => `/api/v1/documents/${id}/preview/media`,
   documentPreviewPage: (id: string, page: number) => `/api/v1/documents/${id}/preview/pages/${page}`,
+  mcpHandoffMeta: (handoffId: string) =>
+    request<{
+      denied: boolean;
+      purpose?: string;
+      documentId?: string;
+      documentName?: string;
+      previewKind?: string;
+      error?: string | null;
+    }>(`/api/v1/mcp/handoff/${encodeURIComponent(handoffId)}`),
+  createMcpIndexingConfirmation: (body: {
+    operation: string;
+    sourceId?: string | null;
+    documentIds?: string[];
+  }) =>
+    request<{
+      denied?: boolean;
+      confirmationId: string;
+      operation: string;
+      sourceId?: string | null;
+      documentIds?: string[];
+      expiresAt: string;
+      note?: string;
+      error?: string;
+    }>("/api/v1/admin/synology/mcp-indexing-confirmations", {
+      method: "POST",
+      body: JSON.stringify({
+        operation: body.operation,
+        sourceId: body.sourceId || null,
+        documentIds: body.documentIds || [],
+      }),
+    }),
   documentDownloadMeta: (id: string) =>
     request<{
       id: string;
@@ -918,6 +949,7 @@ export type SynologyConnection = {
   name: string;
   hostName: string;
   configuredSharedFolderPath: string;
+  primaryApprovedShareId?: string | null;
   authMode: number;
   serviceAccountUserName: string | null;
   serviceAccountSecretConfigured: boolean;
