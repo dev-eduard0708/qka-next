@@ -56,7 +56,7 @@ class RefreshRecord:
     qka_user_id: uuid.UUID
     scope: str
     resource: str
-    expires_at: float
+    expires_at: float | None
 
 
 @dataclass
@@ -66,7 +66,7 @@ class AccessRecord:
     qka_user_id: uuid.UUID
     scope: str
     resource: str
-    expires_at: float
+    expires_at: float | None
 
 
 @dataclass
@@ -268,27 +268,41 @@ class McpOAuthService:
         resource: str,
         include_refresh: bool,
     ) -> tuple[str, str | None, int]:
-        expires_in = 3600
+        # Company-domain Google login once: access tokens do not time-expire.
+        # Clients that require expires_in still get a large value (10 years).
+        # Tokens remain in-memory — an API process restart still requires re-login.
+        access_seconds = int(getattr(self.settings, "mcp_oauth_access_token_seconds", 0) or 0)
+        refresh_seconds = int(getattr(self.settings, "mcp_oauth_refresh_token_seconds", 0) or 0)
         access = secrets.token_urlsafe(32)
         now = time.time()
+        if access_seconds <= 0:
+            access_expires_at: float | None = None
+            expires_in = 315360000  # 10y sentinel for OAuth clients
+        else:
+            access_expires_at = now + access_seconds
+            expires_in = access_seconds
         self._access[access] = AccessRecord(
             token=access,
             client_id=client_id,
             qka_user_id=qka_user_id,
             scope=scope,
             resource=self.normalize_resource(resource),
-            expires_at=now + expires_in,
+            expires_at=access_expires_at,
         )
         refresh = None
         if include_refresh:
             refresh = secrets.token_urlsafe(32)
+            if refresh_seconds <= 0:
+                refresh_expires_at: float | None = None
+            else:
+                refresh_expires_at = now + refresh_seconds
             self._refresh[refresh] = RefreshRecord(
                 token=refresh,
                 client_id=client_id,
                 qka_user_id=qka_user_id,
                 scope=scope,
                 resource=self.normalize_resource(resource),
-                expires_at=now + 86400 * 14,
+                expires_at=refresh_expires_at,
             )
         self._stats["tokenIssues"] = int(self._stats["tokenIssues"]) + 1
         self._stats["lastTokenIssuedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -296,7 +310,9 @@ class McpOAuthService:
 
     def consume_refresh_token(self, refresh_token: str) -> RefreshRecord | None:
         row = self._refresh.pop(refresh_token, None)
-        if row is None or row.expires_at < time.time():
+        if row is None:
+            return None
+        if row.expires_at is not None and row.expires_at < time.time():
             return None
         return row
 
@@ -322,7 +338,10 @@ class McpOAuthService:
                 claims={"qka_user_id": str(user_id), "auth": "inspector"},
             )
         row = self._access.get(token)
-        if row is None or row.expires_at < time.time():
+        if row is None:
+            self._fail_validation("invalid_or_expired")
+            return None
+        if row.expires_at is not None and row.expires_at < time.time():
             self._fail_validation("invalid_or_expired")
             return None
         if not self.is_resource_allowed(row.resource):
@@ -332,7 +351,7 @@ class McpOAuthService:
             token=token,
             client_id=row.client_id,
             scopes=[s for s in row.scope.split() if s],
-            expires_at=int(row.expires_at),
+            expires_at=None if row.expires_at is None else int(row.expires_at),
             resource=row.resource,
             subject=str(row.qka_user_id),
             claims={"qka_user_id": str(row.qka_user_id), "auth": "oauth"},

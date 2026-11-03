@@ -187,6 +187,7 @@
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { api, type DocumentPreview } from "@/api";
+import { openOriginalInDesktopApp } from "@/openOriginal";
 
 const props = defineProps<{
   documentId: string | null;
@@ -307,25 +308,23 @@ async function tryDownload(openWith: boolean) {
   banner.value = "";
   info.value = "";
   try {
-    // Always transfer only after an explicit user click. intent=open asks for inline
-    // disposition so Windows can use registered Office/PDF associations when possible.
-    const body = await api.documentDownload(props.documentId, {
-      intent: openWith ? "open" : "download",
-    });
+    if (openWith) {
+      const body = await openOriginalInDesktopApp(props.documentId);
+      if (!body.ok) {
+        banner.value = body.error || t("search.downloadDenied");
+        return;
+      }
+      const app = body.recommendedApp || t("search.systemDefaultApp");
+      info.value = t("search.openOriginalOpened", { app, file: body.fileName || preview.value?.title || "" });
+      return;
+    }
+    const body = await api.documentDownload(props.documentId, { intent: "download" });
     if (!body.ok) {
       banner.value = body.error || t("search.downloadDenied");
       return;
     }
-    const app = body.recommendedApp || t("search.systemDefaultApp");
-    if (openWith) {
-      // Browsers cannot launch desktop Office directly from a blob URL. Download the
-      // authorized original, then guide the user to open with the registered app.
-      saveBlob(body.blob, body.fileName);
-      info.value = t("search.openWithInstructions", { app, file: body.fileName });
-    } else {
-      saveBlob(body.blob, body.fileName);
-      info.value = t("search.downloadStarted");
-    }
+    saveBlob(body.blob, body.fileName);
+    info.value = t("search.downloadStarted");
   } catch (err) {
     banner.value = err instanceof Error ? err.message : t("search.downloadDenied");
   } finally {

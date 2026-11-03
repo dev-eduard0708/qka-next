@@ -109,9 +109,15 @@
               <q-td :props="props">
                 <div class="row items-center no-wrap">
                   <q-icon :name="iconFor(props.row.fileType)" :class="`qka-type-${props.row.fileType}`" class="q-mr-sm" />
-                  <div class="ellipsis">
+                  <div class="ellipsis" style="min-width: 0; flex: 1">
                     <div class="ellipsis">{{ props.row.title }}</div>
-                    <div class="text-caption text-grey-7 ellipsis">{{ props.row.folder || props.row.relativePath }}</div>
+                    <div
+                      v-if="folderLabel(props.row)"
+                      class="text-caption text-grey-7 ellipsis"
+                    >
+                      {{ folderLabel(props.row) }}
+                      <q-tooltip v-if="folderFull(props.row)">{{ folderFull(props.row) }}</q-tooltip>
+                    </div>
                   </div>
                 </div>
               </q-td>
@@ -173,6 +179,7 @@ import { useQuasar, type QTableColumn } from "quasar";
 import { useI18n } from "vue-i18n";
 import DocumentPreviewPane from "@/components/DocumentPreviewPane.vue";
 import { api } from "@/api";
+import { openOriginalInDesktopApp } from "@/openOriginal";
 import { useSessionStore } from "@/stores/session";
 
 type CatalogSource = {
@@ -283,6 +290,26 @@ function iconFor(type: string | undefined) {
   return "insert_drive_file";
 }
 
+function folderFull(row: SearchHit) {
+  return (row.folder || row.relativePath || "").replace(/\//g, "\\").trim();
+}
+
+/** Short location under the title — last 1–2 folder segments; full path in tooltip. */
+function folderLabel(row: SearchHit) {
+  const full = folderFull(row);
+  if (!full) return "";
+  const parts = full.split("\\").filter(Boolean);
+  // Drop the filename if relativePath was used.
+  const folders =
+    row.folder || !row.title
+      ? parts
+      : parts[parts.length - 1]?.toLowerCase() === row.title.toLowerCase()
+        ? parts.slice(0, -1)
+        : parts;
+  if (folders.length <= 2) return folders.join(" \\ ");
+  return `… \\ ${folders.slice(-2).join(" \\ ")}`;
+}
+
 function badgeColor(key: string) {
   if (key === "excel") return "positive";
   if (key === "word") return "primary";
@@ -343,17 +370,6 @@ function openOriginalTooltip(row: SearchHit) {
   return t("search.openOriginalGeneric");
 }
 
-function saveBlob(blob: Blob, fileName: string) {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = fileName;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(url);
-}
-
 async function openOriginal(row: SearchHit) {
   if (!row.canDownload || openingId.value) return;
   const previousSelected = selectedId.value;
@@ -361,15 +377,14 @@ async function openOriginal(row: SearchHit) {
   openInfo.value = t("search.openOriginalPreparing");
   openError.value = "";
   try {
-    const body = await api.documentDownload(row.id, { intent: "open" });
+    const body = await openOriginalInDesktopApp(row.id);
     if (!body.ok) {
       openInfo.value = "";
       openError.value = body.error || t("search.downloadDenied");
       return;
     }
-    saveBlob(body.blob, body.fileName);
     const app = body.recommendedApp || row.recommendedApp || t("search.systemDefaultApp");
-    openInfo.value = t("search.openWithInstructions", { app, file: body.fileName });
+    openInfo.value = t("search.openOriginalOpened", { app, file: body.fileName || row.title });
   } catch (err) {
     openInfo.value = "";
     openError.value = err instanceof Error ? err.message : t("search.downloadDenied");

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from pathlib import Path
 
 from openpyxl import Workbook
 
@@ -114,3 +115,68 @@ def test_view_only_cannot_stream_via_open_intent(client) -> None:
         raise AssertionError("view-only user received original bytes")
     body = opened.json()
     assert body.get("denied") is True
+
+
+def test_desktop_open_local_launch_on_loopback(client, monkeypatch) -> None:
+    gateway = FakeSmbGateway()
+    payload = _xlsx_bytes()
+    gateway.contents[r"EDUARDTESTCLOUD\ASSETS NEW FORM.XLSX"] = payload
+    client.app.state.smb_gateway = gateway
+    _grant(client, download=True, label="desktop-open-local")
+    client.cookies.clear()
+    cookies = auth_cookies(GOOGLE_ONLY_USER)
+
+    launched: list[str] = []
+
+    def _fake_startfile(path: str) -> None:
+        launched.append(path)
+
+    monkeypatch.setattr("qka_api.services.desktop_open.os.startfile", _fake_startfile, raising=False)
+    monkeypatch.setattr("qka_api.services.desktop_open.os.name", "nt")
+    monkeypatch.setattr("qka_api.routes.documents._is_loopback_client", lambda _request: True)
+
+    minted = client.post(f"/api/v1/documents/{FILE_ID.hex}/desktop-open", cookies=cookies)
+    assert minted.status_code == 200, minted.text
+    body = minted.json()
+    assert body["ok"] is True
+    assert body["mode"] == "local-launch"
+    assert body.get("openUrl") in (None, "")
+    assert launched, "expected Windows startfile launch"
+    assert Path(launched[0]).is_file()
+    assert Path(launched[0]).read_bytes() == payload
+
+
+def test_desktop_open_remote_mints_url_with_extension(client, monkeypatch) -> None:
+    gateway = FakeSmbGateway()
+    payload = _xlsx_bytes()
+    gateway.contents[r"EDUARDTESTCLOUD\ASSETS NEW FORM.XLSX"] = payload
+    client.app.state.smb_gateway = gateway
+    _grant(client, download=True, label="desktop-open-remote")
+    client.cookies.clear()
+    cookies = auth_cookies(GOOGLE_ONLY_USER)
+    monkeypatch.setattr("qka_api.routes.documents._is_loopback_client", lambda _request: False)
+
+    minted = client.post(f"/api/v1/documents/{FILE_ID.hex}/desktop-open", cookies=cookies)
+    assert minted.status_code == 200, minted.text
+    body = minted.json()
+    assert body["ok"] is True
+    assert body["mode"] == "office-protocol"
+    assert body["protocolUrl"].startswith("ms-excel:ofe|u|")
+    assert body["openUrl"].lower().endswith(".xlsx")
+    assert "unc" not in body["openUrl"].lower()
+
+    # Token is the path segment before the filename.
+    parts = body["openUrl"].rstrip("/").split("/")
+    token = parts[-2]
+    redeemed = client.get(f"/api/v1/desktop-open/{token}/{parts[-1]}")
+    assert redeemed.status_code == 200
+    assert redeemed.content == payload
+
+
+def test_desktop_open_denied_without_download(client) -> None:
+    _grant(client, download=False, label="desktop-open-deny")
+    client.cookies.clear()
+    cookies = auth_cookies(GOOGLE_ONLY_USER)
+    minted = client.post(f"/api/v1/documents/{FILE_ID.hex}/desktop-open", cookies=cookies)
+    assert minted.status_code == 403
+    assert minted.json().get("denied") is True

@@ -15,6 +15,7 @@ from qka_api.services.document_preview import (
     preview_media,
     preview_page_image,
 )
+from qka_api.services.desktop_open import mint_desktop_open, redeem_desktop_open
 from qka_api.services.documents import (
     authorize_download,
     browse_workspace,
@@ -289,3 +290,84 @@ def document_download(
             "X-QKA-Open-With-Label": meta.get("openWithLabel") or "",
         },
     )
+
+
+def _desktop_open_base(request: Request, settings: Settings) -> str:
+    """Absolute origin for Office URI / browser open fetches.
+
+    In development, point desktop apps at the FastAPI bind address so they do not
+    depend on the Vite proxy. In production, use the public request host.
+    """
+    if getattr(settings, "is_production", False):
+        forwarded = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+        host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").split(",")[0].strip()
+        if host:
+            scheme = forwarded or request.url.scheme or "https"
+            return f"{scheme}://{host}"
+    host = settings.api_host if settings.api_host not in {"0.0.0.0", "::", ""} else "127.0.0.1"
+    return f"http://{host}:{settings.api_port}"
+
+
+def _is_loopback_client(request: Request) -> bool:
+    host = (request.client.host if request.client else "") or ""
+    if host in {"127.0.0.1", "::1", "localhost"}:
+        return True
+    forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    return forwarded in {"127.0.0.1", "::1", "localhost"}
+
+
+@router.post("/documents/{document_id}/desktop-open")
+def document_desktop_open(
+    document_id: str,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> JSONResponse:
+    """Open original with the Windows default app (local) or mint a remote open URL."""
+    principal = require_principal(request, settings)
+    body = mint_desktop_open(
+        session,
+        settings,
+        principal.user_id,
+        document_id,
+        public_base_url=_desktop_open_base(request, settings),
+        gateway=_gateway(request),
+        prefer_local_launch=_is_loopback_client(request),
+    )
+    status = 200 if body.get("ok") else (403 if body.get("denied") else 400)
+    return JSONResponse(body, status_code=status)
+
+
+def _desktop_open_response(payload: bytes, meta: dict) -> Response:
+    file_name = meta.get("fileName") or "document"
+    ascii_name = file_name.encode("ascii", "ignore").decode("ascii") or "document"
+    disposition = f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(file_name)}"
+    return Response(
+        content=payload,
+        media_type=meta.get("mediaType") or "application/octet-stream",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": disposition,
+            "X-QKA-Recommended-App": meta.get("recommendedApp") or "",
+            "X-QKA-Open-With-Label": meta.get("openWithLabel") or "",
+        },
+    )
+
+
+@router.get("/desktop-open/{token}/{file_name}")
+@router.get("/desktop-open/{token}")
+def desktop_open_redeem(
+    token: str,
+    request: Request,
+    file_name: str | None = None,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> Response:
+    """Stream original bytes for a desktop-open ticket (remote / protocol fallback)."""
+    _ = file_name
+    payload, meta = redeem_desktop_open(session, settings, token, _gateway(request))
+    if payload is None:
+        status = 403 if meta.get("requiresDownloadGrant") or meta.get("denied") else 404
+        return JSONResponse(meta, status_code=status)
+    return _desktop_open_response(payload, meta)
