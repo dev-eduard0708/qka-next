@@ -19,6 +19,13 @@ from sqlalchemy.orm import Session
 
 from qka_api.smb import SmbGateway
 from qka_api.services.documents import authorize_document, _file_type
+from qka_api.services.preview_engine import (
+    OFFICE_EXTS,
+    PDF_EXTS,
+    ensure_original_render,
+    libreoffice_status,
+    read_page_bytes,
+)
 from qka_shared.allowlist import deny_message, evaluate_user, load_active_user
 from qka_shared.config import Settings
 from qka_shared.models import SynologyApprovedShare, SynologyConnectionSettings, SynologyDocumentContent, SynologyFileInventory
@@ -148,7 +155,7 @@ def _indexed_fallback(inventory: SynologyFileInventory, content: Any, can_downlo
         {
             "previewKind": "indexed_text",
             "previewNote": note
-            or "Indexed text preview — this is extracted PostgreSQL text, not the original document layout.",
+            or "Indexed Text View — original formatting not available.",
             "text": body[:20_000],
             "hasMore": len(body) > 20_000,
             "totalChars": len(body),
@@ -450,18 +457,12 @@ def _build_formatted(
     return None
 
 
-def preview_document(
+def _authorize_preview(
     session: Session,
     settings: Settings,
     caller_id: uuid.UUID,
     document_id: str,
-    gateway: SmbGateway | None = None,
-    *,
-    sheet: int = 0,
-    page: int = 1,
-    slide: int = 0,
-    row_offset: int = 0,
-) -> dict:
+) -> tuple[Any, SynologyFileInventory, Any, bool] | dict:
     access = evaluate_user(session, caller_id)
     if not access.allowed:
         return _denied(document_id, deny_message(access.reason), kind="denied")
@@ -472,7 +473,6 @@ def preview_document(
         inventory_id = uuid.UUID(document_id) if "-" in document_id else uuid.UUID(hex=document_id)
     except ValueError:
         return _denied(document_id, "Document not found.")
-
     inventory = session.get(SynologyFileInventory, inventory_id)
     if inventory is None or not inventory.is_present or inventory.is_directory:
         return _denied(document_id, "Document not found.")
@@ -499,15 +499,32 @@ def preview_document(
         capability=Capability.DOWNLOAD,
         require_extracted=False,
     )
+    return user, inventory, view, can_download
 
+
+def _data_view_preview(
+    session: Session,
+    settings: Settings,
+    inventory: SynologyFileInventory,
+    view: Any,
+    can_download: bool,
+    gateway: SmbGateway | None,
+    *,
+    sheet: int,
+    page: int,
+    slide: int,
+    row_offset: int,
+) -> dict:
     ext = (inventory.extension or "").lower().lstrip(".")
     version = _version_key(inventory, view)
-    cache_name = f"{ext}-{sheet}-{page}-{slide}-{row_offset}.json"
+    cache_name = f"data-{ext}-{sheet}-{page}-{slide}-{row_offset}.json"
     cached = _read_json(_cache_path(settings, inventory.id, version, cache_name))
     if cached and cached.get("previewKind"):
         cached["canDownload"] = can_download
         cached["id"] = inventory.id.hex
         cached["denied"] = False
+        cached["viewMode"] = "data"
+        cached["originalAvailable"] = False
         return cached
 
     payload = _read_source_bytes(session, settings, gateway, inventory)
@@ -532,16 +549,166 @@ def preview_document(
     if built and not built.get("error"):
         result = _base_payload(inventory, view, can_download=can_download)
         result.update(built)
-        _write_json(_cache_path(settings, inventory.id, version, cache_name), {k: v for k, v in result.items() if k != "canDownload"})
+        result["viewMode"] = "data"
+        result["dataView"] = True
+        _write_json(
+            _cache_path(settings, inventory.id, version, cache_name),
+            {k: v for k, v in result.items() if k != "canDownload"},
+        )
         result["canDownload"] = can_download
         return result
 
     note = None
     if built and built.get("error"):
-        note = f"{built['error']} Showing indexed text preview when available."
+        note = f"{built['error']} Indexed text view — original formatting not available."
     elif payload is None:
-        note = "Formatted preview is unavailable without reading the source file. Showing indexed text preview when available."
-    return _indexed_fallback(inventory, view, can_download, note)
+        note = "Indexed text view — original formatting not available."
+    fallback = _indexed_fallback(inventory, view, can_download, note)
+    fallback["viewMode"] = "data"
+    fallback["dataView"] = True
+    return fallback
+
+
+def _original_view_preview(
+    session: Session,
+    settings: Settings,
+    inventory: SynologyFileInventory,
+    view: Any,
+    can_download: bool,
+    gateway: SmbGateway | None,
+    *,
+    page: int,
+) -> dict:
+    ext = (inventory.extension or "").lower().lstrip(".")
+    version = _version_key(inventory, view)
+    lo = libreoffice_status(settings)
+    supports_original = ext in OFFICE_EXTS or ext in PDF_EXTS or ext in IMAGE_EXTS
+    result = _base_payload(inventory, view, can_download=can_download)
+    result.update(
+        {
+            "viewMode": "original",
+            "dataViewAvailable": True,
+            "engineStatus": lo,
+            "supportsOriginalFormat": supports_original,
+        }
+    )
+    if not supports_original:
+        result.update(
+            {
+                "previewKind": "original_unavailable",
+                "previewAvailable": False,
+                "previewNote": "Original-format preview is not supported for this file type. Use Data/Text View.",
+            }
+        )
+        return result
+
+    if ext in OFFICE_EXTS and not lo["available"]:
+        result.update(
+            {
+                "previewKind": "original_unavailable",
+                "previewAvailable": False,
+                "previewNote": (
+                    "Preview Engine Unavailable — LibreOffice is required for Office original-format preview. "
+                    "Install LibreOffice and set QKA_LIBREOFFICE_PATH, then retry. Data/Text View remains available."
+                ),
+                "error": lo.get("installHint"),
+            }
+        )
+        return result
+
+    payload = _read_source_bytes(session, settings, gateway, inventory)
+    if payload is None:
+        result.update(
+            {
+                "previewKind": "original_unavailable",
+                "previewAvailable": False,
+                "previewNote": "Original file could not be read from Synology for rendering. Data/Text View may still work.",
+            }
+        )
+        return result
+
+    rendered = ensure_original_render(
+        settings,
+        inventory_id=inventory.id,
+        version=version,
+        extension=ext,
+        source_bytes=payload,
+    )
+    status = rendered.get("status")
+    if status != "ready":
+        note = rendered.get("error") or "Original-format preview could not be generated."
+        result.update(
+            {
+                "previewKind": "original_unavailable",
+                "previewAvailable": False,
+                "previewNote": f"{note} Indexed text / Data View remains available when present.",
+                "renderStatus": status,
+            }
+        )
+        return result
+
+    page_count = int(rendered.get("pageCount") or 0)
+    current = max(1, min(int(page or 1), max(page_count, 1)))
+    result.update(
+        {
+            "previewKind": "original_pages",
+            "previewAvailable": True,
+            "previewNote": (
+                "Original-format read-only preview (LibreOffice/PDF page rendering). "
+                "Layout may differ slightly from Microsoft Office."
+                if rendered.get("engine", "").startswith("libreoffice")
+                else "Original-format read-only page preview."
+            ),
+            "page": current,
+            "pageCount": page_count,
+            "engine": rendered.get("engine"),
+            "renderStatus": "ready",
+            "pageUrl": f"/api/v1/documents/{inventory.id.hex}/preview/pages/{current}",
+        }
+    )
+    return result
+
+
+def preview_document(
+    session: Session,
+    settings: Settings,
+    caller_id: uuid.UUID,
+    document_id: str,
+    gateway: SmbGateway | None = None,
+    *,
+    sheet: int = 0,
+    page: int = 1,
+    slide: int = 0,
+    row_offset: int = 0,
+    view_mode: str = "original",
+) -> dict:
+    auth = _authorize_preview(session, settings, caller_id, document_id)
+    if isinstance(auth, dict):
+        return auth
+    _user, inventory, view, can_download = auth
+    mode = (view_mode or "original").strip().lower()
+    if mode in {"data", "grid", "text", "indexed"}:
+        return _data_view_preview(
+            session,
+            settings,
+            inventory,
+            view,
+            can_download,
+            gateway,
+            sheet=sheet,
+            page=page,
+            slide=slide,
+            row_offset=row_offset,
+        )
+    return _original_view_preview(
+        session,
+        settings,
+        inventory,
+        view,
+        can_download,
+        gateway,
+        page=page,
+    )
 
 
 def preview_media(
@@ -551,7 +718,7 @@ def preview_media(
     document_id: str,
     gateway: SmbGateway | None = None,
 ) -> tuple[bytes | None, str, dict]:
-    body = preview_document(session, settings, caller_id, document_id, gateway)
+    body = preview_document(session, settings, caller_id, document_id, gateway, view_mode="data")
     if body.get("denied") or body.get("previewKind") != "image":
         return None, "application/json", body
     try:
@@ -569,3 +736,47 @@ def preview_media(
     if not path.is_file():
         return None, "application/json", _denied(document_id, "Image preview is not available.")
     return path.read_bytes(), "image/jpeg", {}
+
+
+def preview_page_image(
+    session: Session,
+    settings: Settings,
+    caller_id: uuid.UUID,
+    document_id: str,
+    page: int,
+    gateway: SmbGateway | None = None,
+) -> tuple[bytes | None, str, dict]:
+    """Authorize and return a single rendered original-format page JPEG."""
+    auth = _authorize_preview(session, settings, caller_id, document_id)
+    if isinstance(auth, dict):
+        return None, "application/json", auth
+    _user, inventory, view, _can_download = auth
+    version = _version_key(inventory, view)
+    payload = read_page_bytes(settings, inventory.id, version, page)
+    if payload is None:
+        # Attempt on-demand generation if cache miss.
+        body = preview_document(
+            session,
+            settings,
+            caller_id,
+            document_id,
+            gateway,
+            page=page,
+            view_mode="original",
+        )
+        if body.get("previewKind") != "original_pages":
+            return None, "application/json", body
+        payload = read_page_bytes(settings, inventory.id, version, page)
+    if payload is None:
+        return None, "application/json", _denied(document_id, "Preview page is not available.")
+    return payload, "image/jpeg", {}
+
+
+def preview_engine_status(settings: Settings) -> dict:
+    return {
+        "libreOffice": libreoffice_status(settings),
+        "pdfRenderer": "pymupdf",
+        "officeConversion": "libreoffice-headless",
+        "cacheDirConfigured": bool((settings.preview_cache_dir or "").strip()),
+        "maxPages": int(getattr(settings, "preview_max_pages", 100) or 100),
+    }

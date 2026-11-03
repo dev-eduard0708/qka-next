@@ -52,6 +52,9 @@ class Settings(BaseSettings):
     max_preview_chars: int = 4000
     preview_cache_dir: str = ""
     preview_max_source_bytes: int = 25_000_000
+    preview_max_pages: int = 100
+    libreoffice_path: str = ""
+    libreoffice_timeout_seconds: int = 120
     log_level: str = "INFO"
     credential_key: str = ""
     worker_embedded: bool = True

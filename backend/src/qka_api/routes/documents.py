@@ -9,7 +9,12 @@ from sqlalchemy.orm import Session
 
 from qka_api.auth import require_principal
 from qka_api.deps import get_session, get_settings_dep
-from qka_api.services.document_preview import preview_document, preview_media
+from qka_api.services.document_preview import (
+    preview_document,
+    preview_engine_status,
+    preview_media,
+    preview_page_image,
+)
 from qka_api.services.documents import (
     authorize_download,
     browse_workspace,
@@ -93,6 +98,15 @@ def documents(
     return {"items": items, "total": total, "error": error}
 
 
+@router.get("/diagnostics/preview-engine")
+def diagnostics_preview_engine(
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+) -> dict:
+    require_principal(request, settings)
+    return preview_engine_status(settings)
+
+
 @router.get("/documents/{document_id}/preview")
 def document_preview(
     document_id: str,
@@ -101,6 +115,7 @@ def document_preview(
     page: int = Query(default=1, ge=1, le=5000),
     slide: int = Query(default=0, ge=0, le=5000),
     rowOffset: int = Query(default=0, ge=0, le=1_000_000),
+    view: str = Query(default="original", max_length=32),
     settings: Settings = Depends(get_settings_dep),
     session: Session = Depends(get_session),
 ) -> dict:
@@ -115,6 +130,7 @@ def document_preview(
         page=page,
         slide=slide,
         row_offset=rowOffset,
+        view_mode=view,
     )
 
 
@@ -142,6 +158,42 @@ def document_preview_media(
             "Cache-Control": "private, no-store",
             "X-Content-Type-Options": "nosniff",
             "Content-Disposition": "inline; filename=\"preview.jpg\"",
+        },
+    )
+
+
+@router.get("/documents/{document_id}/preview/pages/{page}")
+def document_preview_page(
+    document_id: str,
+    page: int,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> Response:
+    """Authorized JPEG for one original-format rendered page (not the original file)."""
+    principal = require_principal(request, settings)
+    if page < 1 or page > 5000:
+        return Response(
+            content=json.dumps({"denied": True, "error": "Invalid page."}),
+            status_code=400,
+            media_type="application/json",
+        )
+    payload, media_type, error = preview_page_image(
+        session, settings, principal.user_id, document_id, page, _gateway(request)
+    )
+    if payload is None:
+        return Response(
+            content=json.dumps(error),
+            status_code=403 if error.get("denied") else 404,
+            media_type="application/json",
+        )
+    return Response(
+        content=payload,
+        media_type=media_type,
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": f'inline; filename="page-{page:04d}.jpg"',
         },
     )
 

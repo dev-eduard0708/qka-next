@@ -276,6 +276,18 @@ export type DocumentPreview = {
   previewAvailable?: boolean;
   previewNote?: string;
   canDownload?: boolean;
+  viewMode?: string;
+  dataView?: boolean;
+  dataViewAvailable?: boolean;
+  supportsOriginalFormat?: boolean;
+  renderStatus?: string;
+  engine?: string;
+  pageUrl?: string;
+  engineStatus?: {
+    available?: boolean;
+    path?: string | null;
+    installHint?: string | null;
+  };
   text?: string | null;
   hasMore?: boolean;
   sheets?: Array<{ index: number; name: string }>;
@@ -610,19 +622,28 @@ export const api = {
     }>(`/api/v1/documents/${id}?offset=${offset}`),
   documentPreview: (
     id: string,
-    opts?: { sheet?: number; page?: number; slide?: number; rowOffset?: number; signal?: AbortSignal },
+    opts?: {
+      sheet?: number;
+      page?: number;
+      slide?: number;
+      rowOffset?: number;
+      view?: "original" | "data";
+      signal?: AbortSignal;
+    },
   ) => {
     const params = new URLSearchParams();
     if (opts?.sheet != null) params.set("sheet", String(opts.sheet));
     if (opts?.page != null) params.set("page", String(opts.page));
     if (opts?.slide != null) params.set("slide", String(opts.slide));
     if (opts?.rowOffset != null) params.set("rowOffset", String(opts.rowOffset));
+    if (opts?.view) params.set("view", opts.view);
     const qs = params.toString();
     return request<DocumentPreview>(`/api/v1/documents/${id}/preview${qs ? `?${qs}` : ""}`, {
       signal: opts?.signal,
     });
   },
   documentPreviewMedia: (id: string) => `/api/v1/documents/${id}/preview/media`,
+  documentPreviewPage: (id: string, page: number) => `/api/v1/documents/${id}/preview/pages/${page}`,
   documentDownloadMeta: (id: string) =>
     request<{
       id: string;

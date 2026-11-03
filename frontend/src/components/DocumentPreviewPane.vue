@@ -5,18 +5,34 @@
       <div class="text-body2">{{ t("search.previewEmpty") }}</div>
     </div>
     <template v-else>
-      <div class="qka-preview-toolbar row items-center no-wrap q-px-sm q-py-xs">
+      <div class="qka-preview-toolbar row items-center no-wrap q-px-sm q-py-xs q-gutter-xs">
         <q-icon :name="iconFor(preview?.fileType || hitFileType)" size="22px" :class="`qka-type-${preview?.fileType || hitFileType}`" />
-        <div class="q-ml-sm ellipsis" style="min-width: 0; flex: 1">
+        <div class="q-ml-xs ellipsis" style="min-width: 0; flex: 1">
           <div class="text-subtitle2 ellipsis">{{ preview?.title || hitTitle }}</div>
           <div class="text-caption ellipsis">
             {{ preview?.fileType || hitFileType }}
             <span v-if="preview?.folder"> · {{ preview.folder }}</span>
           </div>
         </div>
-        <q-btn v-if="kind === 'pdf_pages' || kind === 'image'" flat dense round icon="zoom_out" :aria-label="t('search.previewZoomOut')" @click="zoom = Math.max(60, zoom - 15)" />
-        <q-btn v-if="kind === 'pdf_pages' || kind === 'image'" flat dense round icon="fit_screen" :aria-label="t('search.previewFit')" @click="zoom = 100" />
-        <q-btn v-if="kind === 'pdf_pages' || kind === 'image'" flat dense round icon="zoom_in" :aria-label="t('search.previewZoomIn')" @click="zoom = Math.min(200, zoom + 15)" />
+        <q-btn-toggle
+          v-model="viewMode"
+          dense
+          unelevated
+          toggle-color="primary"
+          :options="viewOptions"
+          @update:model-value="onViewMode"
+        />
+        <template v-if="isOriginalPages">
+          <q-btn flat dense round icon="zoom_out" :aria-label="t('search.previewZoomOut')" @click="adjustZoom(-15)" />
+          <q-btn flat dense round icon="zoom_in" :aria-label="t('search.previewZoomIn')" @click="adjustZoom(15)" />
+          <q-btn flat dense round icon="width_wide" :aria-label="t('search.previewFitWidth')" @click="fitMode = 'width'" />
+          <q-btn flat dense round icon="fit_screen" :aria-label="t('search.previewFitPage')" @click="fitMode = 'page'" />
+        </template>
+        <template v-else-if="kind === 'pdf_pages' || kind === 'image'">
+          <q-btn flat dense round icon="zoom_out" :aria-label="t('search.previewZoomOut')" @click="zoom = Math.max(60, zoom - 15)" />
+          <q-btn flat dense round icon="fit_screen" :aria-label="t('search.previewFit')" @click="zoom = 100" />
+          <q-btn flat dense round icon="zoom_in" :aria-label="t('search.previewZoomIn')" @click="zoom = Math.min(200, zoom + 15)" />
+        </template>
         <q-btn
           v-if="preview?.canDownload"
           flat
@@ -44,7 +60,27 @@
       <q-banner v-if="banner" dense class="bg-negative text-white q-ma-sm">{{ banner }}</q-banner>
       <q-banner v-if="info" dense class="bg-primary text-white q-ma-sm">{{ info }}</q-banner>
       <div class="col qka-preview-body">
-        <div v-if="kind === 'excel_grid'" class="full-height column">
+        <div v-if="isOriginalPages" class="column full-height">
+          <div class="row items-center justify-center q-gutter-sm q-pa-sm">
+            <q-btn dense outline icon="chevron_left" :disable="(preview?.page || 1) <= 1" :aria-label="t('search.previewPrev')" @click="load({ page: (preview?.page || 1) - 1 })" />
+            <div class="text-caption">{{ t("search.page") }} {{ preview?.page }} / {{ preview?.pageCount }}</div>
+            <q-btn dense outline icon="chevron_right" :disable="(preview?.page || 1) >= (preview?.pageCount || 1)" :aria-label="t('search.previewNext')" @click="load({ page: (preview?.page || 1) + 1 })" />
+          </div>
+          <div class="col qka-original-wrap" :class="{ 'fit-page': fitMode === 'page' }">
+            <img
+              :src="pageSrc"
+              :alt="preview?.title || hitTitle"
+              class="qka-original-page"
+              :style="pageStyle"
+            />
+          </div>
+        </div>
+        <div v-else-if="kind === 'original_unavailable'" class="qka-preview-empty column flex-center text-grey-7 q-pa-md">
+          <q-icon name="warning_amber" size="42px" class="q-mb-sm" />
+          <div class="text-body2 text-center">{{ preview?.previewNote || t("search.previewEngineUnavailable") }}</div>
+          <q-btn class="q-mt-md" unelevated color="primary" no-caps :label="t('search.previewDataView')" @click="switchToData" />
+        </div>
+        <div v-else-if="kind === 'excel_grid'" class="full-height column">
           <div class="row items-center q-gutter-xs q-pa-sm">
             <q-btn
               v-for="sheet in preview?.sheets || []"
@@ -166,13 +202,34 @@ const busy = ref(false);
 const banner = ref("");
 const info = ref("");
 const zoom = ref(100);
+const fitMode = ref<"width" | "page" | "custom">("width");
+const viewMode = ref<"original" | "data">("original");
 let token = 0;
 let abort: AbortController | null = null;
 
 const kind = computed(() => preview.value?.previewKind || "");
+const isOriginalPages = computed(() => kind.value === "original_pages");
 const mediaSrc = computed(() =>
   props.documentId && kind.value === "image" ? `${api.documentPreviewMedia(props.documentId)}?t=${token}` : "",
 );
+const pageSrc = computed(() => {
+  if (!props.documentId || !isOriginalPages.value) return "";
+  const page = preview.value?.page || 1;
+  return `${api.documentPreviewPage(props.documentId, page)}?t=${token}`;
+});
+const pageStyle = computed(() => {
+  if (fitMode.value === "page") {
+    return { maxWidth: "100%", maxHeight: "100%", width: "auto", height: "auto" };
+  }
+  if (fitMode.value === "width") {
+    return { width: `${zoom.value}%`, maxWidth: "none", height: "auto" };
+  }
+  return { width: `${zoom.value}%`, maxWidth: "none", height: "auto" };
+});
+const viewOptions = computed(() => [
+  { label: t("search.previewOriginalFormat"), value: "original" },
+  { label: t("search.previewDataView"), value: "data" },
+]);
 
 function iconFor(type: string | undefined) {
   if (type === "excel" || type === "csv") return "table_chart";
@@ -184,6 +241,21 @@ function iconFor(type: string | undefined) {
   return "insert_drive_file";
 }
 
+function adjustZoom(delta: number) {
+  fitMode.value = "custom";
+  zoom.value = Math.min(250, Math.max(40, zoom.value + delta));
+}
+
+function onViewMode(mode: "original" | "data") {
+  viewMode.value = mode;
+  void load();
+}
+
+function switchToData() {
+  viewMode.value = "data";
+  void load();
+}
+
 async function load(opts?: { sheet?: number; page?: number; slide?: number; rowOffset?: number }) {
   if (!props.documentId) return;
   abort?.abort();
@@ -192,10 +264,15 @@ async function load(opts?: { sheet?: number; page?: number; slide?: number; rowO
   loading.value = true;
   banner.value = "";
   try {
-    const body = await api.documentPreview(props.documentId, { ...opts, signal: current.signal });
+    const body = await api.documentPreview(props.documentId, {
+      ...opts,
+      view: viewMode.value,
+      signal: current.signal,
+    });
     if (current.signal.aborted) return;
     preview.value = body;
     if (body.denied) banner.value = body.error || t("search.previewDenied");
+    token += 1;
   } catch (err) {
     if (current.signal.aborted) return;
     banner.value = err instanceof Error ? err.message : t("search.previewFailed");
@@ -256,6 +333,8 @@ watch(
   (id) => {
     preview.value = null;
     zoom.value = 100;
+    fitMode.value = "width";
+    viewMode.value = "original";
     banner.value = "";
     info.value = "";
     token += 1;
@@ -275,6 +354,7 @@ watch(
 }
 .qka-preview-toolbar {
   border-bottom: 1px solid rgba(0, 0, 0, 0.12);
+  gap: 2px;
 }
 .qka-preview-body {
   min-height: 0;
@@ -284,10 +364,25 @@ watch(
   min-height: 240px;
 }
 .qka-table-wrap,
-.qka-image-wrap {
+.qka-image-wrap,
+.qka-original-wrap {
   overflow: auto;
   min-height: 0;
   flex: 1;
+}
+.qka-original-wrap {
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  background: rgba(0, 0, 0, 0.04);
+  padding: 12px;
+}
+.qka-original-wrap.fit-page {
+  align-items: center;
+}
+.qka-original-page {
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.18);
+  background: #fff;
 }
 .qka-grid {
   border-collapse: collapse;
