@@ -24,13 +24,25 @@
           no-caps
           icon="download"
           :label="t('search.download')"
-          @click="tryDownload"
+          :loading="busy"
+          @click="tryDownload(false)"
+        />
+        <q-btn
+          v-if="preview?.canDownload"
+          flat
+          dense
+          no-caps
+          icon="open_in_new"
+          :label="t('search.openWith')"
+          :loading="busy"
+          @click="tryDownload(true)"
         />
         <q-btn flat dense round icon="close" :aria-label="t('search.previewClose')" @click="$emit('close')" />
       </div>
       <div v-if="preview?.previewNote" class="text-caption text-grey-7 q-px-sm q-pb-xs">{{ preview.previewNote }}</div>
       <q-linear-progress v-if="loading" indeterminate color="primary" />
       <q-banner v-if="banner" dense class="bg-negative text-white q-ma-sm">{{ banner }}</q-banner>
+      <q-banner v-if="info" dense class="bg-primary text-white q-ma-sm">{{ info }}</q-banner>
       <div class="col qka-preview-body">
         <div v-if="kind === 'excel_grid'" class="full-height column">
           <div class="row items-center q-gutter-xs q-pa-sm">
@@ -150,7 +162,9 @@ defineEmits<{ close: [] }>();
 const { t } = useI18n();
 const preview = ref<DocumentPreview | null>(null);
 const loading = ref(false);
+const busy = ref(false);
 const banner = ref("");
+const info = ref("");
 const zoom = ref(100);
 let token = 0;
 let abort: AbortController | null = null;
@@ -190,10 +204,51 @@ async function load(opts?: { sheet?: number; page?: number; slide?: number; rowO
   }
 }
 
-async function tryDownload() {
+function saveBlob(blob: Blob, fileName: string) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function tryDownload(openWith: boolean) {
   if (!props.documentId) return;
-  const body = await api.documentDownload(props.documentId);
-  banner.value = body.denied ? body.error || t("search.downloadDenied") : t("search.downloadReady");
+  busy.value = true;
+  banner.value = "";
+  info.value = "";
+  try {
+    const body = await api.documentDownload(props.documentId);
+    if (!body.ok) {
+      banner.value = body.error || t("search.downloadDenied");
+      return;
+    }
+    if (openWith) {
+      const url = URL.createObjectURL(body.blob);
+      const opened = window.open(url, "_blank", "noopener,noreferrer");
+      if (!opened) {
+        saveBlob(body.blob, body.fileName);
+        info.value = t("search.openWithFallback", {
+          app: body.recommendedApp || t("search.systemDefaultApp"),
+        });
+      } else {
+        info.value = t("search.openWithHint", {
+          app: body.recommendedApp || t("search.systemDefaultApp"),
+        });
+        window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      }
+    } else {
+      saveBlob(body.blob, body.fileName);
+      info.value = t("search.downloadStarted");
+    }
+  } catch (err) {
+    banner.value = err instanceof Error ? err.message : t("search.downloadDenied");
+  } finally {
+    busy.value = false;
+  }
 }
 
 watch(
@@ -202,6 +257,7 @@ watch(
     preview.value = null;
     zoom.value = 100;
     banner.value = "";
+    info.value = "";
     token += 1;
     if (id) void load();
   },

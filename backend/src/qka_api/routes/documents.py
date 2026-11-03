@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy.orm import Session
 
 from qka_api.auth import require_principal
@@ -11,10 +12,11 @@ from qka_api.deps import get_session, get_settings_dep
 from qka_api.services.document_preview import preview_document, preview_media
 from qka_api.services.documents import (
     authorize_download,
+    browse_workspace,
     fetch_document,
     list_inventory,
+    read_original_bytes,
     search_catalog,
-    search_documents,
     summary,
 )
 from qka_api.smb import SmbGateway, default_gateway
@@ -50,28 +52,28 @@ def search_sources_catalog(
 @router.get("/search")
 def search(
     request: Request,
-    q: str = Query(min_length=1, max_length=200),
+    q: str | None = Query(default=None, max_length=200),
+    fileType: str | None = Query(default=None, max_length=32),
+    page: int = Query(default=1, ge=1),
+    pageSize: int = Query(default=50, ge=1, le=100),
+    sort: str = Query(default="name", max_length=32),
     settings: Settings = Depends(get_settings_dep),
     session: Session = Depends(get_session),
 ) -> dict:
+    """Workspace browse/search. MCP keeps using search_documents() directly."""
     principal = require_principal(request, settings)
-    hits, error = search_documents(session, settings, principal.user_id, q)
-    return {
-        "results": [
-            {
-                "id": hit.id,
-                "title": hit.title,
-                "url": hit.url,
-                "snippet": hit.snippet,
-                "relativePath": hit.relative_path,
-                "extension": hit.extension,
-                "fileType": hit.file_type,
-                "sizeBytes": hit.size_bytes,
-            }
-            for hit in hits
-        ],
-        "error": error,
-    }
+    # Preserve the historical content-only path when callers pass only q with defaults
+    # and no browse params — still fine to use browse_workspace for all UI/API cases.
+    return browse_workspace(
+        session,
+        settings,
+        principal.user_id,
+        query=q,
+        file_type=fileType,
+        page=page,
+        page_size=pageSize,
+        sort=sort,
+    )
 
 
 @router.get("/documents")
@@ -162,7 +164,32 @@ def document_download(
     request: Request,
     settings: Settings = Depends(get_settings_dep),
     session: Session = Depends(get_session),
-) -> dict:
-    """Authorize original-file download (separate from View / indexed-text preview)."""
+) -> Response:
+    """Stream original Synology bytes after rechecking Download Originals permission."""
     principal = require_principal(request, settings)
-    return authorize_download(session, settings, principal.user_id, document_id)
+    # Metadata-only probe used by older clients / unit tests when Accept prefers JSON
+    # and no SMB content is requested via download=1. Prefer streaming by default.
+    prefer_meta = (request.query_params.get("meta") or "").lower() in {"1", "true", "yes"}
+    if prefer_meta:
+        return JSONResponse(authorize_download(session, settings, principal.user_id, document_id))
+
+    payload, meta = read_original_bytes(
+        session, settings, principal.user_id, document_id, _gateway(request)
+    )
+    if payload is None:
+        status = 403 if meta.get("requiresDownloadGrant") or meta.get("denied") else 404
+        return JSONResponse(meta, status_code=status)
+
+    file_name = meta.get("fileName") or "document"
+    ascii_name = file_name.encode("ascii", "ignore").decode("ascii") or "document"
+    disposition = f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(file_name)}"
+    return Response(
+        content=payload,
+        media_type=meta.get("mediaType") or "application/octet-stream",
+        headers={
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Disposition": disposition,
+            "X-QKA-Recommended-App": meta.get("recommendedApp") or "",
+        },
+    )

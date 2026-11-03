@@ -140,7 +140,7 @@ def test_view_preview_does_not_enable_download(client, tmp_path) -> None:
     preview = client.get(f"/api/v1/documents/{FILE_ID.hex}/preview", cookies=cookies)
     assert preview.json()["denied"] is False
     assert preview.json()["canDownload"] is False
-    download = client.get(f"/api/v1/documents/{FILE_ID.hex}/download", cookies=cookies)
+    download = client.get(f"/api/v1/documents/{FILE_ID.hex}/download?meta=1", cookies=cookies)
     assert download.json()["denied"] is True
     fetch = client.get(f"/api/v1/documents/{FILE_ID.hex}", cookies=cookies)
     assert fetch.json()["previewKind"] == "indexed_text"

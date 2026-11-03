@@ -116,7 +116,7 @@ def test_qka_managed_view_grant_allows_google_without_ad(client):
         assert rest_fetch.get("title") == mcp_fetch.get("title")
     preview = client.get(f"/api/v1/documents/{FILE_ID.hex}", cookies=cookies)
     assert preview.json()["denied"] is False
-    dl = client.get(f"/api/v1/documents/{FILE_ID.hex}/download", cookies=cookies)
+    dl = client.get(f"/api/v1/documents/{FILE_ID.hex}/download?meta=1", cookies=cookies)
     assert dl.json()["denied"] is True
 
     headers = _admin_headers(client)
@@ -200,7 +200,7 @@ def test_qka_managed_download_grant_and_revoke(client):
     grant_id = grant.json()["id"]
     client.cookies.clear()
     cookies = auth_cookies(GOOGLE_ONLY_USER)
-    dl = client.get(f"/api/v1/documents/{FILE_ID.hex}/download", cookies=cookies)
+    dl = client.get(f"/api/v1/documents/{FILE_ID.hex}/download?meta=1", cookies=cookies)
     assert dl.status_code == 200
     assert dl.json()["denied"] is False
     assert dl.json()["fileName"]

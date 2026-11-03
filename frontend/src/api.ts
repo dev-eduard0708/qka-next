@@ -543,20 +543,45 @@ export const api = {
       totalFiles: number;
       error: string | null;
     }>("/api/v1/search/catalog"),
-  search: (q: string) =>
-    request<{
+  search: (opts: {
+    q?: string;
+    fileType?: string | null;
+    page?: number;
+    pageSize?: number;
+    sort?: string;
+    signal?: AbortSignal;
+  }) => {
+    const params = new URLSearchParams();
+    if (opts.q) params.set("q", opts.q);
+    if (opts.fileType) params.set("fileType", opts.fileType);
+    params.set("page", String(opts.page ?? 1));
+    params.set("pageSize", String(opts.pageSize ?? 50));
+    if (opts.sort) params.set("sort", opts.sort);
+    return request<{
       results: Array<{
         id: string;
         title: string;
+        fileName?: string;
         url: string;
         snippet: string;
         relativePath: string;
+        folder?: string;
         extension: string;
         fileType: string;
         sizeBytes: number;
+        modifiedAt?: string | null;
+        source?: string;
+        matchType?: string;
+        previewAvailability?: string;
       }>;
+      total: number;
+      page: number;
+      pageSize: number;
+      fileType: string | null;
+      query: string;
       error: string | null;
-    }>(`/api/v1/search?q=${encodeURIComponent(q)}`),
+    }>(`/api/v1/search?${params.toString()}`, { signal: opts.signal });
+  },
   documents: (q = "") =>
     request<{
       items: Array<{
@@ -598,14 +623,38 @@ export const api = {
     });
   },
   documentPreviewMedia: (id: string) => `/api/v1/documents/${id}/preview/media`,
-  documentDownload: (id: string) =>
+  documentDownloadMeta: (id: string) =>
     request<{
       id: string;
       denied: boolean;
       error?: string | null;
       fileName?: string;
       requiresDownloadGrant?: boolean;
-    }>(`/api/v1/documents/${id}/download`),
+      recommendedApp?: string;
+    }>(`/api/v1/documents/${id}/download?meta=1`),
+  documentDownload: async (id: string) => {
+    const response = await fetch(`/api/v1/documents/${id}/download`, { credentials: "include" });
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+      const body = await response.json();
+      return {
+        ok: false as const,
+        denied: Boolean(body.denied),
+        error: body.error || "Download denied.",
+        fileName: body.fileName as string | undefined,
+        recommendedApp: body.recommendedApp as string | undefined,
+      };
+    }
+    if (!response.ok) {
+      return { ok: false as const, denied: true, error: response.statusText };
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get("content-disposition") || "";
+    const match = /filename\*=UTF-8''([^;]+)|filename=\"([^\"]+)\"/i.exec(disposition);
+    const fileName = match ? decodeURIComponent(match[1] || match[2]) : "document";
+    const recommendedApp = response.headers.get("x-qka-recommended-app") || undefined;
+    return { ok: true as const, blob, fileName, recommendedApp };
+  },
   aiStatus: () => request<AiStatus>("/api/v1/ai/status"),
   aiConversations: () => request<{ items: AiConversationSummary[] }>("/api/v1/ai/conversations"),
   aiConversation: (id: string) => request<AiConversationDetail>(`/api/v1/ai/conversations/${id}`),

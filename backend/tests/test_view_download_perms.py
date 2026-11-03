@@ -60,7 +60,7 @@ def test_view_allows_search_but_not_download(client):
     assert preview.json()["denied"] is False
     assert preview.json().get("previewKind") == "indexed_text"
 
-    dl = client.get(f"/api/v1/documents/{FILE_ID.hex}/download", cookies=cookies)
+    dl = client.get(f"/api/v1/documents/{FILE_ID.hex}/download?meta=1", cookies=cookies)
     assert dl.status_code == 200
     assert dl.json()["denied"] is True
     assert "Download" in dl.json()["error"]
@@ -100,7 +100,7 @@ def test_download_requires_explicit_permission(client):
 
     client.cookies.clear()
     cookies = auth_cookies(GOOGLE_ONLY_USER)
-    dl = client.get(f"/api/v1/documents/{FILE_ID.hex}/download", cookies=cookies)
+    dl = client.get(f"/api/v1/documents/{FILE_ID.hex}/download?meta=1", cookies=cookies)
     assert dl.status_code == 200
     assert dl.json()["denied"] is False
     assert dl.json()["fileName"]

@@ -265,16 +265,9 @@ def _count_share_types(session: Session, share_id: uuid.UUID, match: ColumnEleme
     return counts
 
 
-def search_catalog(session: Session, settings: Settings, caller_id: uuid.UUID) -> dict:
-    """Authorized sources and file-type counts for the Search landing header."""
-    _ = settings
-    access = evaluate_user(session, caller_id)
-    if not access.allowed:
-        return {"sources": [], "totalFiles": 0, "error": None}
-    user = load_active_user(session, caller_id)
-    if user is None:
-        return {"sources": [], "totalFiles": 0, "error": None}
-
+def _authorized_share_matches(session: Session, user: QkaUser) -> dict[uuid.UUID, list[ColumnElement[bool]]]:
+    """SQL path/type clauses for View-authorized inventory (QKA Managed grants + Source ACL)."""
+    match_by_share: dict[uuid.UUID, list[ColumnElement[bool]]] = {}
     grants = session.execute(
         select(SourceGrant)
         .options(selectinload(SourceGrant.scope))
@@ -283,8 +276,6 @@ def search_catalog(session: Session, settings: Settings, caller_id: uuid.UUID) -
             SourceGrant.status == GrantStatus.ACTIVE,
         )
     ).scalars().all()
-
-    match_by_share: dict[uuid.UUID, list[ColumnElement[bool]]] = {}
     for grant in grants:
         scope = grant.scope
         if scope is None or scope.status != ScopeStatus.ACTIVE:
@@ -315,7 +306,101 @@ def search_catalog(session: Session, settings: Settings, caller_id: uuid.UUID) -
             if share_is_qka_managed(share):
                 continue
             match_by_share[share.id] = [acl_match]
+    return match_by_share
 
+
+def _authorized_inventory_clause(match_by_share: dict[uuid.UUID, list[ColumnElement[bool]]]) -> ColumnElement[bool]:
+    if not match_by_share:
+        return false()
+    parts: list[ColumnElement[bool]] = []
+    for share_id, clauses in match_by_share.items():
+        parts.append(
+            and_(
+                SynologyFileInventory.approved_share_id == share_id,
+                or_(*clauses),
+            )
+        )
+    return or_(*parts)
+
+
+def _file_type_filter_clause(file_type: str | None) -> ColumnElement[bool]:
+    key = (file_type or "").strip().lower()
+    if not key or key in {"all", "*"}:
+        return true()
+    known = {name for name, _label, _icon in _CATALOG_TYPES}
+    if key not in known:
+        return false()
+    if key == "other":
+        classified: set[str] = set()
+        for name, exts in FILE_TYPE_EXTENSIONS.items():
+            if name == "other":
+                continue
+            classified |= {ext.lower() for ext in exts}
+        if not classified:
+            return true()
+        return ~func.lower(SynologyFileInventory.extension).in_(sorted(classified))
+    exts = {ext.lower() for ext in FILE_TYPE_EXTENSIONS.get(key, set())}
+    if key == "text":
+        # Keep CSV under the csv chip so text filter matches catalog buckets.
+        exts -= {ext.lower() for ext in FILE_TYPE_EXTENSIONS.get("csv", set())}
+    if not exts:
+        return SynologyFileInventory.file_type_category == 0
+    return func.lower(SynologyFileInventory.extension).in_(sorted(exts))
+
+
+def _folder_of(path: str) -> str:
+    normalized = (path or "").replace("/", "\\")
+    if "\\" not in normalized:
+        return ""
+    return "\\".join(normalized.split("\\")[:-1])
+
+
+def _preview_availability(content: SynologyDocumentContent | None, extension: str) -> str:
+    ext = (extension or "").lower().lstrip(".")
+    if content is not None and content.status == 1 and content.extracted_text:
+        return "indexed"
+    if ext in {"xlsx", "xlsm", "docx", "pdf", "pptx", "csv", "txt", "md", "log", "json", "xml"} or ext in {
+        "png",
+        "jpg",
+        "jpeg",
+        "gif",
+        "webp",
+        "bmp",
+        "tif",
+        "tiff",
+    }:
+        return "derivable"
+    return "unavailable"
+
+
+def _rank_match(*, file_name: str, relative_path: str, needle: str, content_hit: bool) -> tuple[int, str]:
+    name = (file_name or "").lower()
+    path = (relative_path or "").lower()
+    q = needle.lower()
+    if not q:
+        return 50, "inventory"
+    if name == q or name.rsplit(".", 1)[0] == q:
+        return 1, "filename_exact"
+    if q in name:
+        return 2, "filename"
+    if content_hit:
+        return 3, "content"
+    if q in path:
+        return 4, "path"
+    return 90, "inventory"
+
+
+def search_catalog(session: Session, settings: Settings, caller_id: uuid.UUID) -> dict:
+    """Authorized sources and file-type counts for the Search landing header."""
+    _ = settings
+    access = evaluate_user(session, caller_id)
+    if not access.allowed:
+        return {"sources": [], "totalFiles": 0, "error": None}
+    user = load_active_user(session, caller_id)
+    if user is None:
+        return {"sources": [], "totalFiles": 0, "error": None}
+
+    match_by_share = _authorized_share_matches(session, user)
     sources: list[dict] = []
     for share_id, clauses in match_by_share.items():
         share = session.get(SynologyApprovedShare, share_id)
@@ -339,6 +424,222 @@ def search_catalog(session: Session, settings: Settings, caller_id: uuid.UUID) -
         )
     sources.sort(key=lambda row: row["shareName"].lower())
     return {"sources": sources, "totalFiles": sum(row["totalFiles"] for row in sources), "error": None}
+
+
+def browse_workspace(
+    session: Session,
+    settings: Settings,
+    caller_id: uuid.UUID,
+    *,
+    query: str | None = None,
+    file_type: str | None = None,
+    page: int = 1,
+    page_size: int = 50,
+    sort: str = "name",
+) -> dict:
+    """Unified authorized inventory + content browse/search for the Search workspace."""
+    access = evaluate_user(session, caller_id)
+    if not access.allowed:
+        return {
+            "results": [],
+            "total": 0,
+            "page": page,
+            "pageSize": page_size,
+            "fileType": file_type,
+            "query": query or "",
+            "error": None,
+        }
+    user = load_active_user(session, caller_id)
+    if user is None:
+        return {
+            "results": [],
+            "total": 0,
+            "page": page,
+            "pageSize": page_size,
+            "fileType": file_type,
+            "query": query or "",
+            "error": None,
+        }
+
+    page = max(1, int(page or 1))
+    page_size = max(1, min(int(page_size or 50), 100))
+    match_by_share = _authorized_share_matches(session, user)
+    auth_clause = _authorized_inventory_clause(match_by_share)
+    type_clause = _file_type_filter_clause(file_type)
+    needle = _plain_search_needle(query or "")
+    share_names = {
+        row.id: row.share_name
+        for row in session.execute(select(SynologyApprovedShare)).scalars().all()
+    }
+
+    base = and_(
+        SynologyFileInventory.is_present.is_(True),
+        SynologyFileInventory.is_directory.is_(False),
+        auth_clause,
+        type_clause,
+    )
+    if settings.approved_share_id:
+        base = and_(base, SynologyFileInventory.approved_share_id == settings.approved_share_id)
+
+    content_by_inventory: dict[uuid.UUID, SynologyDocumentContent] = {}
+    content_hit_ids: set[uuid.UUID] = set()
+    if needle:
+        fts_query = _normalize_search_query(query or "")
+        sql = text(
+            """
+            SELECT c."InventoryFileId"
+            FROM synology_document_content AS c
+            WHERE c."Status" = 1
+              AND c."ExtractedText" IS NOT NULL
+              AND NULLIF(websearch_to_tsquery('english', :query)::text, '') IS NOT NULL
+              AND c.search_vector @@ websearch_to_tsquery('english', :query)
+            LIMIT 2000
+            """
+        )
+        try:
+            content_hit_ids = {row[0] for row in session.execute(sql, {"query": fts_query}).all()}
+        except Exception:
+            session.rollback()
+            like = f"%{needle}%"
+            content_hit_ids = {
+                row[0]
+                for row in session.execute(
+                    select(SynologyDocumentContent.inventory_file_id).where(
+                        SynologyDocumentContent.status == 1,
+                        SynologyDocumentContent.extracted_text.ilike(like),
+                    ).limit(2000)
+                ).all()
+            }
+
+    if needle:
+        like = f"%{needle}%"
+        inventory_filter = and_(
+            base,
+            or_(
+                SynologyFileInventory.file_name.ilike(like),
+                SynologyFileInventory.relative_path.ilike(like),
+                SynologyFileInventory.relative_path_normalized.ilike(like),
+                SynologyFileInventory.id.in_(content_hit_ids) if content_hit_ids else false(),
+            ),
+        )
+    else:
+        inventory_filter = base
+
+    sort_key = (sort or "name").lower()
+    if sort_key == "size":
+        order = SynologyFileInventory.size_bytes.desc(), SynologyFileInventory.file_name.asc()
+    elif sort_key == "modified":
+        order = SynologyFileInventory.last_write_utc.desc().nullslast(), SynologyFileInventory.file_name.asc()
+    else:
+        order = (SynologyFileInventory.file_name.asc(),)
+
+    # When ranking by query relevance, over-fetch then paginate in memory.
+    if needle:
+        rows = session.execute(
+            select(SynologyFileInventory).where(inventory_filter).order_by(*order).limit(2000)
+        ).scalars().all()
+        inv_ids = [row.id for row in rows]
+        if inv_ids:
+            for content in session.execute(
+                select(SynologyDocumentContent).where(SynologyDocumentContent.inventory_file_id.in_(inv_ids))
+            ).scalars().all():
+                content_by_inventory[content.inventory_file_id] = content
+        ranked: list[tuple[int, str, SynologyFileInventory]] = []
+        for row in rows:
+            content_hit = row.id in content_hit_ids
+            rank, match_type = _rank_match(
+                file_name=row.file_name,
+                relative_path=row.relative_path_normalized,
+                needle=needle,
+                content_hit=content_hit,
+            )
+            ranked.append((rank, match_type, row))
+        ranked.sort(key=lambda item: (item[0], item[2].file_name.lower()))
+        total = len(ranked)
+        start = (page - 1) * page_size
+        page_rows = ranked[start : start + page_size]
+        results = []
+        for rank, match_type, row in page_rows:
+            content = content_by_inventory.get(row.id)
+            snippet = ""
+            if match_type == "content" and content is not None:
+                snippet = _snippet(content.extracted_text, query or "")
+            results.append(
+                {
+                    "id": row.id.hex,
+                    "title": row.file_name,
+                    "fileName": row.file_name,
+                    "url": f"qka://synology/{row.approved_share_id.hex}/{row.relative_path_normalized.replace(chr(92), '/')}",
+                    "snippet": snippet,
+                    "relativePath": row.relative_path_normalized,
+                    "folder": _folder_of(row.relative_path_normalized),
+                    "extension": row.extension,
+                    "fileType": _file_type(row.extension),
+                    "sizeBytes": int(row.size_bytes or 0),
+                    "modifiedAt": row.last_write_utc.isoformat() if row.last_write_utc else None,
+                    "source": share_names.get(row.approved_share_id, ""),
+                    "matchType": match_type,
+                    "previewAvailability": _preview_availability(content, row.extension),
+                    "rank": rank,
+                }
+            )
+        return {
+            "results": results,
+            "total": total,
+            "page": page,
+            "pageSize": page_size,
+            "fileType": file_type,
+            "query": query or "",
+            "error": None,
+        }
+
+    total = int(
+        session.scalar(select(func.count()).select_from(SynologyFileInventory).where(inventory_filter)) or 0
+    )
+    rows = session.execute(
+        select(SynologyFileInventory)
+        .where(inventory_filter)
+        .order_by(*order)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).scalars().all()
+    inv_ids = [row.id for row in rows]
+    if inv_ids:
+        for content in session.execute(
+            select(SynologyDocumentContent).where(SynologyDocumentContent.inventory_file_id.in_(inv_ids))
+        ).scalars().all():
+            content_by_inventory[content.inventory_file_id] = content
+    results = []
+    for row in rows:
+        content = content_by_inventory.get(row.id)
+        results.append(
+            {
+                "id": row.id.hex,
+                "title": row.file_name,
+                "fileName": row.file_name,
+                "url": f"qka://synology/{row.approved_share_id.hex}/{row.relative_path_normalized.replace(chr(92), '/')}",
+                "snippet": "",
+                "relativePath": row.relative_path_normalized,
+                "folder": _folder_of(row.relative_path_normalized),
+                "extension": row.extension,
+                "fileType": _file_type(row.extension),
+                "sizeBytes": int(row.size_bytes or 0),
+                "modifiedAt": row.last_write_utc.isoformat() if row.last_write_utc else None,
+                "source": share_names.get(row.approved_share_id, ""),
+                "matchType": "inventory",
+                "previewAvailability": _preview_availability(content, row.extension),
+                "rank": 50,
+            }
+        )
+    return {
+        "results": results,
+        "total": total,
+        "page": page,
+        "pageSize": page_size,
+        "fileType": file_type,
+        "query": query or "",
+        "error": None,
+    }
 
 
 def fetch_document(
@@ -407,7 +708,9 @@ def authorize_download(
     caller_id: uuid.UUID,
     document_id: str,
 ) -> dict:
-    """Authorize original-file download. Does not open SMB; caller streams from cache/NAS separately."""
+    """Authorize original-file download. Extraction is not required for Download Originals."""
+    from types import SimpleNamespace
+
     access = evaluate_user(session, caller_id)
     if not access.allowed:
         return {"id": document_id, "denied": True, "error": deny_message(access.reason)}
@@ -423,9 +726,25 @@ def authorize_download(
         select(SynologyDocumentContent).where(SynologyDocumentContent.inventory_file_id == inventory_id)
     ).scalar_one_or_none()
     inventory = session.get(SynologyFileInventory, inventory_id)
-    if content is None or inventory is None or not inventory.is_present:
+    if inventory is None or not inventory.is_present or inventory.is_directory:
         return {"id": document_id, "denied": True, "error": "Document not found."}
-    if not authorize_document(session, settings, user, inventory, content, capability=Capability.DOWNLOAD):
+    view = content or SimpleNamespace(
+        status=0,
+        extracted_text=None,
+        approved_share_id=inventory.approved_share_id,
+        relative_path_normalized=inventory.relative_path_normalized,
+        extension=inventory.extension,
+        file_name=inventory.file_name,
+    )
+    if not authorize_document(
+        session,
+        settings,
+        user,
+        inventory,
+        view,
+        capability=Capability.DOWNLOAD,
+        require_extracted=False,
+    ):
         return {
             "id": document_id,
             "denied": True,
@@ -441,9 +760,66 @@ def authorize_download(
         "sizeBytes": inventory.size_bytes,
         "approvedShareId": str(inventory.approved_share_id),
         "source": "synology",
-        "note": "Original file download requires authorized Synology access when no local cache exists.",
+        "recommendedApp": _recommended_app(inventory.extension),
         "error": None,
     }
+
+
+def _recommended_app(extension: str) -> str:
+    ext = (extension or "").lower().lstrip(".")
+    if ext in {"xlsx", "xls", "xlsm", "xlsb", "csv"}:
+        return "Microsoft Excel"
+    if ext in {"docx", "doc"}:
+        return "Microsoft Word"
+    if ext == "pdf":
+        return "System default PDF viewer"
+    if ext in {"pptx", "ppt"}:
+        return "Microsoft PowerPoint"
+    if ext in {"txt", "md", "log"}:
+        return "System default text editor"
+    if ext in {"png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff"}:
+        return "System default image viewer"
+    return "System default application"
+
+
+def read_original_bytes(
+    session: Session,
+    settings: Settings,
+    caller_id: uuid.UUID,
+    document_id: str,
+    gateway,
+) -> tuple[bytes | None, dict]:
+    """Recheck Download permission and return original Synology bytes (never credentials/UNC)."""
+    meta = authorize_download(session, settings, caller_id, document_id)
+    if meta.get("denied"):
+        return None, meta
+    try:
+        inventory_id = uuid.UUID(document_id) if "-" in document_id else uuid.UUID(hex=document_id)
+    except ValueError:
+        return None, {"id": document_id, "denied": True, "error": "Document not found."}
+    inventory = session.get(SynologyFileInventory, inventory_id)
+    if inventory is None:
+        return None, {"id": document_id, "denied": True, "error": "Document not found."}
+    from qka_api.services.document_preview import _read_source_bytes
+
+    payload = _read_source_bytes(session, settings, gateway, inventory)
+    if payload is None:
+        return None, {
+            "id": document_id,
+            "denied": True,
+            "error": "Original file could not be read from Synology.",
+            "fileName": inventory.file_name,
+        }
+    meta["mediaType"] = _media_type(inventory.extension)
+    return payload, meta
+
+
+def _media_type(extension: str) -> str:
+    import mimetypes
+
+    ext = (extension or "").lower().lstrip(".")
+    guessed, _ = mimetypes.guess_type(f"file.{ext}")
+    return guessed or "application/octet-stream"
 
 
 def list_inventory(
