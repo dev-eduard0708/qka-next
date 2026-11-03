@@ -76,7 +76,7 @@ async function signInPassword() {
   await session.signInPassword(username.value, password.value);
   if (session.user) {
     password.value = "";
-    const next = typeof route.query.next === "string" && route.query.next.startsWith("/") ? route.query.next : "/";
+    const next = typeof route.query.next === "string" && route.query.next.startsWith("/") ? route.query.next : "/search";
     await router.push(next);
   }
 }

@@ -50,6 +50,8 @@ class Settings(BaseSettings):
     approved_share_id: OptionalUuid = None
     max_search_results: int = 20
     max_preview_chars: int = 4000
+    preview_cache_dir: str = ""
+    preview_max_source_bytes: int = 25_000_000
     log_level: str = "INFO"
     credential_key: str = ""
     worker_embedded: bool = True

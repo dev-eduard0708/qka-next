@@ -153,7 +153,9 @@ def test_auth_status_does_not_claim_live_google(google_client) -> None:
 def test_google_login_authorized_user_can_search(google_client) -> None:
     callback = _login(google_client, "code-allowed")
     assert callback.status_code == 302, callback.text
-    assert "authError" not in (callback.headers.get("location") or "")
+    location = callback.headers.get("location") or ""
+    assert "authError" not in location
+    assert location.rstrip("/").endswith("/search")
     search = google_client.get("/api/v1/search", params={"q": "Laptop"})
     assert search.status_code == 200, search.text
     body = search.json()

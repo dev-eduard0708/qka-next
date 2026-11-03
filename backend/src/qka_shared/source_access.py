@@ -383,12 +383,15 @@ def evaluate_document_access(
     content: SynologyDocumentContent,
     *,
     capability: str = Capability.VIEW,
+    require_extracted: bool | None = None,
 ) -> EffectiveAccess:
     cap = (capability or Capability.VIEW).lower()
     wants_download = cap == Capability.DOWNLOAD
     # Indexed-text operations require verified extracted content in PostgreSQL.
-    # Original-file download does not require extracted text.
-    if not wants_download:
+    # Original-file download and derived formatted previews do not.
+    if require_extracted is None:
+        require_extracted = not wants_download
+    if require_extracted:
         content_ok = content.status == 1 and bool(content.extracted_text)
         if not content_ok:
             return _deny(reason="content_not_verified")
@@ -462,5 +465,13 @@ def authorize_document(
     content: SynologyDocumentContent,
     *,
     capability: str = Capability.VIEW,
+    require_extracted: bool | None = None,
 ) -> bool:
-    return evaluate_document_access(session, user, inventory, content, capability=capability).allowed
+    return evaluate_document_access(
+        session,
+        user,
+        inventory,
+        content,
+        capability=capability,
+        require_extracted=require_extracted,
+    ).allowed

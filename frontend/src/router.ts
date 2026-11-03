@@ -45,7 +45,7 @@ router.beforeEach(async (to) => {
   }
   if (to.meta.public) {
     if (session.user) {
-      const next = typeof to.query.next === "string" && to.query.next.startsWith("/") ? to.query.next : "/";
+      const next = typeof to.query.next === "string" && to.query.next.startsWith("/") ? to.query.next : "/search";
       return { path: next };
     }
     return true;

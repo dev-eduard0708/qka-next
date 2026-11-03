@@ -262,6 +262,38 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   return (await response.json()) as T;
 }
 
+export type DocumentPreview = {
+  id: string;
+  denied: boolean;
+  error?: string | null;
+  title?: string;
+  fileType?: string;
+  extension?: string;
+  relativePath?: string;
+  folder?: string;
+  sizeBytes?: number;
+  previewKind?: string;
+  previewAvailable?: boolean;
+  previewNote?: string;
+  canDownload?: boolean;
+  text?: string | null;
+  hasMore?: boolean;
+  sheets?: Array<{ index: number; name: string }>;
+  sheet?: number;
+  sheetName?: string;
+  rows?: string[][];
+  rowOffset?: number;
+  rowCount?: number;
+  blocks?: Array<{ type: string; text?: string; level?: number; rows?: string[][] }>;
+  page?: number;
+  pageCount?: number;
+  slide?: number;
+  slideCount?: number;
+  body?: string;
+  thumbnails?: Array<{ index: number; title: string }>;
+  mediaAvailable?: boolean;
+};
+
 export const api = {
   health: () => request<{ status: string }>("/health"),
   authStatus: () => request<AuthStatus>("/api/v1/auth/status", { allowUnauthorized: true }),
@@ -500,6 +532,17 @@ export const api = {
       chatgptLiveVerified: boolean;
       note: string;
     }>("/api/v1/admin/integrations/chatgpt/test", { method: "POST" }),
+  searchCatalog: () =>
+    request<{
+      sources: Array<{
+        approvedShareId: string;
+        shareName: string;
+        totalFiles: number;
+        types: Array<{ key: string; label: string; icon: string; count: number }>;
+      }>;
+      totalFiles: number;
+      error: string | null;
+    }>("/api/v1/search/catalog"),
   search: (q: string) =>
     request<{
       results: Array<{
@@ -510,6 +553,7 @@ export const api = {
         relativePath: string;
         extension: string;
         fileType: string;
+        sizeBytes: number;
       }>;
       error: string | null;
     }>(`/api/v1/search?q=${encodeURIComponent(q)}`),
@@ -539,6 +583,29 @@ export const api = {
       fileType?: string;
       relativePath?: string;
     }>(`/api/v1/documents/${id}?offset=${offset}`),
+  documentPreview: (
+    id: string,
+    opts?: { sheet?: number; page?: number; slide?: number; rowOffset?: number; signal?: AbortSignal },
+  ) => {
+    const params = new URLSearchParams();
+    if (opts?.sheet != null) params.set("sheet", String(opts.sheet));
+    if (opts?.page != null) params.set("page", String(opts.page));
+    if (opts?.slide != null) params.set("slide", String(opts.slide));
+    if (opts?.rowOffset != null) params.set("rowOffset", String(opts.rowOffset));
+    const qs = params.toString();
+    return request<DocumentPreview>(`/api/v1/documents/${id}/preview${qs ? `?${qs}` : ""}`, {
+      signal: opts?.signal,
+    });
+  },
+  documentPreviewMedia: (id: string) => `/api/v1/documents/${id}/preview/media`,
+  documentDownload: (id: string) =>
+    request<{
+      id: string;
+      denied: boolean;
+      error?: string | null;
+      fileName?: string;
+      requiresDownloadGrant?: boolean;
+    }>(`/api/v1/documents/${id}/download`),
   aiStatus: () => request<AiStatus>("/api/v1/ai/status"),
   aiConversations: () => request<{ items: AiConversationSummary[] }>("/api/v1/ai/conversations"),
   aiConversation: (id: string) => request<AiConversationDetail>(`/api/v1/ai/conversations/${id}`),

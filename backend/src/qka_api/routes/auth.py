@@ -166,7 +166,7 @@ def google_callback(
         return fail("The linked QKA account is not active.", "inactive")
 
     token = issue_session(settings, user.id)
-    redirect = RedirectResponse(_safe_frontend_redirect(settings, "/"), status_code=status.HTTP_302_FOUND)
+    redirect = RedirectResponse(_safe_frontend_redirect(settings, "/search"), status_code=status.HTTP_302_FOUND)
     set_session_cookie(redirect, settings, token)
     clear_oidc_cookies(redirect, settings)
     log.info("google_oidc.login user_id=%s", user.id)
