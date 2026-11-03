@@ -790,7 +790,13 @@ async function onShareSelected() {
   eligibility.value = null;
   if (!selectedShareId.value) return;
   try {
-    eligibility.value = await api.sourceEligibleScopes(selectedShareId.value);
+    const eligible = await api.sourceEligibleScopes(selectedShareId.value);
+    eligibility.value = {
+      eligible: eligible.eligible,
+      scopes: eligible.scopes,
+      reason: eligible.reason,
+      accessModel: eligible.accessModel as "source_acl" | "qka_managed" | undefined,
+    };
     const wholeShare = eligibility.value.scopes.find((s) => !(s.folderPrefixNormalized || "").trim());
     selectedScopeId.value = wholeShare?.id || null;
     folderSearch.value = "";

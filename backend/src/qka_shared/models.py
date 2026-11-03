@@ -598,3 +598,143 @@ class AiUsageAudit(Base):
     error_category: Mapped[str | None] = mapped_column(String(128), nullable=True)
     detail: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AdConnection(Base):
+    """QKA-Next Active Directory connection (LDAPS). Bind password encrypted at rest."""
+
+    __tablename__ = "qka_next_ad_connection"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    connection_name: Mapped[str] = mapped_column(String(256), default="")
+    domain_dns_name: Mapped[str] = mapped_column(String(256), default="")
+    domain_controller: Mapped[str] = mapped_column(String(256), default="")
+    protocol: Mapped[str] = mapped_column(String(16), default="ldaps")
+    port: Mapped[int] = mapped_column(Integer, default=636)
+    base_dn: Mapped[str] = mapped_column(String(1024), default="")
+    bind_username: Mapped[str] = mapped_column(String(512), default="")
+    bind_secret_protected: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    timeout_seconds: Mapped[int] = mapped_column(Integer, default=15)
+    verify_tls: Mapped[bool] = mapped_column(Boolean, default=True)
+    connection_status: Mapped[int] = mapped_column(Integer, default=0)  # 0 unknown 1 connected 2 failed 3 disabled
+    last_successful_test_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_safe_error: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    last_diagnostics_json: Mapped[str] = mapped_column(Text, default="[]")
+    last_successful_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_sync_result: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    current_sync_job_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+
+
+class AdOuScope(Base):
+    """Selected OUs included in directory synchronization."""
+
+    __tablename__ = "qka_next_ad_ou_scope"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    connection_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    distinguished_name: Mapped[str] = mapped_column(String(2048))
+    name: Mapped[str] = mapped_column(String(512), default="")
+    selected: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AdDirectoryUser(Base):
+    """Discovered AD user (stable identity = objectGUID; SID for ACL)."""
+
+    __tablename__ = "qka_next_ad_directory_user"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    connection_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    object_guid: Mapped[str] = mapped_column(String(64), index=True)
+    object_sid: Mapped[str] = mapped_column(String(256), default="")
+    sam_account_name: Mapped[str] = mapped_column(String(256), default="")
+    user_principal_name: Mapped[str] = mapped_column(String(512), default="")
+    display_name: Mapped[str] = mapped_column(String(512), default="")
+    mail: Mapped[str] = mapped_column(String(512), default="")
+    department: Mapped[str] = mapped_column(String(512), default="")
+    distinguished_name: Mapped[str] = mapped_column(String(2048), default="")
+    account_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_present: Mapped[bool] = mapped_column(Boolean, default=True)
+    mapping_status: Mapped[int] = mapped_column(Integer, default=0)  # 0 unlinked 1 pending 2 linked 3 conflict
+    linked_qka_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    linked_external_identity_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    candidate_qka_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    candidate_google_email: Mapped[str] = mapped_column(String(512), default="")
+    content_hash: Mapped[str] = mapped_column(String(64), default="")
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AdDirectoryGroup(Base):
+    """Discovered AD security group."""
+
+    __tablename__ = "qka_next_ad_directory_group"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    connection_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    object_guid: Mapped[str] = mapped_column(String(64), index=True)
+    object_sid: Mapped[str] = mapped_column(String(256), default="")
+    name: Mapped[str] = mapped_column(String(512), default="")
+    distinguished_name: Mapped[str] = mapped_column(String(2048), default="")
+    is_security_group: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_present: Mapped[bool] = mapped_column(Boolean, default=True)
+    member_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AdGroupMemberEdge(Base):
+    """Bounded group membership edges (member may be user or nested group)."""
+
+    __tablename__ = "qka_next_ad_group_member"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    connection_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    group_object_guid: Mapped[str] = mapped_column(String(64), index=True)
+    member_object_guid: Mapped[str] = mapped_column(String(64), default="")
+    member_object_sid: Mapped[str] = mapped_column(String(256), default="")
+    member_kind: Mapped[str] = mapped_column(String(16), default="user")  # user|group
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class AdSyncJob(Base):
+    __tablename__ = "qka_next_ad_sync_job"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    connection_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    trigger: Mapped[str] = mapped_column(String(32), default="manual")
+    status: Mapped[int] = mapped_column(Integer, default=0)
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    users_discovered: Mapped[int] = mapped_column(Integer, default=0)
+    users_processed: Mapped[int] = mapped_column(Integer, default=0)
+    users_unchanged: Mapped[int] = mapped_column(Integer, default=0)
+    users_updated: Mapped[int] = mapped_column(Integer, default=0)
+    users_added: Mapped[int] = mapped_column(Integer, default=0)
+    groups_discovered: Mapped[int] = mapped_column(Integer, default=0)
+    linked_count: Mapped[int] = mapped_column(Integer, default=0)
+    pending_count: Mapped[int] = mapped_column(Integer, default=0)
+    conflict_count: Mapped[int] = mapped_column(Integer, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    enumeration_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    safe_error: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AdAuditEvent(Base):
+    __tablename__ = "qka_next_ad_audit"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    connection_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True, index=True)
+    action: Mapped[str] = mapped_column(String(64))
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    detail: Mapped[str] = mapped_column(String(2000), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

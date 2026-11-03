@@ -101,7 +101,7 @@ export type SourceFolderNode = {
   icon?: string;
   inventoryId?: string | null;
   aclCaptureStatus: number | null;
-  children?: SourceFolderNode[] | null;
+  children?: SourceFolderNode[];
 };
 
 export type SourceFolderPage = {
@@ -544,6 +544,108 @@ export const api = {
       chatgptLiveVerified: boolean;
       note: string;
     }>("/api/v1/admin/integrations/chatgpt/test", { method: "POST" }),
+  adHubStatus: () =>
+    request<{
+      synology: { status: string; lastSuccessfulCheck?: string | null };
+      activeDirectory: { status: string; lastSuccessfulCheck?: string | null };
+      googleWorkspace: { status: string; note?: string };
+      chatgptMcp: { status: string; note?: string };
+    }>("/api/v1/admin/active-directory/hub-status"),
+  adConnections: () => request<AdConnection[]>("/api/v1/admin/active-directory/connections"),
+  adOverview: (connectionId?: string) => {
+    const q = connectionId ? `?connectionId=${encodeURIComponent(connectionId)}` : "";
+    return request<AdOverview>(`/api/v1/admin/active-directory/overview${q}`);
+  },
+  adTestConnection: (body: AdConnectionBody, connectionId?: string) => {
+    const q = connectionId ? `?connectionId=${encodeURIComponent(connectionId)}` : "";
+    return request<{
+      succeeded: boolean;
+      safeError?: string | null;
+      discoveredBaseDn?: string | null;
+      checks: Array<{ name: string; status: string; detail?: string }>;
+    }>(`/api/v1/admin/active-directory/connections/test${q}`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+  adCreateConnection: (body: AdConnectionBody) =>
+    request<AdConnection>("/api/v1/admin/active-directory/connections", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  adUpdateConnection: (connectionId: string, body: AdConnectionBody) =>
+    request<AdConnection>(`/api/v1/admin/active-directory/connections/${connectionId}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  adDisableConnection: (connectionId: string) =>
+    request<AdConnection>(`/api/v1/admin/active-directory/connections/${connectionId}/disable`, {
+      method: "POST",
+    }),
+  adEnableConnection: (connectionId: string) =>
+    request<AdConnection>(`/api/v1/admin/active-directory/connections/${connectionId}/enable`, {
+      method: "POST",
+    }),
+  adBrowseOus: (connectionId: string, opts?: { parentDn?: string; search?: string }) => {
+    const q = new URLSearchParams();
+    if (opts?.parentDn) q.set("parentDn", opts.parentDn);
+    if (opts?.search) q.set("search", opts.search);
+    const suffix = q.toString() ? `?${q}` : "";
+    return request<{
+      parentDn: string;
+      items: Array<{ name: string; distinguishedName: string; selected: boolean }>;
+    }>(`/api/v1/admin/active-directory/connections/${connectionId}/ous${suffix}`);
+  },
+  adOuScope: (connectionId: string) =>
+    request<{ items: Array<{ id: string; name: string; distinguishedName: string; selected: boolean }> }>(
+      `/api/v1/admin/active-directory/connections/${connectionId}/ou-scope`,
+    ),
+  adSaveOuScope: (
+    connectionId: string,
+    items: Array<{ name: string; distinguishedName: string; selected: boolean }>,
+  ) =>
+    request<{ items: Array<{ id: string; name: string; distinguishedName: string; selected: boolean }> }>(
+      `/api/v1/admin/active-directory/connections/${connectionId}/ou-scope`,
+      { method: "PUT", body: JSON.stringify({ items }) },
+    ),
+  adUsers: (connectionId: string, opts?: { search?: string; mappingStatus?: number; page?: number }) => {
+    const q = new URLSearchParams();
+    if (opts?.search) q.set("search", opts.search);
+    if (opts?.mappingStatus != null) q.set("mappingStatus", String(opts.mappingStatus));
+    if (opts?.page) q.set("page", String(opts.page));
+    const suffix = q.toString() ? `?${q}` : "";
+    return request<{ items: any[]; total: number }>(
+      `/api/v1/admin/active-directory/connections/${connectionId}/users${suffix}`,
+    );
+  },
+  adGroups: (connectionId: string, opts?: { search?: string }) => {
+    const q = new URLSearchParams();
+    if (opts?.search) q.set("search", opts.search);
+    const suffix = q.toString() ? `?${q}` : "";
+    return request<{ items: any[]; total: number }>(
+      `/api/v1/admin/active-directory/connections/${connectionId}/groups${suffix}`,
+    );
+  },
+  adApproveLink: (connectionId: string, userId: string, qkaUserId?: string) =>
+    request<any>(`/api/v1/admin/active-directory/connections/${connectionId}/users/${userId}/link`, {
+      method: "POST",
+      body: JSON.stringify({ qkaUserId: qkaUserId || null }),
+    }),
+  adUnlink: (connectionId: string, userId: string) =>
+    request<{ ok: boolean }>(
+      `/api/v1/admin/active-directory/connections/${connectionId}/users/${userId}/unlink`,
+      { method: "POST" },
+    ),
+  adSync: (connectionId: string) =>
+    request<any>(`/api/v1/admin/active-directory/connections/${connectionId}/sync`, { method: "POST" }),
+  adResync: (connectionId: string) =>
+    request<any>(`/api/v1/admin/active-directory/connections/${connectionId}/resync`, { method: "POST" }),
+  adSyncHistory: (connectionId: string) =>
+    request<any[]>(`/api/v1/admin/active-directory/connections/${connectionId}/sync/history`),
+  adAudit: (connectionId?: string) => {
+    const q = connectionId ? `?connectionId=${encodeURIComponent(connectionId)}` : "";
+    return request<any[]>(`/api/v1/admin/active-directory/audit${q}`);
+  },
   searchCatalog: () =>
     request<{
       sources: Array<{
@@ -1228,4 +1330,50 @@ export type AiStreamDone = {
   assistantMessageId: string;
   usage: { inputTokens: number; outputTokens: number };
   sources: AiStreamMeta["sources"];
+};
+
+export type AdConnection = {
+  id: string;
+  connectionName: string;
+  domainDnsName: string;
+  domainController: string;
+  protocol: string;
+  port: number;
+  baseDn: string;
+  bindUsername: string;
+  bindSecretConfigured: boolean;
+  timeoutSeconds: number;
+  verifyTls: boolean;
+  connectionStatus: number;
+  statusLabel?: string;
+  lastSuccessfulTestAt?: string | null;
+  lastSafeError?: string | null;
+  lastSuccessfulSyncAt?: string | null;
+  lastSyncResult?: string | null;
+};
+
+export type AdConnectionBody = {
+  connectionName?: string;
+  domainDnsName?: string;
+  domainController?: string;
+  protocol?: string;
+  port?: number;
+  baseDn?: string;
+  bindUsername?: string;
+  bindPassword?: string;
+  timeoutSeconds?: number;
+  verifyTls?: boolean;
+};
+
+export type AdOverview = {
+  configured: boolean;
+  connection?: AdConnection | null;
+  usersDiscovered: number;
+  groupsDiscovered: number;
+  selectedOus: number;
+  linkedIdentities: number;
+  pendingMappings: number;
+  conflictMappings: number;
+  disabledAccounts?: number;
+  warnings?: string[];
 };

@@ -307,6 +307,132 @@ def seed_db():
                 """
             )
         )
+        for stmt in (
+            """
+            CREATE TABLE IF NOT EXISTS qka_next_ad_connection (
+                id UUID PRIMARY KEY,
+                connection_name VARCHAR(256) NOT NULL DEFAULT '',
+                domain_dns_name VARCHAR(256) NOT NULL DEFAULT '',
+                domain_controller VARCHAR(256) NOT NULL DEFAULT '',
+                protocol VARCHAR(16) NOT NULL DEFAULT 'ldaps',
+                port INTEGER NOT NULL DEFAULT 636,
+                base_dn VARCHAR(1024) NOT NULL DEFAULT '',
+                bind_username VARCHAR(512) NOT NULL DEFAULT '',
+                bind_secret_protected BYTEA NULL,
+                timeout_seconds INTEGER NOT NULL DEFAULT 15,
+                verify_tls BOOLEAN NOT NULL DEFAULT TRUE,
+                connection_status INTEGER NOT NULL DEFAULT 0,
+                last_successful_test_at TIMESTAMPTZ NULL,
+                last_safe_error VARCHAR(1024) NULL,
+                last_diagnostics_json TEXT NOT NULL DEFAULT '[]',
+                last_successful_sync_at TIMESTAMPTZ NULL,
+                last_sync_result VARCHAR(64) NULL,
+                current_sync_job_id UUID NULL,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL,
+                created_by_user_id UUID NULL,
+                updated_by_user_id UUID NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS qka_next_ad_ou_scope (
+                id UUID PRIMARY KEY,
+                connection_id UUID NOT NULL,
+                distinguished_name VARCHAR(2048) NOT NULL,
+                name VARCHAR(512) NOT NULL DEFAULT '',
+                selected BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS qka_next_ad_directory_user (
+                id UUID PRIMARY KEY,
+                connection_id UUID NOT NULL,
+                object_guid VARCHAR(64) NOT NULL,
+                object_sid VARCHAR(256) NOT NULL DEFAULT '',
+                sam_account_name VARCHAR(256) NOT NULL DEFAULT '',
+                user_principal_name VARCHAR(512) NOT NULL DEFAULT '',
+                display_name VARCHAR(512) NOT NULL DEFAULT '',
+                mail VARCHAR(512) NOT NULL DEFAULT '',
+                department VARCHAR(512) NOT NULL DEFAULT '',
+                distinguished_name VARCHAR(2048) NOT NULL DEFAULT '',
+                account_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                is_present BOOLEAN NOT NULL DEFAULT TRUE,
+                mapping_status INTEGER NOT NULL DEFAULT 0,
+                linked_qka_user_id UUID NULL,
+                linked_external_identity_id UUID NULL,
+                candidate_qka_user_id UUID NULL,
+                candidate_google_email VARCHAR(512) NOT NULL DEFAULT '',
+                content_hash VARCHAR(64) NOT NULL DEFAULT '',
+                last_seen_at TIMESTAMPTZ NULL,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS qka_next_ad_directory_group (
+                id UUID PRIMARY KEY,
+                connection_id UUID NOT NULL,
+                object_guid VARCHAR(64) NOT NULL,
+                object_sid VARCHAR(256) NOT NULL DEFAULT '',
+                name VARCHAR(512) NOT NULL DEFAULT '',
+                distinguished_name VARCHAR(2048) NOT NULL DEFAULT '',
+                is_security_group BOOLEAN NOT NULL DEFAULT TRUE,
+                is_present BOOLEAN NOT NULL DEFAULT TRUE,
+                member_count INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS qka_next_ad_group_member (
+                id UUID PRIMARY KEY,
+                connection_id UUID NOT NULL,
+                group_object_guid VARCHAR(64) NOT NULL,
+                member_object_guid VARCHAR(64) NOT NULL DEFAULT '',
+                member_object_sid VARCHAR(256) NOT NULL DEFAULT '',
+                member_kind VARCHAR(16) NOT NULL DEFAULT 'user',
+                created_at TIMESTAMPTZ NOT NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS qka_next_ad_sync_job (
+                id UUID PRIMARY KEY,
+                connection_id UUID NOT NULL,
+                trigger VARCHAR(32) NOT NULL DEFAULT 'manual',
+                status INTEGER NOT NULL DEFAULT 0,
+                actor_user_id UUID NULL,
+                users_discovered INTEGER NOT NULL DEFAULT 0,
+                users_processed INTEGER NOT NULL DEFAULT 0,
+                users_unchanged INTEGER NOT NULL DEFAULT 0,
+                users_updated INTEGER NOT NULL DEFAULT 0,
+                users_added INTEGER NOT NULL DEFAULT 0,
+                groups_discovered INTEGER NOT NULL DEFAULT 0,
+                linked_count INTEGER NOT NULL DEFAULT 0,
+                pending_count INTEGER NOT NULL DEFAULT 0,
+                conflict_count INTEGER NOT NULL DEFAULT 0,
+                failed_count INTEGER NOT NULL DEFAULT 0,
+                enumeration_complete BOOLEAN NOT NULL DEFAULT FALSE,
+                cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+                safe_error VARCHAR(1024) NULL,
+                created_at TIMESTAMPTZ NOT NULL,
+                started_at TIMESTAMPTZ NULL,
+                completed_at TIMESTAMPTZ NULL
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS qka_next_ad_audit (
+                id UUID PRIMARY KEY,
+                connection_id UUID NULL,
+                action VARCHAR(64) NOT NULL,
+                actor_user_id UUID NULL,
+                detail VARCHAR(2000) NOT NULL DEFAULT '',
+                created_at TIMESTAMPTZ NOT NULL
+            )
+            """,
+        ):
+            session.execute(text(stmt))
         session.execute(text('ALTER TABLE allowed_email ADD COLUMN IF NOT EXISTS "DisplayName" VARCHAR(256) NOT NULL DEFAULT \'\''))
         session.execute(text('ALTER TABLE allowed_email ADD COLUMN IF NOT EXISTS "GoogleProfileName" VARCHAR(256) NOT NULL DEFAULT \'\''))
         session.execute(text('ALTER TABLE synology_file_inventory ADD COLUMN IF NOT EXISTS "IsDirectory" BOOLEAN NOT NULL DEFAULT FALSE'))

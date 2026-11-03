@@ -102,7 +102,7 @@
             virtual-scroll
             :virtual-scroll-sticky-size-start="28"
             style="height: 100%"
-            :row-class="(row) => (row.id === selectedId ? 'bg-blue-1' : '')"
+            :row-class="(row: SearchHit) => (row.id === selectedId ? 'bg-blue-1' : '')"
             @row-click="onRowClick"
           >
             <template #body-cell-file="props">
