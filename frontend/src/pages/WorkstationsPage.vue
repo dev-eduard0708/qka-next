@@ -8,7 +8,7 @@
       </div>
       <div class="col-auto row q-gutter-sm">
         <q-btn color="primary" outline :loading="syncing" :label="t('workstations.sync')" @click="openSyncDialog" />
-        <q-btn color="primary" unelevated :loading="loading" :label="t('workstations.refresh')" @click="reload" />
+        <q-btn color="primary" unelevated :loading="loading" :label="t('workstations.refresh')" @click="() => reload()" />
       </div>
     </div>
 
@@ -37,7 +37,7 @@
 
     <div class="row q-col-gutter-sm q-mb-md items-center">
       <div class="col-12 col-md-3">
-        <q-input v-model="search" dense outlined clearable :label="t('workstations.search')" @keyup.enter="reload" />
+        <q-input v-model="search" dense outlined clearable :label="t('workstations.search')" @keyup.enter="() => reload({ page: 1 })" />
       </div>
       <div class="col-12 col-md-3">
         <q-select
@@ -76,7 +76,7 @@
         />
       </div>
       <div class="col-auto">
-        <q-btn color="primary" flat :label="t('workstations.applyFilters')" @click="reload" />
+        <q-btn color="primary" flat :label="t('workstations.applyFilters')" @click="() => reload({ page: 1 })" />
       </div>
       <div class="col-auto">
         <q-btn
