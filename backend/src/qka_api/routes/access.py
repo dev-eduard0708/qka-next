@@ -31,11 +31,13 @@ class SetEnabledRequest(BaseModel):
 
 
 class CreateUserRequest(BaseModel):
-    displayName: str
+    displayName: str = ""
     email: str = ""
-    identitySource: str = "google"  # google | active_directory
+    # Unified form: objectGuid present → AD enroll; otherwise email allowlist (pending Google).
+    identitySource: str = ""  # optional legacy: google | active_directory
     objectGuid: str | None = None
     departmentOverride: str | None = None
+    department: str | None = None
     contactEmail: str | None = None
     linkExistingQkaUserId: uuid.UUID | None = None
     localChatEnabled: bool = False
@@ -45,6 +47,8 @@ class CreateUserRequest(BaseModel):
 
 class UpdateUserRequest(BaseModel):
     displayName: str | None = None
+    department: str | None = None
+    contactEmail: str | None = None
     enabled: bool | None = None
     localChatEnabled: bool | None = None
     mcpEnabled: bool | None = None
@@ -190,6 +194,16 @@ def membership_sync_status(
     return directory.membership_sync_info()
 
 
+@router.get("/departments")
+def list_departments(
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    _require_super_admin(request, settings, session, mutating=False)
+    return directory.list_department_options(session)
+
+
 @router.post("/users")
 def create_directory_user(
     body: CreateUserRequest,
@@ -200,41 +214,74 @@ def create_directory_user(
     actor = _require_super_admin(request, settings, session, mutating=True)
     if settings.database_read_only:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="The database is read-only.")
-    source = (body.identitySource or "google").strip().lower().replace("-", "_")
-    if source in {"active_directory", "ad", "windows_integrated"}:
+    source = (body.identitySource or "").strip().lower().replace("-", "_")
+    object_guid = (body.objectGuid or "").strip()
+    use_ad = bool(object_guid) or source in {"active_directory", "ad", "windows_integrated"}
+    dept = body.departmentOverride if body.departmentOverride is not None else body.department
+    if use_ad:
         from qka_api.services import active_directory as ad_svc
+        from qka_shared.chat_access import set_chat_access_for_user
 
-        if body.localChatEnabled or body.mcpEnabled:
-            # Still allow explicit flags, but defaults remain off unless requested.
-            pass
         try:
             enrolled = ad_svc.enroll_directory_user(
                 session,
                 actor.id,
-                object_guid=body.objectGuid or "",
-                department_override=body.departmentOverride,
+                object_guid=object_guid,
+                department_override=dept,
                 contact_email=body.contactEmail if body.contactEmail is not None else (body.email or None),
                 link_existing_qka_user_id=body.linkExistingQkaUserId,
             )
         except ad_svc.AdValidationError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
         except ad_svc.AdConflictError as exc:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+            detail = str(exc)
+            import re
+
+            # Google email collision still uses the explicit Link-to-Existing flow (string detail).
+            if "Link to Existing User" in detail:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail) from exc
+            # AD GUID/SID already enrolled → open existing QKA user (do not create a duplicate).
+            match = re.search(r"qkaUserId=([0-9a-fA-F-]{36})", detail) or re.search(
+                r"QKA user ([0-9a-fA-F-]{36})", detail
+            )
+            if match:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "message": detail,
+                        "code": "ad_already_linked",
+                        "qkaUserId": match.group(1),
+                    },
+                ) from exc
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail) from exc
+        qka_id = uuid.UUID(enrolled["qkaUserId"])
+        if body.displayName and body.displayName.strip():
+            user = session.get(QkaUser, qka_id)
+            if user is not None:
+                user.display_name = body.displayName.strip()[:256]
+        if body.localChatEnabled or body.mcpEnabled:
+            set_chat_access_for_user(
+                session,
+                actor.id,
+                qka_id,
+                local_chat_enabled=bool(body.localChatEnabled),
+                mcp_enabled=bool(body.mcpEnabled),
+            )
         session.flush()
-        # Map enrollment result into directory list shape for the UI.
         return {
             "allowlistId": None,
             "qkaUserId": enrolled["qkaUserId"],
-            "displayName": enrolled["displayName"],
+            "displayName": (body.displayName or "").strip() or enrolled["displayName"],
             "primaryEmail": enrolled.get("contactEmail") or "",
             "contactEmail": enrolled.get("contactEmail"),
             "domainUsername": enrolled.get("domainUsername"),
             "department": enrolled.get("department") or "",
             "identitySource": "ad",
+            "linkedIdentities": "ad",
             "identityStatus": "ad_enrolled",
             "accountStatus": "active",
-            "localChatEnabled": False,
-            "mcpEnabled": False,
+            "localChatEnabled": bool(body.localChatEnabled),
+            "mcpEnabled": bool(body.mcpEnabled),
             "allowlisted": False,
             "adOnlyLoginImplemented": False,
             "created": enrolled.get("created"),
@@ -243,13 +290,17 @@ def create_directory_user(
             "objectSid": enrolled.get("objectSid"),
         }
     try:
-        if not (body.email or "").strip():
-            raise ValueError("Email is required for Google / email enrollment.")
+        email = (body.email or body.contactEmail or "").strip()
+        if not email:
+            raise ValueError("Work / contact email is required when no Active Directory user is selected.")
+        if not (body.displayName or "").strip():
+            raise ValueError("Full name is required.")
         created = directory.create_user(
             session,
             actor,
             display_name=body.displayName,
-            email_raw=body.email,
+            email_raw=email,
+            department=dept,
             local_chat_enabled=body.localChatEnabled,
             mcp_enabled=body.mcpEnabled,
             enabled=body.enabled,
@@ -311,6 +362,7 @@ def update_directory_user(
             actor,
             allowlist_id,
             display_name=body.displayName,
+            department=body.department,
             enabled=body.enabled,
             local_chat_enabled=body.localChatEnabled,
             mcp_enabled=body.mcpEnabled,
@@ -341,6 +393,8 @@ def update_ad_directory_user(
             actor,
             qka_user_id,
             display_name=body.displayName,
+            department=body.department,
+            contact_email=body.contactEmail,
             enabled=body.enabled,
             local_chat_enabled=body.localChatEnabled,
             mcp_enabled=body.mcpEnabled,

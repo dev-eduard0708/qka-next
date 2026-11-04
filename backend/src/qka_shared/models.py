@@ -68,7 +68,12 @@ class Department(Base):
     __tablename__ = "department"
 
     id: Mapped[uuid.UUID] = mapped_column("Id", Uuid(as_uuid=True), primary_key=True)
+    code: Mapped[str] = mapped_column("Code", String(64), default="")
+    name: Mapped[str] = mapped_column("Name", String(256), default="")
+    origin: Mapped[str] = mapped_column("Origin", String(64), default="qka")
     status: Mapped[int] = mapped_column("Status", Integer, default=0)
+    created_at: Mapped[datetime | None] = mapped_column("CreatedAt", DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column("UpdatedAt", DateTime(timezone=True), nullable=True)
 
 
 class DepartmentMembership(Base):
@@ -120,6 +125,8 @@ class AllowedEmail(Base):
     display_name: Mapped[str] = mapped_column("DisplayName", String(256), default="")
     # Google-provided profile name captured on verified bind (informational).
     google_profile_name: Mapped[str] = mapped_column("GoogleProfileName", String(256), default="")
+    # QKA directory department for allowlist-only (pending Google) rows.
+    directory_department: Mapped[str] = mapped_column("DirectoryDepartment", String(512), default="")
     created_at: Mapped[datetime] = mapped_column("CreatedAt", DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column("UpdatedAt", DateTime(timezone=True))
     created_by_user_id: Mapped[uuid.UUID | None] = mapped_column("CreatedByUserId", Uuid(as_uuid=True), nullable=True)
@@ -674,6 +681,8 @@ class AdDirectoryUser(Base):
     is_present: Mapped[bool] = mapped_column(Boolean, default=True)
     # Admin-controlled QKA enrollment eligibility (PostgreSQL only; never written to AD).
     qka_eligible: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Manual archive flag (PostgreSQL only). Disabled/missing accounts are treated as archived even when false.
+    qka_archived: Mapped[bool] = mapped_column(Boolean, default=False)
     # Department chosen at QKA enrollment when AD department is blank or overridden.
     department_override: Mapped[str] = mapped_column(String(512), default="")
     mapping_status: Mapped[int] = mapped_column(Integer, default=0)  # 0 unlinked 1 pending 2 linked 3 conflict

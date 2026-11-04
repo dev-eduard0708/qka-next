@@ -10,14 +10,20 @@ def test_add_user_name_email_and_reject_invalid_or_duplicate(client):
     created = client.post(
         "/api/v1/access/users",
         headers=headers,
-        json={"displayName": "Fatimah Al-Qahtani", "email": "fatimah.qahtani@qehc.edu.sa"},
+        json={
+            "displayName": "Fatimah Al-Qahtani",
+            "email": "fatimah.qahtani@qehc.edu.sa",
+            "department": "IT",
+        },
     )
     assert created.status_code == 200, created.text
     body = created.json()
     assert body["displayName"] == "Fatimah Al-Qahtani"
     assert body["primaryEmail"] == "fatimah.qahtani@qehc.edu.sa"
+    assert body["department"] == "IT"
     assert body["identityStatus"] == "pending"
-    assert body["accountStatus"] == "pending"
+    assert body["accountStatus"] == "awaiting_google_login"
+    assert body["linkedIdentities"] == "pending"
     assert body["chatgptMembership"] == "unknown"
     assert body["localChatEnabled"] is False
     assert body["mcpEnabled"] is False
@@ -34,14 +40,14 @@ def test_add_user_name_email_and_reject_invalid_or_duplicate(client):
     bad_domain = client.post(
         "/api/v1/access/users",
         headers=headers,
-        json={"displayName": "Outsider", "email": "person@gmail.com"},
+        json={"displayName": "Outsider", "email": "person@gmail.com", "department": "IT"},
     )
     assert bad_domain.status_code == 400
 
     dup = client.post(
         "/api/v1/access/users",
         headers=headers,
-        json={"displayName": "Fatimah Again", "email": "FATIMAH.QAHTANI@qehc.edu.sa"},
+        json={"displayName": "Fatimah Again", "email": "FATIMAH.QAHTANI@qehc.edu.sa", "department": "IT"},
     )
     assert dup.status_code == 409
 
@@ -124,6 +130,7 @@ def test_local_chat_independent_of_business_membership(client):
         json={
             "displayName": "Local Only",
             "email": "local.only@qehc.edu.sa",
+            "department": "Operations",
             "localChatEnabled": True,
             "mcpEnabled": False,
         },

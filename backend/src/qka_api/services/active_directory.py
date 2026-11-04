@@ -1607,15 +1607,27 @@ def audit_history(session: Session, connection_id: uuid.UUID | None = None, *, t
     ]
 
 
-def _resolve_enrollment_department(row: AdDirectoryUser, department_override: str | None) -> str:
+def _resolve_enrollment_department(
+    session: Session,
+    row: AdDirectoryUser,
+    department_override: str | None,
+) -> str:
+    from qka_api.services import user_directory as directory
+
     override = (department_override if department_override is not None else row.department_override or "").strip()
     ad_dept = (row.department or "").strip()
+    options = [i["value"] for i in directory.list_department_options(session)["items"]]
     if override:
-        return override[:512]
-    if ad_dept:
-        return ad_dept[:512]
+        matched = directory.match_department_option(override, options)
+        if matched is None:
+            raise AdValidationError("Select a QKA department from the list.")
+        return matched[:512]
+    matched_ad = directory.match_department_option(ad_dept, options)
+    if matched_ad:
+        return matched_ad[:512]
     raise AdValidationError(
-        "AD department is not set. Choose a QKA department before creating the user."
+        "AD department is not set or does not match a QKA department. "
+        "Choose a QKA department before creating the user."
     )
 
 
@@ -1733,7 +1745,7 @@ def enroll_directory_user(
         if contact is None:
             raise AdValidationError(err or "Contact email is invalid.")
 
-    department = _resolve_enrollment_department(row, department_override)
+    department = _resolve_enrollment_department(session, row, department_override)
     now = _now()
 
     # Optional: explicit link to existing Google-backed QkaUser (never auto-merge).

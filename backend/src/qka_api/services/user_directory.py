@@ -20,13 +20,27 @@ from qka_shared.chat_access import (
 )
 from qka_shared.email_address import try_normalize
 from qka_shared.models import (
+    AdDirectoryUser,
     AllowedEmail,
     ChatAccess,
     ChatgptMembership,
+    Department,
     ExternalIdentity,
     MembershipImportBatch,
     QkaUser,
     SourceGrantAudit,
+)
+
+# Fallback QKA department catalog when the department table is empty.
+_BASELINE_DEPARTMENTS = (
+    "Admin Support",
+    "Executive",
+    "Finance",
+    "HR",
+    "IT",
+    "Legal",
+    "Project",
+    "Operations",
 )
 
 # ChatGPT Business membership badge statuses (informational only).
@@ -202,6 +216,75 @@ def _identity_source(user: QkaUser | None, *, has_allowlist: bool) -> str:
     return "none"
 
 
+def _linked_identities_badge(
+    *,
+    identity_source: str,
+    identity_status: str,
+    google_linked: bool,
+) -> str:
+    """UI badge for Linked Identities: AD / Google / AD + Google / Pending."""
+    if identity_source == "both":
+        return "both"
+    if identity_source == "ad":
+        return "ad"
+    if identity_source == "google" and google_linked:
+        return "google"
+    if identity_status in {"pending", "awaiting_google_login"} or identity_source in {"google", "none"}:
+        return "pending"
+    return "pending"
+
+
+def match_department_option(ad_department: str | None, options: list[str]) -> str | None:
+    """Return the catalog option matching AD department (case-insensitive), else None."""
+    needle = (ad_department or "").strip().lower()
+    if not needle:
+        return None
+    for opt in options:
+        if opt.strip().lower() == needle:
+            return opt
+    return None
+
+
+def list_department_options(session: Session) -> dict:
+    """QKA department dropdown options (not free-text)."""
+    names: set[str] = set()
+    for row in session.execute(
+        select(Department).where(Department.status == 0).order_by(Department.name)
+    ).scalars().all():
+        name = (row.name or row.code or "").strip()
+        if name:
+            names.add(name)
+    for (value,) in session.execute(
+        select(QkaUser.directory_department)
+        .where(QkaUser.directory_department.is_not(None), QkaUser.directory_department != "")
+        .distinct()
+    ):
+        if (value or "").strip():
+            names.add(value.strip())
+    for (value,) in session.execute(
+        select(AllowedEmail.directory_department)
+        .where(AllowedEmail.directory_department.is_not(None), AllowedEmail.directory_department != "")
+        .distinct()
+    ):
+        if (value or "").strip():
+            names.add(value.strip())
+    for (value,) in session.execute(
+        select(AdDirectoryUser.department)
+        .where(AdDirectoryUser.department.is_not(None), AdDirectoryUser.department != "")
+        .distinct()
+    ):
+        if (value or "").strip():
+            names.add(value.strip())
+    # Always include the baseline QKA catalog so admin overrides remain selectable
+    # even when Active Directory has not yet published that department name.
+    names.update(_BASELINE_DEPARTMENTS)
+    ordered = sorted(names, key=lambda s: s.lower())
+    return {
+        "items": [{"value": name, "label": name} for name in ordered],
+        "total": len(ordered),
+    }
+
+
 def _user_dto(
     row: AllowedEmail,
     *,
@@ -228,6 +311,11 @@ def _user_dto(
         account_status = "awaiting_google_login"
     admin_name = directory_display_name(row, user)
     mem_status = membership.status if membership is not None else MEMBERSHIP_UNKNOWN
+    identity_source = _identity_source(user, has_allowlist=True)
+    department = (
+        (user.directory_department if user and (user.directory_department or "").strip() else "")
+        or (row.directory_department or "")
+    )
     return {
         "allowlistId": str(row.id),
         "qkaUserId": str(user.id) if user is not None else None,
@@ -236,8 +324,13 @@ def _user_dto(
         "primaryEmail": row.email_normalized,
         "contactEmail": (user.contact_email if user else None) or row.email_normalized,
         "domainUsername": ad_idents[0]["domainUsername"] if ad_idents else None,
-        "department": (user.directory_department if user else "") or "",
-        "identitySource": _identity_source(user, has_allowlist=True),
+        "department": department,
+        "identitySource": identity_source,
+        "linkedIdentities": _linked_identities_badge(
+            identity_source=identity_source,
+            identity_status=identity_status,
+            google_linked=has_google,
+        ),
         "googleSub": _google_sub(user),
         "googleLinked": has_google,
         "identityStatus": identity_status,
@@ -270,6 +363,7 @@ def _ad_only_user_dto(user: QkaUser, chat: ChatAccess | None) -> dict:
     else:
         identity_status = "ad_enrolled"
         account_status = "active"
+    identity_source = _identity_source(user, has_allowlist=False)
     return {
         "allowlistId": None,
         "qkaUserId": str(user.id),
@@ -279,7 +373,12 @@ def _ad_only_user_dto(user: QkaUser, chat: ChatAccess | None) -> dict:
         "contactEmail": user.contact_email,
         "domainUsername": ad_idents[0]["domainUsername"] if ad_idents else None,
         "department": user.directory_department or "",
-        "identitySource": _identity_source(user, has_allowlist=False),
+        "identitySource": identity_source,
+        "linkedIdentities": _linked_identities_badge(
+            identity_source=identity_source,
+            identity_status=identity_status,
+            google_linked=has_google,
+        ),
         "googleSub": _google_sub(user),
         "googleLinked": has_google,
         "identityStatus": identity_status,
@@ -467,6 +566,7 @@ def create_user(
     *,
     display_name: str,
     email_raw: str,
+    department: str | None = None,
     local_chat_enabled: bool = False,
     mcp_enabled: bool = False,
     enabled: bool = True,
@@ -479,6 +579,12 @@ def create_user(
         raise ValueError("Full name is required.")
     if len(name) > 256:
         raise ValueError("Full name is too long.")
+    dept = (department or "").strip()
+    if not dept:
+        raise ValueError("QKA department is required.")
+    options = {i["value"].lower() for i in list_department_options(session)["items"]}
+    if dept.lower() not in options:
+        raise ValueError("Select a QKA department from the list.")
 
     exists = session.execute(select(AllowedEmail).where(AllowedEmail.email_normalized == email)).scalar_one_or_none()
     if exists is not None:
@@ -493,6 +599,7 @@ def create_user(
         enabled=bool(enabled),
         display_name=name[:256],
         google_profile_name="",
+        directory_department=dept[:512],
         created_at=now,
         updated_at=now,
         created_by_user_id=actor.id,
@@ -515,13 +622,15 @@ def create_user(
         action="UserCreated",
         actor_id=actor.id,
         employee_email=email,
-        detail=f"name={name}; localChat={bool(local_chat_enabled)}; mcp={bool(mcp_enabled)}",
+        detail=f"name={name}; department={dept}; localChat={bool(local_chat_enabled)}; mcp={bool(mcp_enabled)}",
         after={
             "displayName": name,
             "email": email,
+            "department": dept,
             "enabled": bool(enabled),
             "localChat": bool(local_chat_enabled),
             "mcp": bool(mcp_enabled),
+            "note": "Allowlist only — Google login requires verified OAuth bind; email is not login verification.",
         },
     )
     return _user_dto(row, user=None, chat=chat, membership=None)
@@ -533,6 +642,7 @@ def update_user(
     allowlist_id: uuid.UUID,
     *,
     display_name: str | None = None,
+    department: str | None = None,
     enabled: bool | None = None,
     local_chat_enabled: bool | None = None,
     mcp_enabled: bool | None = None,
@@ -543,6 +653,7 @@ def update_user(
     before = {
         "displayName": row.display_name,
         "enabled": row.enabled,
+        "department": row.directory_department or "",
     }
     chat = get_or_create_chat_access(session, row.id)
     before["localChat"] = chat.local_chat_enabled
@@ -553,6 +664,20 @@ def update_user(
         if not name:
             raise ValueError("Full name is required.")
         row.display_name = name[:256]
+    if department is not None:
+        dept = department.strip()
+        if not dept:
+            raise ValueError("QKA department is required.")
+        options = {i["value"].lower() for i in list_department_options(session)["items"]}
+        if dept.lower() not in options:
+            raise ValueError("Select a QKA department from the list.")
+        row.directory_department = dept[:512]
+        # Keep linked QkaUser department in sync when present (never changes Google/AD IDs).
+        by_email = _google_users_by_email(session)
+        linked_user = (by_email.get(row.email_normalized) or [None])[0]
+        if linked_user is not None:
+            linked_user.directory_department = dept[:512]
+            linked_user.updated_at = _now()
     if enabled is not None:
         row.enabled = bool(enabled)
     row.updated_at = _now()
@@ -570,7 +695,7 @@ def update_user(
         chat = session.execute(select(ChatAccess).where(ChatAccess.allowed_email_id == row.id)).scalar_one()
 
     actions = []
-    if before["displayName"] != row.display_name:
+    if before["displayName"] != row.display_name or before["department"] != (row.directory_department or ""):
         actions.append("UserEdited")
     if before["enabled"] != row.enabled:
         actions.append("UserEnabled" if row.enabled else "UserDisabled")
@@ -579,6 +704,7 @@ def update_user(
     after = {
         "displayName": row.display_name,
         "enabled": row.enabled,
+        "department": row.directory_department or "",
         "localChat": chat.local_chat_enabled,
         "mcp": chat.mcp_enabled,
     }
@@ -611,8 +737,9 @@ def update_ad_only_user(
     local_chat_enabled: bool | None = None,
     mcp_enabled: bool | None = None,
     department: str | None = None,
+    contact_email: str | None = None,
 ) -> dict:
-    """Update an AD-enrolled QkaUser that has no AllowedEmail row."""
+    """Update an AD-enrolled QkaUser. Never rewrites AD GUID/SID or Google identities."""
     user = session.get(QkaUser, qka_user_id)
     if user is None:
         raise LookupError("User was not found.")
@@ -623,6 +750,7 @@ def update_ad_only_user(
         "localChat": chat.local_chat_enabled,
         "mcp": chat.mcp_enabled,
         "department": user.directory_department or "",
+        "contactEmail": user.contact_email or "",
     }
     if display_name is not None:
         name = display_name.strip()
@@ -630,7 +758,22 @@ def update_ad_only_user(
             raise ValueError("Full name is required.")
         user.display_name = name[:256]
     if department is not None:
-        user.directory_department = department.strip()[:512]
+        dept = department.strip()
+        if not dept:
+            raise ValueError("QKA department is required.")
+        options = {i["value"].lower() for i in list_department_options(session)["items"]}
+        if dept.lower() not in options:
+            raise ValueError("Select a QKA department from the list.")
+        user.directory_department = dept[:512]
+    if contact_email is not None:
+        raw = contact_email.strip()
+        if not raw:
+            user.contact_email = None
+        else:
+            normalized, err = try_normalize(raw)
+            if normalized is None:
+                raise ValueError(err or "Contact email is invalid.")
+            user.contact_email = normalized
     if enabled is not None:
         # Soft-disable QKA account only — never writes to Active Directory.
         user.status = 0 if enabled else 1
@@ -653,9 +796,14 @@ def update_ad_only_user(
         "localChat": chat.local_chat_enabled,
         "mcp": chat.mcp_enabled,
         "department": user.directory_department or "",
+        "contactEmail": user.contact_email or "",
     }
     actions = []
-    if before["displayName"] != after["displayName"] or before["department"] != after["department"]:
+    if (
+        before["displayName"] != after["displayName"]
+        or before["department"] != after["department"]
+        or before["contactEmail"] != after["contactEmail"]
+    ):
         actions.append("UserEdited")
     if before["enabled"] != after["enabled"]:
         actions.append("UserEnabled" if after["enabled"] else "UserDisabled")

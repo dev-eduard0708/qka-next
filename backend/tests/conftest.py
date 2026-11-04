@@ -257,6 +257,7 @@ def seed_db():
         session.execute(text('ALTER TABLE qka_user ADD COLUMN IF NOT EXISTS "DirectoryDepartment" VARCHAR(512) NOT NULL DEFAULT \'\''))
         session.execute(text('ALTER TABLE qka_user ADD COLUMN IF NOT EXISTS "ContactEmail" VARCHAR(256) NULL'))
         session.execute(text("ALTER TABLE qka_next_ad_directory_user ADD COLUMN IF NOT EXISTS qka_eligible BOOLEAN NOT NULL DEFAULT FALSE"))
+        session.execute(text("ALTER TABLE qka_next_ad_directory_user ADD COLUMN IF NOT EXISTS qka_archived BOOLEAN NOT NULL DEFAULT FALSE"))
         session.execute(text("ALTER TABLE qka_next_ad_directory_user ADD COLUMN IF NOT EXISTS department_override VARCHAR(512) NOT NULL DEFAULT ''"))
         session.execute(
             text(
@@ -371,6 +372,7 @@ def seed_db():
                 account_enabled BOOLEAN NOT NULL DEFAULT TRUE,
                 is_present BOOLEAN NOT NULL DEFAULT TRUE,
                 qka_eligible BOOLEAN NOT NULL DEFAULT FALSE,
+                qka_archived BOOLEAN NOT NULL DEFAULT FALSE,
                 department_override VARCHAR(512) NOT NULL DEFAULT '',
                 mapping_status INTEGER NOT NULL DEFAULT 0,
                 linked_qka_user_id UUID NULL,
@@ -448,6 +450,7 @@ def seed_db():
             session.execute(text(stmt))
         session.execute(text('ALTER TABLE allowed_email ADD COLUMN IF NOT EXISTS "DisplayName" VARCHAR(256) NOT NULL DEFAULT \'\''))
         session.execute(text('ALTER TABLE allowed_email ADD COLUMN IF NOT EXISTS "GoogleProfileName" VARCHAR(256) NOT NULL DEFAULT \'\''))
+        session.execute(text('ALTER TABLE allowed_email ADD COLUMN IF NOT EXISTS "DirectoryDepartment" VARCHAR(512) NOT NULL DEFAULT \'\''))
         session.execute(text('ALTER TABLE synology_file_inventory ADD COLUMN IF NOT EXISTS "IsDirectory" BOOLEAN NOT NULL DEFAULT FALSE'))
         session.execute(text('ALTER TABLE synology_file_inventory ADD COLUMN IF NOT EXISTS "ParentPathNormalized" VARCHAR(2048) NOT NULL DEFAULT \'\''))
         session.execute(text('ALTER TABLE synology_approved_share ADD COLUMN IF NOT EXISTS "AccessModel" INTEGER NOT NULL DEFAULT 0'))

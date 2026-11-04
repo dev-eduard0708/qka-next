@@ -593,6 +593,95 @@ def test_ad_discovery_eligibility_and_enrollment(client):
         assert ad_ident is not None
 
 
+def test_unified_form_departments_and_ad_autofill(client):
+    """Unified create: department catalog, AD autofill match, no Google allowlist from contact."""
+    headers = _admin(client)
+    depts = client.get("/api/v1/access/departments", headers=headers)
+    assert depts.status_code == 200, depts.text
+    values = {i["value"] for i in depts.json()["items"]}
+    assert "IT" in values
+    assert "Operations" in values
+
+    _install_fake(client)
+    cid = _sync_connection(client, headers)
+    items = client.get(
+        f"/api/v1/admin/active-directory/connections/{cid}/users?pageSize=50",
+        headers=headers,
+    ).json()["items"]
+    employee1 = next(i for i in items if i["samAccountName"] == "employee1")
+    client.post(
+        f"/api/v1/admin/active-directory/connections/{cid}/eligibility",
+        headers=headers,
+        json={"directoryUserIds": [employee1["id"]], "eligible": True},
+    )
+    # AD department IT matches catalog — no override required.
+    created = client.post(
+        "/api/v1/access/users",
+        headers=headers,
+        json={
+            "objectGuid": employee1["objectGuid"],
+            "displayName": "Employee One QKA",
+            "department": "IT",
+            "contactEmail": "employee1@qehc.edu.sa",
+            "localChatEnabled": True,
+            "mcpEnabled": False,
+        },
+    )
+    assert created.status_code == 200, created.text
+    body = created.json()
+    assert body["department"] == "IT"
+    assert body["displayName"] == "Employee One QKA"
+    assert body["linkedIdentities"] == "ad"
+    assert body["localChatEnabled"] is True
+    assert body["allowlisted"] is False
+    with client.app.state.session_factory() as session:
+        assert (
+            session.execute(
+                select(AllowedEmail).where(AllowedEmail.email_normalized == "employee1@qehc.edu.sa")
+            ).scalar_one_or_none()
+            is None
+        )
+
+    # Duplicate AD enroll offers existing user (409 structured).
+    dup = client.post(
+        "/api/v1/access/users",
+        headers=headers,
+        json={"objectGuid": employee1["objectGuid"], "department": "IT", "displayName": "Again"},
+    )
+    assert dup.status_code == 409
+    detail = dup.json()["detail"]
+    assert isinstance(detail, dict)
+    assert detail["code"] == "ad_already_linked"
+    assert detail["qkaUserId"] == body["qkaUserId"]
+
+    # Edit AD user: department override + contact email; GUID/SID unchanged.
+    edited = client.post(
+        f"/api/v1/access/users/qka/{body['qkaUserId']}",
+        headers=headers,
+        json={
+            "displayName": "Employee One Edited",
+            "department": "Finance",
+            "contactEmail": "employee1.alt@qehc.edu.sa",
+            "localChatEnabled": False,
+            "mcpEnabled": True,
+        },
+    )
+    assert edited.status_code == 200, edited.text
+    assert edited.json()["displayName"] == "Employee One Edited"
+    assert edited.json()["department"] == "Finance"
+    assert edited.json()["contactEmail"] == "employee1.alt@qehc.edu.sa"
+    assert edited.json()["mcpEnabled"] is True
+    with client.app.state.session_factory() as session:
+        ad = session.execute(
+            select(ExternalIdentity).where(
+                ExternalIdentity.provider == PROVIDER_AD,
+                ExternalIdentity.qka_user_id == uuid.UUID(body["qkaUserId"]),
+                ExternalIdentity.link_status == LINKED,
+            )
+        ).scalars().one()
+        assert ad.stable_external_id == "S-1-5-21-1-2-3-1001"
+
+
 def test_ad_enroll_with_and_without_contact_email_single_row(client):
     """AD enrollment creates one canonical QkaUser; contact email must not create AllowedEmail."""
     Ext = ExternalIdentity
@@ -621,6 +710,7 @@ def test_ad_enroll_with_and_without_contact_email_single_row(client):
             "identitySource": "active_directory",
             "objectGuid": employee1["objectGuid"],
             "displayName": "",
+            "department": "IT",
             "contactEmail": "employee1@qehc.edu.sa",
             "localChatEnabled": False,
             "mcpEnabled": False,

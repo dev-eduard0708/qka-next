@@ -31,6 +31,7 @@ export type DirectoryUser = {
   domainUsername?: string | null;
   department?: string;
   identitySource?: "ad" | "google" | "both" | "none";
+  linkedIdentities?: "ad" | "google" | "both" | "pending";
   googleSub: string | null;
   googleLinked: boolean;
   identityStatus: "linked" | "pending" | "disabled" | "ad_enrolled";
@@ -361,11 +362,14 @@ export const api = {
     const suffix = q.toString() ? `?${q.toString()}` : "";
     return request<DirectoryUsersPage>(`/api/v1/access/users${suffix}`);
   },
+  listDepartments: () =>
+    request<{ items: Array<{ value: string; label: string }>; total: number }>("/api/v1/access/departments"),
   createDirectoryUser: (body: {
     displayName?: string;
     email?: string;
-    identitySource?: "google" | "active_directory";
+    identitySource?: "google" | "active_directory" | "";
     objectGuid?: string;
+    department?: string | null;
     departmentOverride?: string | null;
     contactEmail?: string | null;
     linkExistingQkaUserId?: string | null;
@@ -381,6 +385,7 @@ export const api = {
     allowlistId: string,
     body: {
       displayName?: string;
+      department?: string | null;
       enabled?: boolean;
       localChatEnabled?: boolean;
       mcpEnabled?: boolean;
@@ -394,6 +399,8 @@ export const api = {
     qkaUserId: string,
     body: {
       displayName?: string;
+      department?: string | null;
+      contactEmail?: string | null;
       enabled?: boolean;
       localChatEnabled?: boolean;
       mcpEnabled?: boolean;
