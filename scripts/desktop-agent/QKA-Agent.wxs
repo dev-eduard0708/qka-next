@@ -31,7 +31,7 @@
 
     <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
       <Component Id="AgentExe" Guid="B1C2D3E4-1111-2222-3333-444455556666">
-        <File Id="AgentExeFile" Source="!(bindpath.Payload)\qka-desktop-agent.exe" KeyPath="yes" />
+        <File Id="AgentExeFile" Source="$(var.Payload)\qka-desktop-agent.exe" KeyPath="yes" />
       </Component>
     </ComponentGroup>
 
@@ -44,6 +44,9 @@
     </Component>
 
     <Component Id="AgentService" Directory="INSTALLFOLDER" Guid="D3E4F5A6-1111-2222-3333-444455556666">
+      <CreateFolder />
+      <RegistryValue Root="HKLM" Key="Software\QKA\DesktopAgent" Name="ServiceInstalled"
+                     Type="integer" Value="1" KeyPath="yes" />
       <ServiceInstall Id="QkaDesktopAgentService"
                       Type="ownProcess"
                       Name="QkaDesktopAgent"

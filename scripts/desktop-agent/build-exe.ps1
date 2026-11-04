@@ -13,7 +13,8 @@ if (-not (Test-Path $Python)) {
     if ($cmd) { $Python = $cmd.Source } else { throw "Python not found" }
 }
 
-& $Python -m pip install -q pyinstaller pywin32 2>$null
+& $Python -m pip install -q pyinstaller pywin32 | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "pip install pyinstaller/pywin32 failed" }
 $env:PYTHONPATH = "$AgentRoot;$AgentRoot\..\backend\src"
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
@@ -28,6 +29,10 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
     --paths $AgentRoot `
     --paths (Join-Path $AgentRoot "..\backend\src") `
     (Join-Path $AgentRoot "qka_desktop_agent\main.py")
+if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit $LASTEXITCODE" }
 
-Write-Host "EXE_OUT=$(Join-Path $OutDir 'qka-desktop-agent\qka-desktop-agent.exe')"
+$exe = Join-Path $OutDir "qka-desktop-agent\qka-desktop-agent.exe"
+if (-not (Test-Path $exe)) { throw "Expected exe missing: $exe" }
+Write-Host "EXE_OUT=$exe"
+Write-Host "EXE_SIZE_BYTES=$((Get-Item $exe).Length)"
 Write-Host "SIGNING=not performed (report as production blocker unless an approved cert is configured)"

@@ -9,6 +9,10 @@ __pycache__/
 *.dump
 frontend/node_modules/
 frontend/dist/
+agent/dist/
+agent/build/
+agent/*.spec
+*.msi
 frontend/.quasar/
 frontend/tsconfig.tsbuildinfo
 *.log

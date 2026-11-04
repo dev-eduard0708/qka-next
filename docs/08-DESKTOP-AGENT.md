@@ -18,13 +18,16 @@ Super Admin → **Employee Computers** (`/sources/employee-computers`)
 
 ## Install (pilot)
 
+See **`docs/10-PILOT-PC-INSTALL.md`** for the one-PC procedure.
+
 1. Build payload: `scripts/desktop-agent/build-exe.ps1`
-2. Build MSI when WiX is installed: `scripts/desktop-agent/build-msi.ps1`
+2. Build MSI: `scripts/desktop-agent/build-msi.ps1` (WiX 3.14; local binaries under `C:\QehcAI\Temp\wix314` are supported)
    - Silent: `msiexec /i QKA-Agent.msi /qn QKASERVERURL=https://qka.internal…`
 3. Or script install: `Install-QkaAgent.ps1 -ServerBaseUrl https://qka.internal…`
 4. Issue enrollment code in QKA UI for an AD-linked employee.
 5. Place code on the PC via env `QKA_AGENT_ENROLLMENT_CODE` or `ProgramData\QKA\DesktopAgent\agent.config.json`.
 6. Agent enrolls, heartbeats, and indexes **approved folders only** after read-only verification.
+7. Built artifact (build host): `agent\dist\QKA-Agent.msi` (version `0.1.0.0`, **unsigned**).
 
 ## Security
 

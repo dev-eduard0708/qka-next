@@ -82,27 +82,64 @@ def verify_folder_read_only(folder: Path) -> ReadOnlyCheck:
 
 
 def _source_write_appears_denied(folder: Path) -> bool:
-    """Best-effort check that creating a new file in the source folder fails.
+    """Check effective write access without creating/modifying employee files.
 
-    Uses a unique disposable name and deletes immediately if creation somehow succeeds
-    (should not happen when ACLs are correct). Never modifies existing employee files.
+    Negative write creation tests are reserved for disposable fixtures under the
+    agent data directory. Against approved source folders we only open the
+    directory handle with write intent (Windows) or inspect POSIX write bits.
     """
-    probe = folder / f".qka_ro_probe_{os.getpid()}_{os.urandom(4).hex()}.tmp"
+    if os.name == "nt":
+        return _windows_directory_write_denied(folder)
+    # POSIX fallback for unit tests: rely on mode bits (no create/delete).
     try:
-        with open(probe, "xb") as handle:
-            handle.write(b"qka-readonly-probe")
-        try:
-            probe.unlink(missing_ok=True)
-        except OSError:
-            pass
-        return False
-    except FileExistsError:
-        return True
-    except PermissionError:
-        return True
+        return not os.access(folder, os.W_OK)
     except OSError:
-        # Treat other access failures as denied write for safety.
         return True
+
+
+def _windows_directory_write_denied(folder: Path) -> bool:
+    """Return True when the current process cannot open the directory for write."""
+    import ctypes
+    from ctypes import wintypes
+
+    GENERIC_WRITE = 0x40000000
+    FILE_SHARE_READ = 0x00000001
+    FILE_SHARE_WRITE = 0x00000002
+    FILE_SHARE_DELETE = 0x00000004
+    OPEN_EXISTING = 3
+    FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+    INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
+
+    CreateFileW = ctypes.windll.kernel32.CreateFileW
+    CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    CreateFileW.restype = wintypes.HANDLE
+    CloseHandle = ctypes.windll.kernel32.CloseHandle
+
+    handle = CreateFileW(
+        str(folder),
+        GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        None,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS,
+        None,
+    )
+    if handle == INVALID_HANDLE_VALUE or int(handle) == -1:
+        return True
+    try:
+        CloseHandle(handle)
+    except OSError:
+        pass
+    # Opened for write — effective write access is present.
+    return False
 
 
 def run_disposable_fixture_negative_write_test(agent_data_dir: Path) -> ReadOnlyCheck:

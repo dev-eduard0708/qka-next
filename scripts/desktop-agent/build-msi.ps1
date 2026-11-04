@@ -1,13 +1,31 @@
 #Requires -Version 5.1
 param(
     [string]$PayloadDir = "C:\QehcAI\QKA-Next\agent\dist\qka-desktop-agent",
-    [string]$OutDir = "C:\QehcAI\QKA-Next\agent\dist"
+    [string]$OutDir = "C:\QehcAI\QKA-Next\agent\dist",
+    [string]$WixBinDir = ""
 )
 
 $ErrorActionPreference = "Stop"
 $wxs = Join-Path $PSScriptRoot "QKA-Agent.wxs"
-$candle = Get-Command candle.exe -ErrorAction SilentlyContinue
-$light = Get-Command light.exe -ErrorAction SilentlyContinue
+
+function Resolve-WixTool([string]$Name) {
+    $cmd = Get-Command $Name -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    $candidates = @(
+        $WixBinDir,
+        "C:\QehcAI\Temp\wix314",
+        "C:\Program Files (x86)\WiX Toolset v3.14\bin",
+        "C:\Program Files (x86)\WiX Toolset v3.11\bin"
+    ) | Where-Object { $_ }
+    foreach ($dir in $candidates) {
+        $path = Join-Path $dir $Name
+        if (Test-Path $path) { return $path }
+    }
+    return $null
+}
+
+$candle = Resolve-WixTool "candle.exe"
+$light = Resolve-WixTool "light.exe"
 if (-not $candle -or -not $light) {
     Write-Host "WIX_MISSING=true"
     Write-Host "BLOCKER=WiX Toolset (candle/light) is not installed on this build host."
@@ -20,12 +38,13 @@ if (-not (Test-Path (Join-Path $PayloadDir "qka-desktop-agent.exe"))) {
 }
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $wixobj = Join-Path $OutDir "QKA-Agent.wixobj"
-& $candle.Source -nologo -dPayload="$PayloadDir" -o $wixobj $wxs
+& $candle -nologo "-dPayload=$PayloadDir" -o $wixobj $wxs
 if ($LASTEXITCODE -ne 0) { throw "candle failed" }
 $msi = Join-Path $OutDir "QKA-Agent.msi"
-& $light.Source -nologo -o $msi $wixobj
+& $light -nologo -o $msi $wixobj
 if ($LASTEXITCODE -ne 0) { throw "light failed" }
 Write-Host "MSI_OUT=$msi"
+Write-Host "MSI_VERSION=0.1.0.0"
 Write-Host "SILENT_INSTALL=msiexec /i `"$msi`" /qn QKASERVERURL=https://qka.internal.example"
 Write-Host "SILENT_UNINSTALL=msiexec /x `"$msi`" /qn"
-Write-Host "SIGNING=not performed unless signtool + approved cert configured"
+Write-Host "SIGNING=not performed (production blocker until approved code-signing certificate is configured)"
