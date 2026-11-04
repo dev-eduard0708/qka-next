@@ -62,7 +62,15 @@
                 </template>
                 <template #body-cell-linkedIdentities="props">
                   <q-td :props="props">
-                    <q-badge outline color="primary" :label="linkedIdentitiesLabel(props.row)" />
+                    <div class="row q-gutter-xs items-center">
+                      <q-badge
+                        v-for="badge in identityBadgesFor(props.row)"
+                        :key="badge"
+                        outline
+                        :color="identityBadgeTone(badge)"
+                        :label="identityBadgeLabel(badge)"
+                      />
+                    </div>
                   </q-td>
                 </template>
                 <template #body-cell-localChatEnabled="props">
@@ -193,6 +201,75 @@
                 </div>
                 <div v-if="!userForm.objectGuid && !editingUser" class="text-caption text-grey-7">
                   {{ t("access.googleLinkSecurityNote") }}
+                </div>
+
+                <div v-if="editingUser" class="q-mt-md">
+                  <div class="text-subtitle2 q-mb-sm">{{ t("access.manageIdentities") }}</div>
+                  <div class="q-gutter-sm">
+                    <div>
+                      <div class="text-caption text-grey-7">{{ t("access.linkedAdAccount") }}</div>
+                      <div v-if="(editingUser.adIdentities || []).length">
+                        {{
+                          editingUser.adIdentities
+                            .map((a) => a.domainUsername || a.sid || `…${a.sidSuffix || ""}`)
+                            .join(", ")
+                        }}
+                        <div v-if="editingUser.adIdentities[0]?.sid" class="text-caption text-grey-7">
+                          {{ t("access.adSidLabel") }}: {{ editingUser.adIdentities[0].sid }}
+                        </div>
+                      </div>
+                      <div v-else class="text-grey-7">{{ t("access.noLinkedAd") }}</div>
+                      <div class="text-caption text-grey-7 q-mt-xs">{{ t("access.adBrowserLoginSeparate") }}</div>
+                    </div>
+                    <div>
+                      <div class="text-caption text-grey-7">{{ t("access.verifiedGoogleAccount") }}</div>
+                      <div v-if="editingUser.googleLinked && editingUser.googleSub">
+                        {{ editingUser.primaryEmail || editingUser.contactEmail || "—" }}
+                        <div class="text-caption text-grey-7">
+                          {{ t("access.googleSubLabel") }}: {{ editingUser.googleSub }}
+                        </div>
+                      </div>
+                      <div v-else class="text-grey-7">{{ t("access.noVerifiedGoogle") }}</div>
+                    </div>
+                    <div v-if="editingUser.pendingGoogleLink">
+                      <div class="text-caption text-grey-7">{{ t("access.pendingGoogleLink") }}</div>
+                      <div>
+                        {{ editingUser.pendingGoogleLink.googleEmail }}
+                        <div class="text-caption text-grey-7">
+                          {{ t("access.googleSubLabel") }}: {{ editingUser.pendingGoogleLink.googleSub }}
+                        </div>
+                      </div>
+                      <q-banner
+                        v-if="editingUser.identityConflict"
+                        dense
+                        class="bg-warning text-dark q-mt-sm"
+                      >
+                        <div class="text-weight-medium">{{ t("access.identityConflictWarning") }}</div>
+                        <div class="text-caption">
+                          {{ editingUser.identityConflictReason || t("access.identityConflictHint") }}
+                        </div>
+                      </q-banner>
+                      <div class="row q-gutter-sm q-mt-sm">
+                        <q-btn
+                          color="positive"
+                          unelevated
+                          dense
+                          :loading="identityActionBusy"
+                          :disable="!!editingUser.identityConflict"
+                          :label="t('access.approveGoogleLink')"
+                          @click="approvePendingGoogle"
+                        />
+                        <q-btn
+                          color="negative"
+                          outline
+                          dense
+                          :loading="identityActionBusy"
+                          :label="t('access.rejectGoogleLink')"
+                          @click="rejectPendingGoogle"
+                        />
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </q-card-section>
               <q-card-actions align="right">
@@ -537,6 +614,7 @@ const userPagination = ref({ page: 1, rowsPerPage: 25, rowsNumber: 0 });
 const userDialog = ref(false);
 const editingUser = ref<DirectoryUser | null>(null);
 const savingUser = ref(false);
+const identityActionBusy = ref(false);
 const busyUserId = ref<string | null>(null);
 const userForm = ref({
   displayName: "",
@@ -772,12 +850,57 @@ function identityStatusLabel(status: SourceEmployee["identityStatus"]) {
   if (status === "ad_enrolled") return t("access.statusAdEnrolled");
   return t("access.statusDisabled");
 }
-function linkedIdentitiesLabel(row: DirectoryUser) {
-  const badge = row.linkedIdentities || row.identitySource;
-  if (badge === "both") return t("access.sourceBothShort");
+function identityBadgesFor(row: DirectoryUser): Array<"ad" | "google" | "google_pending"> {
+  if (row.identityBadges?.length) return row.identityBadges;
+  // Fallback for older payloads.
+  if (row.linkedIdentities === "both" || (row.adLinked && row.googleLinked)) return ["ad", "google"];
+  if (row.adLinked || row.linkedIdentities === "ad") {
+    return row.googlePending ? ["ad", "google_pending"] : ["ad"];
+  }
+  if (row.googleLinked || row.linkedIdentities === "google") return ["google"];
+  return ["google_pending"];
+}
+function identityBadgeLabel(badge: "ad" | "google" | "google_pending") {
   if (badge === "ad") return t("access.sourceAdShort");
   if (badge === "google") return t("access.sourceGoogleShort");
-  return t("access.linkedPending");
+  return t("access.sourceGooglePendingShort");
+}
+function identityBadgeTone(badge: "ad" | "google" | "google_pending") {
+  if (badge === "ad") return "primary";
+  if (badge === "google") return "positive";
+  return "warning";
+}
+async function approvePendingGoogle() {
+  const pendingId = editingUser.value?.pendingGoogleLink?.id;
+  if (!pendingId) return;
+  identityActionBusy.value = true;
+  usersError.value = "";
+  try {
+    const result = await api.approvePendingGoogleLink(pendingId);
+    if (result.user) editingUser.value = result.user;
+    await loadUsers();
+    if (result.user) editingUser.value = result.user;
+  } catch (err) {
+    usersError.value = err instanceof Error ? err.message : t("access.updateError");
+  } finally {
+    identityActionBusy.value = false;
+  }
+}
+async function rejectPendingGoogle() {
+  const pendingId = editingUser.value?.pendingGoogleLink?.id;
+  if (!pendingId) return;
+  identityActionBusy.value = true;
+  usersError.value = "";
+  try {
+    const result = await api.rejectPendingGoogleLink(pendingId);
+    if (result.user) editingUser.value = result.user;
+    await loadUsers();
+    if (result.user) editingUser.value = result.user;
+  } catch (err) {
+    usersError.value = err instanceof Error ? err.message : t("access.updateError");
+  } finally {
+    identityActionBusy.value = false;
+  }
 }
 
 function matchDepartmentOption(adDepartment: string | null | undefined) {

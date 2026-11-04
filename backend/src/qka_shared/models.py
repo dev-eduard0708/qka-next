@@ -892,3 +892,36 @@ class DesktopDeviceFolder(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+# Pending Google → QkaUser link (verified OAuth sub; Super Admin must approve).
+# Never auto-merges by email. Status: 0=pending, 1=approved, 2=rejected.
+PENDING_GOOGLE_LINK_PENDING = 0
+PENDING_GOOGLE_LINK_APPROVED = 1
+PENDING_GOOGLE_LINK_REJECTED = 2
+
+
+class PendingGoogleLink(Base):
+    """Verified Google OAuth identity awaiting Super Admin link to an existing QkaUser.
+
+    Created when Google sign-in email matches an AD-enrolled user's contact email
+    (or another explicit candidate) but Google is not yet linked. Login stays denied
+    until approve; reject leaves identities separate. Never silently merges two
+    active QKA users.
+    """
+
+    __tablename__ = "qka_next_pending_google_link"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    target_qka_user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    google_sub: Mapped[str] = mapped_column(String(128), index=True)
+    google_email_normalized: Mapped[str] = mapped_column(String(256), index=True)
+    google_profile_name: Mapped[str] = mapped_column(String(256), default="")
+    status: Mapped[int] = mapped_column(Integer, default=PENDING_GOOGLE_LINK_PENDING, index=True)
+    conflict: Mapped[bool] = mapped_column(Boolean, default=False)
+    conflict_reason: Mapped[str] = mapped_column(String(1024), default="")
+    conflicting_qka_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    external_identity_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)

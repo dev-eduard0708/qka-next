@@ -7,8 +7,9 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from qka_shared.allowlist import ACCOUNT_ENABLED, LINKED, PROVIDER_GOOGLE, USER_ACTIVE
+from qka_api.services import google_identity_link as gil
 from qka_api.services.user_directory import set_google_profile_name
+from qka_shared.allowlist import ACCOUNT_ENABLED, LINKED, PROVIDER_GOOGLE, USER_ACTIVE
 from qka_shared.chat_access import activate_pending_grants_for_email
 from qka_shared.google_oidc import GoogleOidcIdentity, accept_google_identity
 from qka_shared.models import AllowedEmail, ExternalIdentity, GoogleWorkspaceAccount, QkaUser
@@ -44,15 +45,7 @@ def bind_verified_google(
         )
     ).scalar_one_or_none()
 
-    if not _email_allowlisted(session, email):
-        if existing is None and allow_write:
-            _create_pending_google_identity(session, sub, email)
-        return BindResult(
-            False,
-            None,
-            "This Google account is not on the Super Admin allowlist.",
-        )
-
+    # Already linked Google identity → normal login (existing Google users stay valid).
     if existing is not None and existing.qka_user_id is not None and existing.link_status == LINKED:
         if existing.account_status != ACCOUNT_ENABLED:
             return BindResult(False, None, "The Google identity is disabled.")
@@ -68,6 +61,51 @@ def bind_verified_google(
             session.flush()
         return BindResult(True, user.id, "ok")
 
+    # Open pending link for this sub → keep waiting (do not create a second employee).
+    open_pending = gil.get_open_pending_for_sub(session, sub)
+    if open_pending is not None:
+        if allow_write and existing is None:
+            gil.ensure_unmatched_google_identity(session, sub=sub, email=email, existing=None)
+        return BindResult(
+            False,
+            None,
+            "This Google account is waiting for administrator identity approval.",
+        )
+
+    # AD contact-email match without linked Google → pending Super Admin link (never auto-merge).
+    ad_candidate = gil.find_ad_candidate_for_email(session, email)
+    if ad_candidate is not None:
+        if not allow_write:
+            return BindResult(
+                False,
+                None,
+                "This Google account is waiting for administrator identity approval.",
+            )
+        conflicting = gil.find_linked_google_owner(session, email)
+        gil.record_pending_google_link(
+            session,
+            target=ad_candidate,
+            sub=sub,
+            email=email,
+            profile_name=identity.name,
+            existing_identity=existing,
+            conflicting_user=conflicting,
+        )
+        return BindResult(
+            False,
+            None,
+            "This Google account is waiting for administrator identity approval.",
+        )
+
+    if not _email_allowlisted(session, email):
+        if existing is None and allow_write:
+            gil.ensure_unmatched_google_identity(session, sub=sub, email=email, existing=None)
+        return BindResult(
+            False,
+            None,
+            "This Google account is not on the Super Admin allowlist.",
+        )
+
     if not allow_write:
         return BindResult(
             False,
@@ -75,6 +113,8 @@ def bind_verified_google(
             "This Google account is waiting for administrator identity approval.",
         )
 
+    # Pure Google first sign-in (allowlisted, no AD candidate): create a new QkaUser.
+    # Never merges into another user by email alone.
     user = _create_google_login_user(session, email, identity.name)
     if existing is None:
         _create_linked_google_identity(session, user.id, sub, email)
@@ -142,35 +182,6 @@ def _create_linked_google_identity(session: Session, user_id: uuid.UUID, sub: st
             primary_email=email,
             account_status=ACCOUNT_ENABLED,
             link_status=LINKED,
-            directory_presence=0,
-            created_at=now,
-            updated_at=now,
-        )
-    )
-    session.add(
-        GoogleWorkspaceAccount(
-            id=uuid.uuid4(),
-            external_identity_id=identity_id,
-            google_user_id=sub,
-            primary_email=email,
-            drive_onboarded=False,
-        )
-    )
-    session.flush()
-
-
-def _create_pending_google_identity(session: Session, sub: str, email: str) -> None:
-    now = datetime.now(timezone.utc)
-    identity_id = uuid.uuid4()
-    session.add(
-        ExternalIdentity(
-            id=identity_id,
-            qka_user_id=None,
-            provider=PROVIDER_GOOGLE,
-            stable_external_id=sub,
-            primary_email=email,
-            account_status=ACCOUNT_ENABLED,
-            link_status=UNMATCHED,
             directory_presence=0,
             created_at=now,
             updated_at=now,

@@ -407,6 +407,48 @@ def update_ad_directory_user(
     return updated
 
 
+@router.post("/identities/google-pending/{pending_id}/approve")
+def approve_pending_google_identity(
+    pending_id: uuid.UUID,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    """Attach a verified Google OAuth sub to the target QkaUser after Super Admin approval."""
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    if settings.database_read_only:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="The database is read-only.")
+    try:
+        result = directory.approve_google_identity_link(session, actor, pending_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    session.flush()
+    return result
+
+
+@router.post("/identities/google-pending/{pending_id}/reject")
+def reject_pending_google_identity(
+    pending_id: uuid.UUID,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    """Reject a pending Google link. Does not merge or delete the AD QkaUser."""
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    if settings.database_read_only:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="The database is read-only.")
+    try:
+        result = directory.reject_google_identity_link(session, actor, pending_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    session.flush()
+    return result
+
+
 @router.post("/emails/{email_id}/enabled")
 def set_enabled(
     email_id: uuid.UUID,

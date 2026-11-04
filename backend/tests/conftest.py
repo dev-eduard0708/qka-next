@@ -687,6 +687,28 @@ def seed_db():
         )
         session.execute(text("DELETE FROM qka_next_chatgpt_membership"))
         session.execute(text("DELETE FROM qka_next_membership_import_batch"))
+        session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS qka_next_pending_google_link (
+                    id UUID PRIMARY KEY,
+                    target_qka_user_id UUID NOT NULL,
+                    google_sub VARCHAR(128) NOT NULL,
+                    google_email_normalized VARCHAR(256) NOT NULL,
+                    google_profile_name VARCHAR(256) NOT NULL DEFAULT '',
+                    status INTEGER NOT NULL DEFAULT 0,
+                    conflict BOOLEAN NOT NULL DEFAULT FALSE,
+                    conflict_reason VARCHAR(1024) NOT NULL DEFAULT '',
+                    conflicting_qka_user_id UUID NULL,
+                    external_identity_id UUID NULL,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    resolved_at TIMESTAMPTZ NULL,
+                    resolved_by_user_id UUID NULL
+                )
+                """
+            )
+        )
+        session.execute(text("DELETE FROM qka_next_pending_google_link"))
         session.execute(text("DELETE FROM qka_next_source_grant_audit"))
         session.execute(text("DELETE FROM qka_next_source_grant"))
         session.execute(text("DELETE FROM qka_next_source_scope"))

@@ -21,6 +21,19 @@ export type AllowedEmail = {
   updatedAt?: string | null;
 };
 
+export type PendingGoogleLink = {
+  id: string;
+  targetQkaUserId: string;
+  googleSub: string;
+  googleEmail: string;
+  googleProfileName?: string | null;
+  status: "pending" | "approved" | "rejected";
+  conflict: boolean;
+  conflictReason?: string | null;
+  conflictingQkaUserId?: string | null;
+  createdAt?: string | null;
+};
+
 export type DirectoryUser = {
   allowlistId: string | null;
   qkaUserId: string | null;
@@ -32,8 +45,15 @@ export type DirectoryUser = {
   department?: string;
   identitySource?: "ad" | "google" | "both" | "none";
   linkedIdentities?: "ad" | "google" | "both" | "pending";
+  identityBadges?: Array<"ad" | "google" | "google_pending">;
   googleSub: string | null;
   googleLinked: boolean;
+  adLinked?: boolean;
+  googlePending?: boolean;
+  pendingGoogleLink?: PendingGoogleLink | null;
+  identityConflict?: boolean;
+  identityConflictReason?: string | null;
+  adBrowserLoginImplemented?: boolean;
   identityStatus: "linked" | "pending" | "disabled" | "ad_enrolled";
   accountStatus: "active" | "disabled" | "pending" | "awaiting_google_login" | "awaiting_admin_approval";
   chatgptMembership: "verified_member" | "verified_nonmember" | "unknown";
@@ -45,7 +65,13 @@ export type DirectoryUser = {
   allowlisted: boolean;
   allowlistEnabled: boolean;
   canGrant: boolean;
-  adIdentities: Array<{ domainUsername: string | null; sidSuffix: string | null; linked: boolean }>;
+  adIdentities: Array<{
+    domainUsername: string | null;
+    sid?: string | null;
+    sidSuffix: string | null;
+    upn?: string | null;
+    linked: boolean;
+  }>;
   superAdmin: boolean;
   createdAt?: string | null;
   updatedAt?: string | null;
@@ -487,6 +513,16 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  approvePendingGoogleLink: (pendingId: string) =>
+    request<{ ok: boolean; qkaUserId: string; user?: DirectoryUser; googleSub?: string }>(
+      `/api/v1/access/identities/google-pending/${pendingId}/approve`,
+      { method: "POST", body: "{}" },
+    ),
+  rejectPendingGoogleLink: (pendingId: string) =>
+    request<{ ok: boolean; rejected?: boolean; user?: DirectoryUser }>(
+      `/api/v1/access/identities/google-pending/${pendingId}/reject`,
+      { method: "POST", body: "{}" },
+    ),
   adEligibleUsers: (opts?: { search?: string; connectionId?: string; page?: number; pageSize?: number }) => {
     const q = new URLSearchParams();
     if (opts?.search) q.set("search", opts.search);

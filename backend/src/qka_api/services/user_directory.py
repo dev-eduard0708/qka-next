@@ -19,6 +19,7 @@ from qka_shared.chat_access import (
     set_chat_access_for_user,
 )
 from qka_shared.email_address import try_normalize
+from qka_api.services import google_identity_link as gil
 from qka_shared.models import (
     AdDirectoryUser,
     AllowedEmail,
@@ -27,6 +28,8 @@ from qka_shared.models import (
     Department,
     ExternalIdentity,
     MembershipImportBatch,
+    PENDING_GOOGLE_LINK_PENDING,
+    PendingGoogleLink,
     QkaUser,
     SourceGrantAudit,
 )
@@ -143,12 +146,44 @@ def _ad_idents(user: QkaUser | None) -> list[dict]:
     return [
         {
             "domainUsername": ad.domain_username,
+            "sid": ad.stable_external_id or None,
             "sidSuffix": (ad.stable_external_id or "").split("-")[-1] if ad.stable_external_id else None,
+            "upn": ad.upn,
             "linked": True,
         }
         for ad in user.identities
         if ad.provider == PROVIDER_AD and ad.link_status == LINKED and ad.account_status == ACCOUNT_ENABLED
     ]
+
+
+def _pending_by_user(session: Session) -> dict[uuid.UUID, PendingGoogleLink]:
+    rows = session.execute(
+        select(PendingGoogleLink)
+        .where(PendingGoogleLink.status == PENDING_GOOGLE_LINK_PENDING)
+        .order_by(PendingGoogleLink.created_at.desc())
+    ).scalars().all()
+    out: dict[uuid.UUID, PendingGoogleLink] = {}
+    for row in rows:
+        if row.target_qka_user_id not in out:
+            out[row.target_qka_user_id] = row
+    return out
+
+
+def _identity_badges(
+    *,
+    ad_linked: bool,
+    google_linked: bool,
+    google_pending: bool,
+) -> list[str]:
+    """Separate badges: AD / Google / Google Pending (not a single combined source)."""
+    badges: list[str] = []
+    if ad_linked:
+        badges.append("ad")
+    if google_linked:
+        badges.append("google")
+    elif google_pending:
+        badges.append("google_pending")
+    return badges
 
 
 def _membership_label(status: int) -> str:
@@ -221,14 +256,17 @@ def _linked_identities_badge(
     identity_source: str,
     identity_status: str,
     google_linked: bool,
+    google_pending: bool = False,
 ) -> str:
-    """UI badge for Linked Identities: AD / Google / AD + Google / Pending."""
+    """Legacy combined field. 'both' ONLY when AD and Google are actually linked."""
     if identity_source == "both":
         return "both"
     if identity_source == "ad":
         return "ad"
     if identity_source == "google" and google_linked:
         return "google"
+    if google_pending:
+        return "pending"
     if identity_status in {"pending", "awaiting_google_login"} or identity_source in {"google", "none"}:
         return "pending"
     return "pending"
@@ -291,12 +329,17 @@ def _user_dto(
     user: QkaUser | None,
     chat: ChatAccess | None,
     membership: ChatgptMembership | None,
+    pending_google: PendingGoogleLink | None = None,
 ) -> dict:
     ad_idents = _ad_idents(user)
     has_google = _google_sub(user) is not None
+    google_pending = pending_google is not None and not has_google
     if not row.enabled:
         identity_status = "disabled"
         account_status = "disabled"
+    elif google_pending:
+        identity_status = "ad_enrolled" if ad_idents else "pending"
+        account_status = "awaiting_admin_approval"
     elif user is not None and (has_google or user.login_enabled):
         # Verified Google bind (or login-enabled QKA user) — active.
         identity_status = "linked"
@@ -330,9 +373,23 @@ def _user_dto(
             identity_source=identity_source,
             identity_status=identity_status,
             google_linked=has_google,
+            google_pending=google_pending,
+        ),
+        "identityBadges": _identity_badges(
+            ad_linked=bool(ad_idents),
+            google_linked=has_google,
+            google_pending=google_pending or (identity_status == "pending" and not ad_idents and not has_google),
         ),
         "googleSub": _google_sub(user),
         "googleLinked": has_google,
+        "adLinked": bool(ad_idents),
+        "googlePending": google_pending,
+        "pendingGoogleLink": gil.pending_link_dto(pending_google) if google_pending else None,
+        "identityConflict": bool(pending_google.conflict) if google_pending and pending_google else False,
+        "identityConflictReason": (
+            pending_google.conflict_reason if google_pending and pending_google and pending_google.conflict else None
+        ),
+        "adBrowserLoginImplemented": False,
         "identityStatus": identity_status,
         "accountStatus": account_status,
         "chatgptMembership": _membership_label(mem_status),
@@ -351,12 +408,20 @@ def _user_dto(
     }
 
 
-def _ad_only_user_dto(user: QkaUser, chat: ChatAccess | None) -> dict:
+def _ad_only_user_dto(
+    user: QkaUser,
+    chat: ChatAccess | None,
+    pending_google: PendingGoogleLink | None = None,
+) -> dict:
     ad_idents = _ad_idents(user)
     has_google = _google_sub(user) is not None
+    google_pending = pending_google is not None and not has_google
     if user.status != 0:
         identity_status = "disabled"
         account_status = "disabled"
+    elif google_pending:
+        identity_status = "ad_enrolled"
+        account_status = "awaiting_admin_approval"
     elif has_google or user.login_enabled:
         identity_status = "linked"
         account_status = "active"
@@ -368,7 +433,11 @@ def _ad_only_user_dto(user: QkaUser, chat: ChatAccess | None) -> dict:
         "allowlistId": None,
         "qkaUserId": str(user.id),
         "displayName": user.display_name,
-        "googleProfileName": None,
+        "googleProfileName": (
+            (pending_google.google_profile_name or "").strip() or None
+            if google_pending and pending_google
+            else None
+        ),
         "primaryEmail": user.contact_email or "",
         "contactEmail": user.contact_email,
         "domainUsername": ad_idents[0]["domainUsername"] if ad_idents else None,
@@ -378,9 +447,23 @@ def _ad_only_user_dto(user: QkaUser, chat: ChatAccess | None) -> dict:
             identity_source=identity_source,
             identity_status=identity_status,
             google_linked=has_google,
+            google_pending=google_pending,
+        ),
+        "identityBadges": _identity_badges(
+            ad_linked=bool(ad_idents),
+            google_linked=has_google,
+            google_pending=google_pending,
         ),
         "googleSub": _google_sub(user),
         "googleLinked": has_google,
+        "adLinked": bool(ad_idents),
+        "googlePending": google_pending,
+        "pendingGoogleLink": gil.pending_link_dto(pending_google) if google_pending else None,
+        "identityConflict": bool(pending_google.conflict) if google_pending and pending_google else False,
+        "identityConflictReason": (
+            pending_google.conflict_reason if google_pending and pending_google and pending_google.conflict else None
+        ),
+        "adBrowserLoginImplemented": False,
         "identityStatus": identity_status,
         "accountStatus": account_status,
         "chatgptMembership": "unknown",
@@ -464,6 +547,7 @@ def list_users(
     rows = session.execute(select(AllowedEmail).order_by(AllowedEmail.email_normalized)).scalars().all()
     by_email = _google_users_by_email(session)
     ad_by_contact = _ad_users_by_contact_email(session)
+    pending_by_user = _pending_by_user(session)
     chat_rows = session.execute(select(ChatAccess)).scalars().all()
     chat_by_allow = {c.allowed_email_id: c for c in chat_rows if c.allowed_email_id}
     chat_by_user = {c.qka_user_id: c for c in chat_rows if c.qka_user_id}
@@ -490,7 +574,13 @@ def list_users(
                 user_chat = chat_by_user.get(ad_contact_user.id) or get_or_create_chat_access_for_user(
                     session, ad_contact_user.id
                 )
-                items.append(_ad_only_user_dto(ad_contact_user, user_chat))
+                items.append(
+                    _ad_only_user_dto(
+                        ad_contact_user,
+                        user_chat,
+                        pending_google=pending_by_user.get(ad_contact_user.id),
+                    )
+                )
                 seen_user_ids.add(ad_contact_user.id)
             continue
 
@@ -498,7 +588,13 @@ def list_users(
         if user is not None:
             seen_user_ids.add(user.id)
         promote_allowlist_row_to_user(session, row, user)
-        dto = _user_dto(row, user=user, chat=chat, membership=membership)
+        dto = _user_dto(
+            row,
+            user=user,
+            chat=chat,
+            membership=membership,
+            pending_google=pending_by_user.get(user.id) if user is not None else None,
+        )
         items.append(dto)
 
     # Include AD-enrolled QkaUsers that are not already represented by an allowlist row.
@@ -516,7 +612,7 @@ def list_users(
         if user.id in seen_user_ids:
             continue
         chat = chat_by_user.get(user.id) or get_or_create_chat_access_for_user(session, user.id)
-        items.append(_ad_only_user_dto(user, chat))
+        items.append(_ad_only_user_dto(user, chat, pending_google=pending_by_user.get(user.id)))
         seen_user_ids.add(user.id)
 
     q = (search or "").strip().lower()
@@ -819,7 +915,45 @@ def update_ad_only_user(
             before=before,
             after=after,
         )
-    return _ad_only_user_dto(user, chat)
+    return _ad_only_user_dto(user, chat, pending_google=gil.get_open_pending_for_user(session, user.id))
+
+
+def approve_google_identity_link(session: Session, actor: QkaUser, pending_id: uuid.UUID) -> dict:
+    result = gil.approve_pending_google_link(session, actor, pending_id)
+    user_id = uuid.UUID(result["qkaUserId"])
+    user = session.execute(
+        select(QkaUser)
+        .options(selectinload(QkaUser.identities).selectinload(ExternalIdentity.google))
+        .where(QkaUser.id == user_id)
+    ).scalar_one()
+    chat = get_or_create_chat_access_for_user(session, user.id)
+    allow = session.execute(
+        select(AllowedEmail).where(AllowedEmail.email_normalized == result["googleEmail"])
+    ).scalar_one_or_none()
+    if allow is not None:
+        membership = session.execute(
+            select(ChatgptMembership).where(ChatgptMembership.allowed_email_id == allow.id)
+        ).scalar_one_or_none()
+        allow_chat = get_or_create_chat_access(session, allow.id)
+        dto = _user_dto(allow, user=user, chat=allow_chat, membership=membership, pending_google=None)
+    else:
+        dto = _ad_only_user_dto(user, chat, pending_google=None)
+    result["user"] = dto
+    return result
+
+
+def reject_google_identity_link(session: Session, actor: QkaUser, pending_id: uuid.UUID) -> dict:
+    result = gil.reject_pending_google_link(session, actor, pending_id)
+    target_id = uuid.UUID(result["pendingGoogleLink"]["targetQkaUserId"])
+    user = session.execute(
+        select(QkaUser)
+        .options(selectinload(QkaUser.identities).selectinload(ExternalIdentity.google))
+        .where(QkaUser.id == target_id)
+    ).scalar_one_or_none()
+    if user is not None:
+        chat = get_or_create_chat_access_for_user(session, user.id)
+        result["user"] = _ad_only_user_dto(user, chat, pending_google=None)
+    return result
 
 
 def set_google_profile_name(session: Session, email_normalized: str, profile_name: str) -> None:
