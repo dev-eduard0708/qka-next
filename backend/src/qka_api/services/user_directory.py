@@ -548,7 +548,7 @@ def list_users(
     items.sort(key=lambda i: ((i.get("displayName") or "").lower(), i.get("primaryEmail") or ""))
     total = len(items)
     page = max(1, page)
-    page_size = max(1, min(page_size, 100))
+    page_size = max(1, min(page_size, 200))
     start = (page - 1) * page_size
     return {
         "items": items[start : start + page_size],
