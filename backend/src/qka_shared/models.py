@@ -769,3 +769,72 @@ class AdAuditEvent(Base):
     actor_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     detail: Mapped[str] = mapped_column(String(2000), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+# --- Windows Desktop Agent (pilot) ---
+
+DEVICE_PENDING = 0
+DEVICE_ACTIVE = 1
+DEVICE_PAUSED = 2
+DEVICE_REVOKED = 3
+DEVICE_ERROR = 4
+
+INDEX_IDLE = 0
+INDEX_RUNNING = 1
+INDEX_PAUSED = 2
+INDEX_ERROR = 3
+
+
+class DesktopEnrollmentCode(Base):
+    """One-time enrollment code bound to a QKA user. Never embedded in the MSI."""
+
+    __tablename__ = "qka_next_desktop_enrollment_code"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    qka_user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    code_hash: Mapped[str] = mapped_column(String(128), unique=True)
+    label: Mapped[str] = mapped_column(String(256), default="")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class DesktopDevice(Base):
+    __tablename__ = "qka_next_desktop_device"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    qka_user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    device_key_hash: Mapped[str] = mapped_column(String(128), unique=True)
+    computer_name: Mapped[str] = mapped_column(String(256), default="")
+    device_fingerprint: Mapped[str] = mapped_column(String(256), default="")
+    domain_joined_name: Mapped[str] = mapped_column(String(256), default="")
+    agent_version: Mapped[str] = mapped_column(String(64), default="")
+    status: Mapped[int] = mapped_column(Integer, default=DEVICE_PENDING)
+    indexing_state: Mapped[int] = mapped_column(Integer, default=INDEX_IDLE)
+    read_only_verified: Mapped[bool] = mapped_column(Boolean, default=False)
+    read_only_detail: Mapped[str] = mapped_column(String(1024), default="")
+    last_error: Mapped[str] = mapped_column(String(2000), default="")
+    files_total: Mapped[int] = mapped_column(Integer, default=0)
+    files_indexed: Mapped[int] = mapped_column(Integer, default=0)
+    files_pending: Mapped[int] = mapped_column(Integer, default=0)
+    files_failed: Mapped[int] = mapped_column(Integer, default=0)
+    files_by_type_json: Mapped[str] = mapped_column(Text, default="{}")
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_index_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    enrolled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class DesktopDeviceFolder(Base):
+    __tablename__ = "qka_next_desktop_device_folder"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    device_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    path_normalized: Mapped[str] = mapped_column(String(2048))
+    include_subfolders: Mapped[bool] = mapped_column(Boolean, default=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

@@ -92,6 +92,7 @@ const nav = computed(() => {
   ];
   if (session.user?.superAdmin) {
     items.push({ to: "/access", icon: "admin_panel_settings", label: "nav.access" });
+    items.push({ to: "/sources/employee-computers", icon: "computer", label: "nav.employeeComputers" });
   }
   items.push(
     { to: "/integrations", icon: "hub", label: "nav.integrations" },

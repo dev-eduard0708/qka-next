@@ -99,6 +99,10 @@ class Settings(BaseSettings):
     openai_max_history_messages: int = 24
     openai_upload_max_bytes: int = 5_000_000
     openai_data_sharing_permitted: bool = False
+    # Windows Desktop Agent (pilot). Employee PCs must use HTTPS internal URL — not loopback.
+    agent_public_base_url: str = ""
+    agent_enrollment_hours: int = 24
+    agent_min_version: str = "0.1.0"
 
     @property
     def cors_origin_list(self) -> list[str]:
@@ -125,6 +129,10 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment.strip().lower() in {"production", "prod"}
+
+    @property
+    def agent_public_base(self) -> str:
+        return (self.agent_public_base_url or self.mcp_public_base_url or "").rstrip("/")
 
     def dev_session_allowed(self) -> bool:
         if self.is_production:

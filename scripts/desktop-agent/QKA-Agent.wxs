@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- WiX v3 source for QKA-Agent.msi (silent msiexec /qn).
+     Build with build-msi.ps1 when WiX Toolset is installed.
+     Does NOT embed enrollment secrets or employee passwords. -->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" Name="QKA Desktop Agent" Language="1033" Version="0.1.0.0"
+           Manufacturer="QEHC" UpgradeCode="A7C3E91B-4D2F-4E8A-9B11-6F0C2D8E4A10">
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of QKA Desktop Agent is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Feature Id="ProductFeature" Title="QKA Desktop Agent" Level="1">
+      <ComponentGroupRef Id="ProductComponents" />
+      <ComponentRef Id="AgentConfigDir" />
+      <ComponentRef Id="AgentService" />
+    </Feature>
+
+    <Property Id="QKASERVERURL" Secure="yes" />
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFilesFolder">
+        <Directory Id="QkaDir" Name="QKA">
+          <Directory Id="INSTALLFOLDER" Name="DesktopAgent" />
+        </Directory>
+      </Directory>
+      <Directory Id="CommonAppDataFolder">
+        <Directory Id="QkaDataRoot" Name="QKA">
+          <Directory Id="AgentDataDir" Name="DesktopAgent" />
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+      <Component Id="AgentExe" Guid="B1C2D3E4-1111-2222-3333-444455556666">
+        <File Id="AgentExeFile" Source="!(bindpath.Payload)\qka-desktop-agent.exe" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Component Id="AgentConfigDir" Directory="AgentDataDir" Guid="C2D3E4F5-1111-2222-3333-444455556666">
+      <CreateFolder />
+      <RegistryValue Root="HKLM" Key="Software\QKA\DesktopAgent" Name="InstallFolder"
+                     Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+      <RegistryValue Root="HKLM" Key="Software\QKA\DesktopAgent" Name="ServerBaseUrl"
+                     Type="string" Value="[QKASERVERURL]" />
+    </Component>
+
+    <Component Id="AgentService" Directory="INSTALLFOLDER" Guid="D3E4F5A6-1111-2222-3333-444455556666">
+      <ServiceInstall Id="QkaDesktopAgentService"
+                      Type="ownProcess"
+                      Name="QkaDesktopAgent"
+                      DisplayName="QKA Desktop Agent"
+                      Description="Read-only local file indexing agent for QKA-Next"
+                      Start="auto"
+                      Account="NT AUTHORITY\LOCAL SERVICE"
+                      ErrorControl="normal"
+                      Arguments="service" />
+      <ServiceControl Id="StartService" Name="QkaDesktopAgent" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
+    </Component>
+  </Product>
+</Wix>

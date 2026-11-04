@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+import sys
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -24,6 +26,10 @@ from qka_shared.models import (
     SynologyFileInventory,
 )
 from tests.fake_google import FakeGoogleOidcService
+
+_AGENT_ROOT = Path(__file__).resolve().parents[2] / "agent"
+if str(_AGENT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_AGENT_ROOT))
 
 TEST_URL = os.environ.get(
     "QKA_TEST_DATABASE_URL",
@@ -258,6 +264,68 @@ def seed_db():
         session.execute(text('ALTER TABLE qka_user ADD COLUMN IF NOT EXISTS "ContactEmail" VARCHAR(256) NULL'))
         session.execute(text('ALTER TABLE qka_user ADD COLUMN IF NOT EXISTS "McpConnectedAt" TIMESTAMPTZ NULL'))
         session.execute(text('ALTER TABLE qka_user ADD COLUMN IF NOT EXISTS "McpLastActivityAt" TIMESTAMPTZ NULL'))
+        session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS qka_next_desktop_enrollment_code (
+                    id UUID PRIMARY KEY,
+                    qka_user_id UUID NOT NULL,
+                    code_hash VARCHAR(128) NOT NULL UNIQUE,
+                    label VARCHAR(256) NOT NULL DEFAULT '',
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    consumed_at TIMESTAMPTZ NULL,
+                    created_by_user_id UUID NULL,
+                    created_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+        )
+        session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS qka_next_desktop_device (
+                    id UUID PRIMARY KEY,
+                    qka_user_id UUID NOT NULL,
+                    device_key_hash VARCHAR(128) NOT NULL UNIQUE,
+                    computer_name VARCHAR(256) NOT NULL DEFAULT '',
+                    device_fingerprint VARCHAR(256) NOT NULL DEFAULT '',
+                    domain_joined_name VARCHAR(256) NOT NULL DEFAULT '',
+                    agent_version VARCHAR(64) NOT NULL DEFAULT '',
+                    status INTEGER NOT NULL DEFAULT 0,
+                    indexing_state INTEGER NOT NULL DEFAULT 0,
+                    read_only_verified BOOLEAN NOT NULL DEFAULT FALSE,
+                    read_only_detail VARCHAR(1024) NOT NULL DEFAULT '',
+                    last_error VARCHAR(2000) NOT NULL DEFAULT '',
+                    files_total INTEGER NOT NULL DEFAULT 0,
+                    files_indexed INTEGER NOT NULL DEFAULT 0,
+                    files_pending INTEGER NOT NULL DEFAULT 0,
+                    files_failed INTEGER NOT NULL DEFAULT 0,
+                    files_by_type_json TEXT NOT NULL DEFAULT '{}',
+                    last_heartbeat_at TIMESTAMPTZ NULL,
+                    last_index_at TIMESTAMPTZ NULL,
+                    enrolled_at TIMESTAMPTZ NULL,
+                    revoked_at TIMESTAMPTZ NULL,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+        )
+        session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS qka_next_desktop_device_folder (
+                    id UUID PRIMARY KEY,
+                    device_id UUID NOT NULL,
+                    path_normalized VARCHAR(2048) NOT NULL,
+                    include_subfolders BOOLEAN NOT NULL DEFAULT TRUE,
+                    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+        )
         session.execute(text("ALTER TABLE qka_next_ad_directory_user ADD COLUMN IF NOT EXISTS qka_eligible BOOLEAN NOT NULL DEFAULT FALSE"))
         session.execute(text("ALTER TABLE qka_next_ad_directory_user ADD COLUMN IF NOT EXISTS qka_archived BOOLEAN NOT NULL DEFAULT FALSE"))
         session.execute(text("ALTER TABLE qka_next_ad_directory_user ADD COLUMN IF NOT EXISTS department_override VARCHAR(512) NOT NULL DEFAULT ''"))
@@ -601,6 +669,9 @@ def seed_db():
         session.execute(text("DELETE FROM allowed_email"))
         session.execute(text("DELETE FROM google_workspace_account"))
         session.execute(text("DELETE FROM external_identity"))
+        session.execute(text("DELETE FROM qka_next_desktop_device_folder"))
+        session.execute(text("DELETE FROM qka_next_desktop_device"))
+        session.execute(text("DELETE FROM qka_next_desktop_enrollment_code"))
         session.execute(text("DELETE FROM qka_user"))
         session.add_all(
             [

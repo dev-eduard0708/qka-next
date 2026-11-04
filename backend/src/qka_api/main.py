@@ -25,6 +25,8 @@ from qka_api.routes.documents import router as documents_router
 from qka_api.routes.health import router as health_router
 from qka_api.routes.active_directory import router as active_directory_router
 from qka_api.routes.integrations import router as integrations_router
+from qka_api.routes.desktop_agent import admin_router as desktop_admin_router
+from qka_api.routes.desktop_agent import agent_router as desktop_agent_router
 from qka_api.routes.mcp_oauth import router as mcp_oauth_router
 from qka_api.routes.synology import router as synology_router
 from mcp.server.transport_security import TransportSecuritySettings
@@ -108,6 +110,8 @@ def create_app() -> FastAPI:
     app.include_router(synology_router)
     app.include_router(active_directory_router)
     app.include_router(integrations_router)
+    app.include_router(desktop_agent_router)
+    app.include_router(desktop_admin_router)
     app.include_router(mcp_oauth_router)
     # Must call streamable_http_app before lifespan uses session_manager.
     transport_security = TransportSecuritySettings(

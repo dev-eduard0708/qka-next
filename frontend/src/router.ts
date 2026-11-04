@@ -21,6 +21,12 @@ export const router = createRouter({
         { path: "search", name: "search", component: () => import("@/pages/SearchPage.vue") },
         { path: "ai", name: "ai", component: () => import("@/pages/AiWorkspacePage.vue") },
         { path: "access", name: "access", meta: { superAdmin: true }, component: () => import("@/pages/AccessPage.vue") },
+        {
+          path: "sources/employee-computers",
+          name: "employee-computers",
+          meta: { superAdmin: true },
+          component: () => import("@/pages/EmployeeComputersPage.vue"),
+        },
         { path: "integrations", name: "integrations", component: () => import("@/pages/IntegrationsPage.vue") },
         {
           path: "integrations/synology",

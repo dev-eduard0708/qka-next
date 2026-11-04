@@ -56,6 +56,35 @@ export type DirectoryUser = {
 
 export type SourceEmployee = DirectoryUser;
 
+export type DesktopDevice = {
+  id: string;
+  qkaUserId: string;
+  employeeName: string;
+  computerName: string;
+  domainJoinedName: string;
+  deviceFingerprint: string;
+  agentVersion: string;
+  status: string;
+  online: boolean;
+  agentStatus: string;
+  indexingState: string;
+  readOnlyVerified: boolean;
+  readOnlyDetail: string;
+  lastError: string;
+  filesTotal: number;
+  filesIndexed: number;
+  filesPending: number;
+  filesFailed: number;
+  filesByType: Record<string, number>;
+  percentComplete: number;
+  lastHeartbeatAt: string | null;
+  lastIndexAt: string | null;
+  enrolledAt: string | null;
+  revokedAt: string | null;
+  folders: Array<{ id: string; path: string; includeSubfolders: boolean; enabled: boolean }>;
+  gpoDeployment?: { supported: boolean; status: string; note: string };
+};
+
 export type DirectoryUsersPage = {
   items: DirectoryUser[];
   total: number;
@@ -477,6 +506,34 @@ export const api = {
   },
   sourceEmployees: () => request<SourceEmployee[]>("/api/v1/access/source/employees"),
   sourceSources: () => request<SourceSource[]>("/api/v1/access/source/sources"),
+  desktopDevices: (qkaUserId?: string) => {
+    const q = qkaUserId ? `?qkaUserId=${encodeURIComponent(qkaUserId)}` : "";
+    return request<{ items: DesktopDevice[] }>(`/api/v1/admin/desktop-devices${q}`);
+  },
+  createDesktopEnrollmentCode: (body: { qkaUserId: string; label?: string }) =>
+    request<{
+      id: string;
+      enrollmentCode: string;
+      expiresAt: string;
+      qkaUserId: string;
+      serverBaseUrl: string;
+      installHint: string;
+    }>("/api/v1/admin/desktop-devices/enrollment-codes", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  setDesktopDeviceFolders: (deviceId: string, folders: Array<{ path: string; includeSubfolders?: boolean }>) =>
+    request<{ folders: DesktopDevice["folders"] }>(`/api/v1/admin/desktop-devices/${deviceId}/folders`, {
+      method: "PUT",
+      body: JSON.stringify({ folders }),
+    }),
+  desktopDeviceCommand: (deviceId: string, command: "start" | "pause" | "resume") =>
+    request<DesktopDevice>(`/api/v1/admin/desktop-devices/${deviceId}/command`, {
+      method: "POST",
+      body: JSON.stringify({ command }),
+    }),
+  revokeDesktopDevice: (deviceId: string) =>
+    request<DesktopDevice>(`/api/v1/admin/desktop-devices/${deviceId}/revoke`, { method: "POST" }),
   sourceFolderTree: (approvedShareId: string, rootPrefix?: string | null) => {
     const q = new URLSearchParams({ approvedShareId });
     // "" / omitted → entire share; otherwise scoped prefix
