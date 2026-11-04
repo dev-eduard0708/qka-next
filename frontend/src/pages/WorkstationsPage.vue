@@ -23,7 +23,7 @@
     <div class="row q-col-gutter-md q-mb-md">
       <div class="col-6 col-sm-4 col-md-2" v-for="card in summaryCards" :key="card.label">
         <div class="text-caption text-grey-7">{{ card.label }}</div>
-        <div class="text-h6">{{ card.value }}</div>
+        <div class="text-h6">{{ loadFailed ? "—" : card.value }}</div>
       </div>
     </div>
 
@@ -88,18 +88,23 @@
     <q-linear-progress v-if="probing" indeterminate color="primary" class="q-mb-sm" />
     <div v-if="probeProgress" class="text-caption text-grey-7 q-mb-sm">{{ probeProgress }}</div>
 
+    <q-banner v-if="loadFailed && !loading" class="bg-grey-2 q-mb-md">
+      {{ t("workstations.loadFailedHint") }}
+    </q-banner>
+
     <q-table
       flat
       bordered
       dense
       row-key="id"
-      :rows="rows"
+      :rows="loadFailed ? [] : rows"
       :columns="columns"
       :loading="loading"
       selection="multiple"
       v-model:selected="selectedRows"
       v-model:pagination="pagination"
-      :rows-number="total"
+      :rows-number="loadFailed ? 0 : total"
+      :no-data-label="loadFailed ? t('workstations.noDataBecauseError') : t('workstations.noData')"
       @request="onRequest"
     >
       <template #body-cell-accountStatus="props">
@@ -157,7 +162,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { api, type DirectoryUser, type Workstation } from "@/api";
+import { api, ApiError, type DirectoryUser, type Workstation } from "@/api";
 
 const { t } = useI18n();
 const section = ref("workstations");
@@ -167,6 +172,7 @@ const probing = ref(false);
 const probingId = ref<string | null>(null);
 const busy = ref(false);
 const error = ref("");
+const loadFailed = ref(false);
 const syncNote = ref("");
 const probeProgress = ref("");
 const rows = ref<Workstation[]>([]);
@@ -262,6 +268,14 @@ function agentColor(status: string) {
   return "grey";
 }
 
+function formatApiFailure(err: unknown, fallback: string): string {
+  if (err instanceof ApiError) {
+    const detail = err.message?.trim() || fallback;
+    return t("workstations.apiFailure", { status: err.status, detail });
+  }
+  return err instanceof Error ? err.message : fallback;
+}
+
 async function reload() {
   loading.value = true;
   error.value = "";
@@ -276,6 +290,7 @@ async function reload() {
       page: pagination.value.page,
       pageSize: pagination.value.rowsPerPage,
     });
+    loadFailed.value = false;
     rows.value = page.items;
     total.value = page.total;
     summary.value = page.summary;
@@ -283,7 +298,13 @@ async function reload() {
     const keep = new Set(selectedRows.value.map((r) => r.id));
     selectedRows.value = rows.value.filter((r) => keep.has(r.id));
   } catch (err) {
-    error.value = err instanceof Error ? err.message : t("workstations.loadError");
+    loadFailed.value = true;
+    rows.value = [];
+    selectedRows.value = [];
+    total.value = 0;
+    ous.value = [];
+    summary.value = { totalPresent: 0, assigned: 0, reachable: 0, noReply: 0, dnsFailed: 0, unchecked: 0 };
+    error.value = formatApiFailure(err, t("workstations.loadError"));
   } finally {
     loading.value = false;
   }
@@ -303,7 +324,7 @@ async function syncInventory() {
     });
     await reload();
   } catch (err) {
-    error.value = err instanceof Error ? err.message : t("workstations.syncError");
+    error.value = formatApiFailure(err, t("workstations.syncError"));
   } finally {
     syncing.value = false;
   }
@@ -316,7 +337,7 @@ async function pingOne(row: Workstation) {
     await api.pingWorkstation(row.id, 2000);
     await reload();
   } catch (err) {
-    error.value = err instanceof Error ? err.message : t("workstations.pingError");
+    error.value = formatApiFailure(err, t("workstations.pingError"));
   } finally {
     probingId.value = null;
   }
@@ -335,7 +356,7 @@ async function bulkPing() {
     probeProgress.value = t("workstations.probeDone", { n: result.processed });
     await reload();
   } catch (err) {
-    error.value = err instanceof Error ? err.message : t("workstations.pingError");
+    error.value = formatApiFailure(err, t("workstations.pingError"));
     probeProgress.value = "";
   } finally {
     probing.value = false;
@@ -357,7 +378,7 @@ async function saveAssign() {
     assignOpen.value = false;
     await reload();
   } catch (err) {
-    error.value = err instanceof Error ? err.message : t("workstations.assignError");
+    error.value = formatApiFailure(err, t("workstations.assignError"));
   } finally {
     busy.value = false;
   }
