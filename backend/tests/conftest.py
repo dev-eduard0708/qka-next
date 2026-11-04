@@ -256,6 +256,8 @@ def seed_db():
         session.execute(text("ALTER TABLE qka_next_chat_access ADD COLUMN IF NOT EXISTS qka_user_id UUID NULL"))
         session.execute(text('ALTER TABLE qka_user ADD COLUMN IF NOT EXISTS "DirectoryDepartment" VARCHAR(512) NOT NULL DEFAULT \'\''))
         session.execute(text('ALTER TABLE qka_user ADD COLUMN IF NOT EXISTS "ContactEmail" VARCHAR(256) NULL'))
+        session.execute(text('ALTER TABLE qka_user ADD COLUMN IF NOT EXISTS "McpConnectedAt" TIMESTAMPTZ NULL'))
+        session.execute(text('ALTER TABLE qka_user ADD COLUMN IF NOT EXISTS "McpLastActivityAt" TIMESTAMPTZ NULL'))
         session.execute(text("ALTER TABLE qka_next_ad_directory_user ADD COLUMN IF NOT EXISTS qka_eligible BOOLEAN NOT NULL DEFAULT FALSE"))
         session.execute(text("ALTER TABLE qka_next_ad_directory_user ADD COLUMN IF NOT EXISTS qka_archived BOOLEAN NOT NULL DEFAULT FALSE"))
         session.execute(text("ALTER TABLE qka_next_ad_directory_user ADD COLUMN IF NOT EXISTS department_override VARCHAR(512) NOT NULL DEFAULT ''"))

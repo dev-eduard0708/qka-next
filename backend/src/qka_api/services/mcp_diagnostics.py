@@ -217,14 +217,26 @@ def _probe_tunnel(settings: Settings) -> dict:
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     if not _tcp_ok(host, port):
-        return _status(False, configured=True, error=f"Tunnel health port {host}:{port} not reachable.")
+        return _status(
+            False,
+            configured=True,
+            error=f"Tunnel offline: health port {host}:{port} not reachable. Do not prompt Google login.",
+        )
     try:
         response = httpx.get(url, timeout=2.0)
         if response.status_code >= 400:
-            return _status(False, configured=True, error=f"Tunnel readyz HTTP {response.status_code}")
+            return _status(
+                False,
+                configured=True,
+                error=f"Tunnel offline: readyz HTTP {response.status_code}. Do not prompt Google login.",
+            )
         return _status(True, configured=True)
     except Exception as exc:  # noqa: BLE001
-        return _status(False, configured=True, error=str(exc)[:200])
+        return _status(
+            False,
+            configured=True,
+            error=f"Tunnel offline: {str(exc)[:160]}. Do not prompt Google login.",
+        )
 
 
 def run_connection_test(

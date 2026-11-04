@@ -316,6 +316,34 @@ class McpOAuthService:
             return None
         return row
 
+    def revoke_refresh_token(self, refresh_token: str) -> bool:
+        """RFC 7009-style revoke: succeed whether or not the token was known."""
+        row = self._refresh.pop(refresh_token, None)
+        if row is None:
+            return False
+        # Drop access tokens for the same client+user so revoked sessions stop immediately.
+        stale = [
+            token
+            for token, access in self._access.items()
+            if access.client_id == row.client_id and access.qka_user_id == row.qka_user_id
+        ]
+        for token in stale:
+            self._access.pop(token, None)
+        return True
+
+    def revoke_access_token(self, access_token: str) -> bool:
+        return self._access.pop(access_token, None) is not None
+
+    def revoke_tokens_for_user(self, qka_user_id: uuid.UUID) -> int:
+        removed = 0
+        for token in [t for t, row in self._access.items() if row.qka_user_id == qka_user_id]:
+            self._access.pop(token, None)
+            removed += 1
+        for token in [t for t, row in self._refresh.items() if row.qka_user_id == qka_user_id]:
+            self._refresh.pop(token, None)
+            removed += 1
+        return removed
+
     def validate_access_token(self, token: str) -> AccessToken | None:
         self._stats["tokenValidations"] = int(self._stats["tokenValidations"]) + 1
         self._stats["lastValidationAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

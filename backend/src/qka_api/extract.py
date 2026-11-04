@@ -143,6 +143,25 @@ def extract_document(
             method="none",
         )
     result.digest = digest
+    return _sanitize_result_for_postgres(result)
+
+
+def _strip_nul(value: str | None) -> str:
+    """Postgres text/json cannot store NUL (0x00); strip before persistence."""
+    if not value:
+        return ""
+    if "\x00" not in value:
+        return value
+    return value.replace("\x00", "")
+
+
+def _sanitize_result_for_postgres(result: ExtractionResult) -> ExtractionResult:
+    cleaned = _strip_nul(result.text)
+    if cleaned != result.text:
+        result.notes.append("Removed NUL bytes from extracted text (not storable in PostgreSQL).")
+        result.text = cleaned
+    for chunk in result.chunks:
+        chunk.text = _strip_nul(chunk.text)
     return result
 
 

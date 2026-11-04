@@ -608,9 +608,26 @@ def process_extraction_queue(
         item = _claim_queue_item(session, settings)
         if item is None:
             break
-        _process_one(session, settings, gateway, item)
+        item_id = item.id
+        try:
+            with session.begin_nested():
+                _process_one(session, settings, gateway, item)
+                session.flush()
+        except Exception:
+            log.exception("extraction.item_failed queue_id=%s", item_id)
+            # Savepoint rolled back the claim; re-load and mark failed so poison
+            # files (e.g. NUL in extracted text) cannot stall the batch forever.
+            item = session.get(SynologyExtractionQueue, item_id)
+            if item is not None and item.status in (QUEUE_PENDING, QUEUE_PROCESSING):
+                now = _now()
+                item.status = QUEUE_FAILED
+                item.safe_error = f"extractor_v={EXTRACTOR_VERSION}|Extraction persistence failed."
+                item.lease_owner = None
+                item.lease_expires_at = None
+                item.updated_at = now
+                _bump_batch(session, item.batch_id, failed=1)
+                session.flush()
         processed += 1
-        session.flush()
     _finalize_batches(session)
     return processed
 

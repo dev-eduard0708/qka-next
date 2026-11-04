@@ -213,6 +213,8 @@ export const messages = {
       adDepartmentBlank: "AD department has no QKA match. Select a QKA department before saving.",
       qkaDepartment: "QKA Department",
       qkaDepartmentRequired: "QKA department (required)",
+      departmentsEmpty: "No QKA departments are available yet.",
+      departmentsLoadError: "Unable to load QKA departments. Restart the API if /access/departments is missing.",
       departmentOverride: "Department",
       departmentOverrideHint: "Stored in QKA and is not overwritten on every AD resync.",
       departmentAutofillHint: "Matched AD department “{dept}”. You may override.",

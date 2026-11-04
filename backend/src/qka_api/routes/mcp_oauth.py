@@ -6,15 +6,22 @@ import logging
 import secrets
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from qka_api.auth import COOKIE_NAME, issue_session, read_session, set_session_cookie
 from qka_api.deps import get_google_oidc, get_session, get_settings_dep
 from qka_api.google_oidc import GoogleOidcError, GoogleOidcService, pkce_pair
 from qka_api.identity_bind import bind_verified_google
 from qka_api.mcp_oauth import McpOAuthService
+from qka_api.services.mcp_session import (
+    assert_mcp_token_subject_active,
+    google_login_hint,
+    record_mcp_connection,
+    resolve_reusable_mcp_user,
+)
 from qka_shared.config import Settings
 
 router = APIRouter(tags=["mcp-oauth"])
@@ -55,6 +62,7 @@ def authorization_server_metadata(oauth: McpOAuthService = Depends(get_mcp_oauth
         "issuer": issuer,
         "authorization_endpoint": issuer + "/oauth/authorize",
         "token_endpoint": issuer + "/oauth/token",
+        "revocation_endpoint": issuer + "/oauth/revoke",
         "registration_endpoint": issuer + "/oauth/register",
         "userinfo_endpoint": issuer + "/oauth/userinfo",
         "scopes_supported": [oauth.documents_scope, "openid", "email", "offline_access", "profile"],
@@ -62,6 +70,7 @@ def authorization_server_metadata(oauth: McpOAuthService = Depends(get_mcp_oauth
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
+        "revocation_endpoint_auth_methods_supported": ["none"],
         "authorization_response_iss_parameter_supported": True,
         "client_id_metadata_document_supported": True,
     }
@@ -80,27 +89,54 @@ def get_authorize(
     resource: str | None = Query(None),
     oauth: McpOAuthService = Depends(get_mcp_oauth),
     settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
 ) -> Response:
     _require_enabled(oauth)
     error = _validate_authorize(oauth, client_id, redirect_uri, response_type, code_challenge, code_challenge_method, resource)
     if error:
         return _error_redirect(redirect_uri, error[0], error[1], state, oauth.issuer)
-    google_ready = bool(settings.google_client_id.strip() and settings.google_client_secret.strip())
+
+    # Reuse existing QKA Google browser session — no second Google prompt.
+    principal = read_session(settings, request.cookies.get(COOKIE_NAME))
+    if principal is not None:
+        user = resolve_reusable_mcp_user(session, principal.user_id)
+        if user is not None:
+            auth_code = oauth.create_authorization_code(
+                client_id=client_id,
+                redirect_uri=redirect_uri,
+                code_challenge=code_challenge,
+                code_challenge_method=code_challenge_method,
+                scope=scope or oauth.documents_scope,
+                resource=resource or oauth.resource,
+                qka_user_id=user.id,
+            )
+            query = urlencode({"code": auth_code, "state": state or "", "iss": oauth.issuer})
+            log.info("mcp.oauth.authorize.session_reuse user_id=%s client_id=%s", user.id, client_id)
+            return RedirectResponse(f"{redirect_uri}?{query}", status_code=302)
+
+    google_ready = bool(settings.google_client_id.strip() and settings.google_redirect_uri.strip())
+    start_query = urlencode(
+        {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "code_challenge": code_challenge,
+            "code_challenge_method": code_challenge_method,
+            "scope": scope or oauth.documents_scope,
+            "state": state,
+            "resource": resource or oauth.resource,
+        }
+    )
+    # Seamless path: auto-continue to Google (reuses Google SSO cookie when present).
+    if google_ready:
+        return RedirectResponse(f"/oauth/google/start?{start_query}", status_code=302)
+
     html = f"""<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>QKA-Next MCP Sign-in</title></head>
 <body style="font-family:Segoe UI,sans-serif;max-width:36rem;margin:3rem auto;padding:0 1rem">
   <h1>QKA-Next MCP authorization</h1>
   <p>Sign in with your <strong>@qehc.edu.sa</strong> Google Workspace account to authorize ChatGPT.
   Access is per employee. Google-only users do not inherit another employee's Synology ACL.</p>
-  {"<p><a href='/oauth/google/start?" + urlencode({
-      "client_id": client_id,
-      "redirect_uri": redirect_uri,
-      "code_challenge": code_challenge,
-      "code_challenge_method": code_challenge_method,
-      "scope": scope or oauth.documents_scope,
-      "state": state,
-      "resource": resource or oauth.resource,
-  }) + "'>Continue with Google Workspace</a></p>" if google_ready else "<p><strong>Google OIDC is not configured on this API.</strong></p>"}
+  <p><strong>Google OIDC is not configured on this API.</strong></p>
   <p style="color:#666;font-size:0.9rem">Client: {client_id}</p>
 </body></html>"""
     return HTMLResponse(html)
@@ -108,6 +144,7 @@ def get_authorize(
 
 @router.get("/oauth/google/start")
 def google_start(
+    request: Request,
     client_id: str = Query(...),
     redirect_uri: str = Query(...),
     code_challenge: str = Query(...),
@@ -117,6 +154,7 @@ def google_start(
     resource: str | None = Query(None),
     oauth: McpOAuthService = Depends(get_mcp_oauth),
     settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
     oidc: GoogleOidcService = Depends(get_google_oidc),
 ) -> Response:
     _require_enabled(oauth)
@@ -125,6 +163,29 @@ def google_start(
         return _error_redirect(redirect_uri, error[0], error[1], state, oauth.issuer)
     if not oidc.is_configured():
         return _error_redirect(redirect_uri, "server_error", "Google OIDC is not configured.", state, oauth.issuer)
+
+    # Prefer QKA session reuse even if ChatGPT hit /google/start directly.
+    principal = read_session(settings, request.cookies.get(COOKIE_NAME))
+    if principal is not None:
+        user = resolve_reusable_mcp_user(session, principal.user_id)
+        if user is not None:
+            auth_code = oauth.create_authorization_code(
+                client_id=client_id,
+                redirect_uri=redirect_uri,
+                code_challenge=code_challenge,
+                code_challenge_method=code_challenge_method,
+                scope=scope or oauth.documents_scope,
+                resource=resource or oauth.resource,
+                qka_user_id=user.id,
+            )
+            query = urlencode({"code": auth_code, "state": state or "", "iss": oauth.issuer})
+            log.info("mcp.oauth.google_start.session_reuse user_id=%s", user.id)
+            return RedirectResponse(f"{redirect_uri}?{query}", status_code=302)
+
+    login_hint = None
+    if principal is not None:
+        login_hint = google_login_hint(session, principal.user_id)
+
     verifier, challenge = pkce_pair()
     nonce = secrets.token_urlsafe(24)
     pending = oauth.create_pending(
@@ -139,7 +200,15 @@ def google_start(
         google_verifier=verifier,
     )
     redirect = settings.mcp_issuer + settings.mcp_google_redirect_path
-    url = oidc.build_authorization_url(pending.state, nonce, challenge, redirect)
+    # No prompt=select_account: reuse existing Google Workspace browser session when present.
+    url = oidc.build_authorization_url(
+        pending.state,
+        nonce,
+        challenge,
+        redirect,
+        prompt=None,
+        login_hint=login_hint,
+    )
     return RedirectResponse(url, status_code=302)
 
 
@@ -186,6 +255,11 @@ def google_callback(
             pending.downstream_state,
             oauth.issuer,
         )
+    # Gate on active QKA + verified Google subject binding (never email-alone).
+    deny = assert_mcp_token_subject_active(session, bound.user_id)
+    if deny:
+        return _error_redirect(pending.redirect_uri, "access_denied", deny, pending.downstream_state, oauth.issuer)
+
     auth_code = oauth.create_authorization_code(
         client_id=pending.client_id,
         redirect_uri=pending.redirect_uri,
@@ -202,13 +276,18 @@ def google_callback(
             "iss": oauth.issuer,
         }
     )
-    return RedirectResponse(f"{pending.redirect_uri}?{query}", status_code=302)
+    redirect = RedirectResponse(f"{pending.redirect_uri}?{query}", status_code=302)
+    # Establish QKA session so a later ChatGPT Connect in the same browser skips Google.
+    set_session_cookie(redirect, settings, issue_session(settings, bound.user_id))
+    log.info("mcp.oauth.google_callback.ok user_id=%s", bound.user_id)
+    return redirect
 
 
 @router.post("/oauth/token")
 async def post_token(
     request: Request,
     oauth: McpOAuthService = Depends(get_mcp_oauth),
+    session: Session = Depends(get_session),
 ) -> Response:
     _require_enabled(oauth)
     form = dict(await request.form())
@@ -228,6 +307,9 @@ async def post_token(
             return JSONResponse({"error": "invalid_grant", "error_description": "PKCE verification failed"}, status_code=400)
         if resource and not oauth.is_resource_allowed(str(resource)):
             return JSONResponse({"error": "invalid_target"}, status_code=400)
+        deny = assert_mcp_token_subject_active(session, row.qka_user_id)
+        if deny:
+            return JSONResponse({"error": "invalid_grant", "error_description": deny}, status_code=400)
         include_refresh = "offline_access" in row.scope.split()
         access, refresh, expires = oauth.issue_tokens(
             client_id=client_id,
@@ -236,6 +318,8 @@ async def post_token(
             resource=str(resource) if resource else row.resource,
             include_refresh=include_refresh,
         )
+        record_mcp_connection(session, row.qka_user_id)
+        session.commit()
         body = {
             "access_token": access,
             "token_type": "Bearer",
@@ -252,9 +336,16 @@ async def post_token(
         resource = form.get("resource")
         row = oauth.consume_refresh_token(refresh_token)
         if row is None or row.client_id != client_id:
-            return JSONResponse({"error": "invalid_grant"}, status_code=400)
+            return JSONResponse(
+                {"error": "invalid_grant", "error_description": "Refresh token is invalid or revoked."},
+                status_code=400,
+            )
         if resource and not oauth.is_resource_allowed(str(resource)):
             return JSONResponse({"error": "invalid_target"}, status_code=400)
+        deny = assert_mcp_token_subject_active(session, row.qka_user_id)
+        if deny:
+            oauth.revoke_tokens_for_user(row.qka_user_id)
+            return JSONResponse({"error": "invalid_grant", "error_description": deny}, status_code=400)
         access, new_refresh, expires = oauth.issue_tokens(
             client_id=client_id,
             qka_user_id=row.qka_user_id,
@@ -262,6 +353,8 @@ async def post_token(
             resource=str(resource) if resource else row.resource,
             include_refresh=True,
         )
+        record_mcp_connection(session, row.qka_user_id)
+        session.commit()
         return JSONResponse(
             {
                 "access_token": access,
@@ -273,6 +366,24 @@ async def post_token(
             }
         )
     return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
+
+
+@router.post("/oauth/revoke")
+async def post_revoke(
+    request: Request,
+    oauth: McpOAuthService = Depends(get_mcp_oauth),
+) -> Response:
+    """RFC 7009 token revocation (refresh or access). Always returns 200 when OAuth is enabled."""
+    _require_enabled(oauth)
+    form = dict(await request.form())
+    token = str(form.get("token") or "")
+    hint = str(form.get("token_type_hint") or "").lower()
+    if token:
+        if hint == "access_token":
+            oauth.revoke_access_token(token) or oauth.revoke_refresh_token(token)
+        else:
+            oauth.revoke_refresh_token(token) or oauth.revoke_access_token(token)
+    return Response(status_code=200)
 
 
 class RegisterBody(BaseModel):
@@ -306,10 +417,18 @@ def userinfo(request: Request, oauth: McpOAuthService = Depends(get_mcp_oauth)) 
     _require_enabled(oauth)
     auth = request.headers.get("Authorization") or ""
     if not auth.lower().startswith("bearer "):
-        return JSONResponse({"error": "invalid_token"}, status_code=401)
+        return JSONResponse(
+            {"error": "invalid_token"},
+            status_code=401,
+            headers={"WWW-Authenticate": 'Bearer error="invalid_token"'},
+        )
     token = oauth.validate_access_token(auth[7:].strip())
     if token is None or not token.subject:
-        return JSONResponse({"error": "invalid_token"}, status_code=401)
+        return JSONResponse(
+            {"error": "invalid_token"},
+            status_code=401,
+            headers={"WWW-Authenticate": 'Bearer error="invalid_token"'},
+        )
     return JSONResponse({"sub": token.subject, "iss": oauth.issuer})
 
 

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from qka_shared.allowlist import evaluate_user, load_verified_emails
+from qka_shared.allowlist import USER_ACTIVE, evaluate_user, load_verified_emails
 from qka_shared.models import AllowedEmail, ChatAccess, QkaUser, SourceGrant, SourceGrantAudit
 from qka_shared.source_access import GrantStatus
 
@@ -41,8 +41,13 @@ def _chat_row_for_emails(session: Session, emails: set[str]) -> tuple[AllowedEma
 
 def resolve_channel_access(session: Session, user_id: uuid.UUID) -> ChannelAccess:
     user = session.get(QkaUser, user_id)
-    if user is not None and user.is_super_admin:
+    if user is None:
+        return ChannelAccess(False, "inactive")
+    if user.is_super_admin:
         return ChannelAccess(True, "super_admin", local_chat=True, mcp=True)
+    # Disabled / non-login QKA accounts must not keep MCP tool access (403-style deny, no re-login).
+    if user.status != USER_ACTIVE or not user.login_enabled:
+        return ChannelAccess(False, "inactive")
     login = evaluate_user(session, user_id)
     if not login.allowed:
         return ChannelAccess(False, login.reason)
@@ -88,6 +93,8 @@ def channel_deny_message(reason: str) -> str:
         return "Verified email is not available for this identity."
     if reason == "disabled":
         return "Access for this email is disabled."
+    if reason == "inactive":
+        return "The linked QKA account is not active."
     return "Access denied."
 
 

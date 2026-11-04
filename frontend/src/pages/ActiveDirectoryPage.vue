@@ -21,92 +21,112 @@
 
     <template v-if="session.user?.superAdmin">
       <q-card bordered class="q-mb-md">
-        <q-card-section>
-          <div class="text-subtitle1 q-mb-sm">{{ t("ad.connectionSettings") }}</div>
-          <div class="row q-col-gutter-md">
-            <div class="col-12 col-md-6">
-              <q-input v-model="form.domainDnsName" outlined dense :label="t('ad.domainDns')" :disable="!editing" hint="e.g. qehc.edu.sa" />
-            </div>
-            <div class="col-12 col-md-6">
-              <q-input
-                v-model="form.domainController"
-                outlined
-                dense
-                :label="t('ad.domainController')"
-                :disable="!editing"
-                :hint="t('ad.domainControllerHint')"
-              />
-            </div>
-            <div class="col-12 col-md-6">
-              <q-select
-                v-model="form.authMode"
-                outlined
-                dense
-                emit-value
-                map-options
-                :options="authModeOptions"
-                :label="t('ad.authMethod')"
-                :disable="!editing"
-                @update:model-value="onAuthModeChange"
-              />
-            </div>
-            <div class="col-12">
-              <div class="row items-center q-gutter-xs text-positive">
-                <q-icon name="verified_user" size="18px" />
-                <span class="text-body2">{{ isWindowsIntegrated ? t("ad.securityNoticeWindows") : t("ad.securityNotice") }}</span>
+        <q-expansion-item
+          v-model="connectionSettingsOpen"
+          expand-separator
+          header-class="text-subtitle1"
+          :label="t('ad.connectionSettings')"
+          :caption="connectionSettingsCaption"
+        >
+          <q-card-section>
+            <div class="row q-col-gutter-md">
+              <div class="col-12 col-md-6">
+                <q-input v-model="form.domainDnsName" outlined dense :label="t('ad.domainDns')" :disable="!editing" hint="e.g. qehc.edu.sa" />
+              </div>
+              <div class="col-12 col-md-6">
+                <q-input
+                  v-model="form.domainController"
+                  outlined
+                  dense
+                  :label="t('ad.domainController')"
+                  :disable="!editing"
+                  :hint="t('ad.domainControllerHint')"
+                />
+              </div>
+              <div class="col-12 col-md-6">
+                <q-select
+                  v-model="form.authMode"
+                  outlined
+                  dense
+                  emit-value
+                  map-options
+                  :options="authModeOptions"
+                  :label="t('ad.authMethod')"
+                  :disable="!editing"
+                  @update:model-value="onAuthModeChange"
+                />
+              </div>
+              <div class="col-12">
+                <div class="row items-center q-gutter-xs text-positive">
+                  <q-icon name="verified_user" size="18px" />
+                  <span class="text-body2">{{ isWindowsIntegrated ? t("ad.securityNoticeWindows") : t("ad.securityNotice") }}</span>
+                </div>
+              </div>
+              <div v-if="isWindowsIntegrated && serviceIdentityLabel" class="col-12">
+                <div class="text-caption text-grey-7">{{ t("ad.serviceIdentity") }}</div>
+                <div class="text-body2">{{ serviceIdentityLabel }}</div>
               </div>
             </div>
-            <div v-if="isWindowsIntegrated && serviceIdentityLabel" class="col-12">
-              <div class="text-caption text-grey-7">{{ t("ad.serviceIdentity") }}</div>
-              <div class="text-body2">{{ serviceIdentityLabel }}</div>
+          </q-card-section>
+          <q-card-section v-if="!isWindowsIntegrated">
+            <div class="text-subtitle1 q-mb-sm">{{ t("ad.credentials") }}</div>
+            <div class="row q-col-gutter-md">
+              <div class="col-12 col-md-6">
+                <q-input v-model="form.bindUsername" outlined dense :label="t('ad.bindUsername')" :disable="!editing" hint="DOMAIN\qka-reader or UPN" />
+              </div>
+              <div class="col-12 col-md-6">
+                <q-input
+                  v-model="form.bindPassword"
+                  outlined
+                  dense
+                  type="password"
+                  autocomplete="new-password"
+                  :label="t('ad.bindPassword')"
+                  :disable="!editing"
+                  :hint="connection?.bindSecretConfigured ? t('ad.passwordKeep') : t('ad.passwordRequired')"
+                />
+              </div>
+              <div class="col-12 col-md-3">
+                <q-input v-model.number="form.port" type="number" outlined dense :label="t('ad.port')" :disable="!editing" />
+              </div>
             </div>
-          </div>
-        </q-card-section>
-        <q-card-section v-if="!isWindowsIntegrated">
-          <div class="text-subtitle1 q-mb-sm">{{ t("ad.credentials") }}</div>
-          <div class="row q-col-gutter-md">
-            <div class="col-12 col-md-6">
-              <q-input v-model="form.bindUsername" outlined dense :label="t('ad.bindUsername')" :disable="!editing" hint="DOMAIN\qka-reader or UPN" />
-            </div>
-            <div class="col-12 col-md-6">
-              <q-input
-                v-model="form.bindPassword"
-                outlined
-                dense
-                type="password"
-                autocomplete="new-password"
-                :label="t('ad.bindPassword')"
-                :disable="!editing"
-                :hint="connection?.bindSecretConfigured ? t('ad.passwordKeep') : t('ad.passwordRequired')"
-              />
-            </div>
-            <div class="col-12 col-md-3">
-              <q-input v-model.number="form.port" type="number" outlined dense :label="t('ad.port')" :disable="!editing" />
-            </div>
-          </div>
-        </q-card-section>
-        <q-card-section>
-          <div class="text-subtitle1 q-mb-sm">{{ t("ad.diagnostics") }}</div>
-          <q-list bordered separator>
-            <q-item v-for="check in checks" :key="check.name">
-              <q-item-section>
-                <q-item-label>{{ checkLabel(check.name) }}</q-item-label>
-                <q-item-label v-if="check.detail" caption>{{ check.detail }}</q-item-label>
-              </q-item-section>
-              <q-item-section side>
-                <q-badge :color="checkColor(check.status)">{{ checkStatusLabel(check.status) }}</q-badge>
-              </q-item-section>
-            </q-item>
-          </q-list>
-          <div v-if="form.baseDn" class="text-caption text-grey-7 q-mt-sm">{{ t("ad.baseDn") }}: {{ form.baseDn }}</div>
-        </q-card-section>
-        <q-card-actions align="right" class="q-gutter-sm">
-          <q-btn v-if="!editing" outline color="primary" :label="t('ad.editConnection')" @click="editing = true" />
-          <q-btn outline color="primary" :loading="testing" :label="t('ad.testConnection')" @click="testConnection" />
-          <q-btn color="primary" unelevated :disable="!canSave" :loading="saving" :label="t('ad.saveConnection')" @click="saveConnection" />
-          <q-btn v-if="connection && connection.connectionStatus !== 3" flat color="warning" :label="t('ad.disable')" @click="disableConnection" />
-          <q-btn v-if="connection && connection.connectionStatus === 3" flat color="primary" :label="t('ad.enable')" @click="enableConnection" />
-        </q-card-actions>
+          </q-card-section>
+          <q-expansion-item
+            v-model="diagnosticsOpen"
+            expand-separator
+            header-class="text-subtitle1"
+            :label="t('ad.diagnostics')"
+            :caption="diagnosticsCaption"
+          >
+            <q-card-section>
+              <q-list bordered separator>
+                <q-item v-for="check in checks" :key="check.name">
+                  <q-item-section>
+                    <q-item-label>{{ checkLabel(check.name) }}</q-item-label>
+                    <q-item-label v-if="check.detail" caption>{{ check.detail }}</q-item-label>
+                  </q-item-section>
+                  <q-item-section side>
+                    <q-badge :color="checkColor(check.status)">{{ checkStatusLabel(check.status) }}</q-badge>
+                  </q-item-section>
+                </q-item>
+              </q-list>
+              <div v-if="form.baseDn" class="text-caption text-grey-7 q-mt-sm">{{ t("ad.baseDn") }}: {{ form.baseDn }}</div>
+            </q-card-section>
+          </q-expansion-item>
+          <q-card-actions align="right" class="q-gutter-sm">
+            <q-btn
+              v-if="!editing"
+              outline
+              color="primary"
+              :label="t('ad.editConnection')"
+              @click="editing = true; connectionSettingsOpen = true"
+            />
+            <q-btn outline color="primary" :loading="testing" :label="t('ad.testConnection')" @click="testConnection" />
+            <q-btn color="primary" unelevated :disable="!canSave" :loading="saving" :label="t('ad.saveConnection')" @click="saveConnection" />
+            <q-btn v-if="connection && connection.connectionStatus !== 3" flat color="warning" :label="t('ad.disable')" @click="disableConnection" />
+            <q-btn v-if="connection && connection.connectionStatus === 3" flat color="primary" :label="t('ad.enable')" @click="enableConnection" />
+          </q-card-actions>
+        </q-expansion-item>
       </q-card>
 
       <q-tabs v-model="tab" dense class="text-primary" active-color="primary" indicator-color="primary" align="left">
@@ -138,10 +158,26 @@
         <q-tab-panel name="users">
           <div class="row q-col-gutter-sm q-mb-md items-center">
             <div class="col-12 col-md-3">
-              <q-input v-model="userSearch" outlined dense clearable :label="t('ad.searchUsers')" @keyup.enter="loadUsers" />
+              <q-input
+                v-model="userSearch"
+                outlined
+                dense
+                clearable
+                :label="t('ad.searchUsers')"
+                @keydown.enter.prevent="reloadUsers"
+                @clear="reloadUsers"
+              />
             </div>
             <div class="col-6 col-md-2">
-              <q-input v-model="userDepartment" outlined dense clearable :label="t('ad.filterDepartment')" @keyup.enter="loadUsers" />
+              <q-input
+                v-model="userDepartment"
+                outlined
+                dense
+                clearable
+                :label="t('ad.filterDepartment')"
+                @keydown.enter.prevent="reloadUsers"
+                @clear="reloadUsers"
+              />
             </div>
             <div class="col-6 col-md-2">
               <q-select
@@ -153,7 +189,8 @@
                 map-options
                 :options="accountStatusOptions"
                 :label="t('ad.filterAccountStatus')"
-                @update:model-value="loadUsers"
+                @update:model-value="reloadUsers"
+                @clear="reloadUsers"
               />
             </div>
             <div class="col-6 col-md-2">
@@ -166,7 +203,8 @@
                 map-options
                 :options="eligibilityOptions"
                 :label="t('ad.filterEligibility')"
-                @update:model-value="loadUsers"
+                @update:model-value="reloadUsers"
+                @clear="reloadUsers"
               />
             </div>
             <div class="col-6 col-md-2">
@@ -179,31 +217,62 @@
                 map-options
                 :options="linkStatusOptions"
                 :label="t('ad.filterLinkStatus')"
-                @update:model-value="loadUsers"
+                @update:model-value="reloadUsers"
+                @clear="reloadUsers"
               />
             </div>
             <div class="col-auto">
-              <q-btn color="primary" unelevated :label="t('ad.search')" @click="loadUsers" />
+              <q-btn color="primary" unelevated :label="t('ad.search')" @click="reloadUsers" />
+            </div>
+            <div class="col-auto">
+              <q-btn
+                :outline="!showArchived"
+                :unelevated="showArchived"
+                color="grey-8"
+                :label="showArchived ? t('ad.showActiveUsers') : t('ad.showArchivedUsers')"
+                @click="toggleArchivedView"
+              />
             </div>
           </div>
           <div class="row q-gutter-sm q-mb-md items-center">
-            <q-btn
-              outline
-              color="primary"
-              :disable="!selectedUserIds.length || eligibilityBusy"
-              :loading="eligibilityBusy"
-              :label="t('ad.bulkEnableEligible')"
-              @click="confirmBulkEligibility(true)"
-            />
-            <q-btn
-              outline
-              color="negative"
-              :disable="!selectedUserIds.length || eligibilityBusy"
-              :loading="eligibilityBusy"
-              :label="t('ad.bulkDisableEligible')"
-              @click="confirmBulkEligibility(false)"
-            />
-            <span class="text-caption text-grey-7">{{ t("ad.eligibilityHint") }}</span>
+            <template v-if="!showArchived">
+              <q-btn
+                outline
+                color="primary"
+                :disable="!selectedUserIds.length || eligibilityBusy"
+                :loading="eligibilityBusy"
+                :label="t('ad.bulkEnableEligible')"
+                @click="confirmBulkEligibility(true)"
+              />
+              <q-btn
+                outline
+                color="negative"
+                :disable="!selectedUserIds.length || eligibilityBusy"
+                :loading="eligibilityBusy"
+                :label="t('ad.bulkDisableEligible')"
+                @click="confirmBulkEligibility(false)"
+              />
+              <q-btn
+                outline
+                color="grey-8"
+                :disable="!selectedUserIds.length || archiveBusy"
+                :loading="archiveBusy"
+                :label="t('ad.bulkArchive')"
+                @click="confirmBulkArchive(true)"
+              />
+              <span class="text-caption text-grey-7">{{ t("ad.eligibilityHint") }}</span>
+            </template>
+            <template v-else>
+              <q-btn
+                outline
+                color="primary"
+                :disable="!selectedUserIds.length || archiveBusy"
+                :loading="archiveBusy"
+                :label="t('ad.bulkRestoreArchive')"
+                @click="confirmBulkArchive(false)"
+              />
+              <span class="text-caption text-grey-7">{{ t("ad.archiveHint") }}</span>
+            </template>
           </div>
           <q-table
             flat
@@ -214,8 +283,10 @@
             :rows="users"
             :columns="userColumns"
             :loading="usersLoading"
-            hide-pagination
-            :rows-per-page-options="[0]"
+            v-model:pagination="userPagination"
+            :rows-per-page-options="[10, 25, 50]"
+            binary-state-sort
+            @request="onUsersRequest"
           >
             <template #body-cell-qkaEligible="props">
               <q-td :props="props">
@@ -317,11 +388,12 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import type { QTableColumn } from "quasar";
+import { useQuasar, type QTableColumn } from "quasar";
 import { api, type AdConnection, type AdOverview } from "@/api";
 import { useSessionStore } from "@/stores/session";
 
 const { t } = useI18n();
+const $q = useQuasar();
 const session = useSessionStore();
 const error = ref("");
 const info = ref("");
@@ -330,6 +402,8 @@ const testing = ref(false);
 const saving = ref(false);
 const syncing = ref(false);
 const tab = ref("overview");
+const connectionSettingsOpen = ref(true);
+const diagnosticsOpen = ref(false);
 const connection = ref<AdConnection | null>(null);
 const overview = ref<AdOverview | null>(null);
 const checks = ref<Array<{ name: string; status: string; detail?: string }>>([
@@ -353,6 +427,15 @@ const filterEligibility = ref<string | null>(null);
 const filterLinkStatus = ref<number | null>(null);
 const selectedUsers = ref<any[]>([]);
 const eligibilityBusy = ref(false);
+const archiveBusy = ref(false);
+const showArchived = ref(false);
+const userPagination = ref({
+  page: 1,
+  rowsPerPage: 10,
+  rowsNumber: 0,
+  sortBy: "displayName",
+  descending: false,
+});
 const groups = ref<any[]>([]);
 const ous = ref<Array<{ name: string; distinguishedName: string; selected: boolean }>>([]);
 const ouSearch = ref("");
@@ -384,6 +467,23 @@ const serviceIdentityLabel = computed(() => {
 });
 const connectionId = computed(() => connection.value?.id || null);
 const canSave = computed(() => editing.value && lastTestOk.value);
+const connectionSettingsCaption = computed(() => {
+  if (!connection.value) return t("ad.notConnected");
+  const parts = [statusLabel(connection.value.connectionStatus)];
+  if (connection.value.domainDnsName) parts.push(connection.value.domainDnsName);
+  return parts.join(" · ");
+});
+const diagnosticsCaption = computed(() => {
+  const total = checks.value.length;
+  if (!total) return t("ad.notTested");
+  const passed = checks.value.filter((c) => c.status === "pass").length;
+  const failed = checks.value.filter((c) => c.status === "failed").length;
+  const pending = checks.value.filter((c) => c.status !== "pass" && c.status !== "failed").length;
+  if (failed) return t("ad.diagnosticsFailedSummary", { failed, total });
+  if (pending === total) return t("ad.notTested");
+  if (passed === total) return t("ad.diagnosticsPassSummary", { passed, total });
+  return t("ad.diagnosticsMixedSummary", { passed, failed, total });
+});
 
 function onAuthModeChange(mode: string) {
   lastTestOk.value = false;
@@ -449,18 +549,19 @@ const linkStatusOptions = computed(() => [
 const selectedUserIds = computed(() => selectedUsers.value.map((row) => row.id));
 
 const userColumns = computed<QTableColumn[]>(() => [
-  { name: "displayName", label: t("ad.colFullName"), field: "displayName", align: "left" },
-  { name: "samAccountName", label: t("ad.colDomainUsername"), field: "samAccountName", align: "left" },
+  { name: "displayName", label: t("ad.colFullName"), field: "displayName", align: "left", sortable: true },
+  { name: "samAccountName", label: t("ad.colDomainUsername"), field: "samAccountName", align: "left", sortable: true },
   {
     name: "department",
     label: t("ad.colDepartment"),
     field: (row: any) => row.department || t("ad.departmentNotSet"),
     align: "left",
+    sortable: true,
   },
-  { name: "accountStatus", label: t("ad.colAccountStatus"), field: "accountStatus", align: "left" },
-  { name: "qkaEligible", label: t("ad.colEligibility"), field: "qkaEligible", align: "left" },
-  { name: "mappingLabel", label: t("ad.colIdentityStatus"), field: "mappingLabel", align: "left" },
-  { name: "actions", label: t("ad.colActions"), field: "id", align: "right" },
+  { name: "accountStatus", label: t("ad.colAccountStatus"), field: "accountStatus", align: "left", sortable: true },
+  { name: "qkaEligible", label: t("ad.colEligibility"), field: "qkaEligible", align: "left", sortable: true },
+  { name: "mappingLabel", label: t("ad.colIdentityStatus"), field: "mappingLabel", align: "left", sortable: true },
+  { name: "actions", label: t("ad.colActions"), field: "id", align: "right", sortable: false },
 ]);
 
 const groupColumns = computed<QTableColumn[]>(() => [
@@ -540,7 +641,10 @@ function accountStatusLabel(status: string) {
 
 function applyConnection(row: AdConnection | null) {
   connection.value = row;
-  if (!row) return;
+  if (!row) {
+    connectionSettingsOpen.value = true;
+    return;
+  }
   form.connectionName = row.connectionName;
   form.domainDnsName = row.domainDnsName;
   form.domainController = row.domainController;
@@ -552,6 +656,8 @@ function applyConnection(row: AdConnection | null) {
   form.timeoutSeconds = row.timeoutSeconds || 15;
   serviceIdentity.value = row.serviceIdentity || null;
   editing.value = row.connectionStatus !== 1;
+  // Collapse when already connected; keep open while configuring.
+  connectionSettingsOpen.value = row.connectionStatus !== 1;
 }
 
 async function refresh() {
@@ -588,6 +694,8 @@ async function testConnection() {
   testing.value = true;
   error.value = "";
   info.value = "";
+  diagnosticsOpen.value = true;
+  connectionSettingsOpen.value = true;
   try {
     const result = await api.adTestConnection(connectionBody() as any, connectionId.value || undefined);
     checks.value = result.checks;
@@ -636,8 +744,17 @@ async function enableConnection() {
   editing.value = true;
 }
 
-async function loadUsers() {
+async function loadUsers(opts?: {
+  page?: number;
+  rowsPerPage?: number;
+  sortBy?: string | null;
+  descending?: boolean;
+}) {
   if (!connectionId.value) return;
+  const page = opts?.page ?? userPagination.value.page;
+    const rowsPerPage = (opts?.rowsPerPage ?? userPagination.value.rowsPerPage) || 10;
+  const sortBy = (opts?.sortBy ?? userPagination.value.sortBy) || "displayName";
+  const descending = opts?.descending ?? !!userPagination.value.descending;
   usersLoading.value = true;
   try {
     const body = await api.adUsers(connectionId.value, {
@@ -646,20 +763,67 @@ async function loadUsers() {
       accountStatus: filterAccountStatus.value || undefined,
       eligibility: filterEligibility.value || undefined,
       mappingStatus: filterLinkStatus.value != null ? filterLinkStatus.value : undefined,
+      archived: showArchived.value,
+      sortBy,
+      sortDesc: descending,
+      page,
+      pageSize: rowsPerPage,
     });
     users.value = body.items;
+    // Mutate in place so Quasar does not re-emit @request from a replaced pagination object.
+    userPagination.value.rowsNumber = body.total;
+    userPagination.value.page = body.page;
+    userPagination.value.rowsPerPage = body.pageSize;
+    userPagination.value.sortBy = sortBy;
+    userPagination.value.descending = descending;
     selectedUsers.value = [];
   } finally {
     usersLoading.value = false;
   }
 }
 
+function reloadUsers() {
+  userPagination.value.page = 1;
+  void loadUsers({ page: 1 });
+}
+
+function toggleArchivedView() {
+  showArchived.value = !showArchived.value;
+  selectedUsers.value = [];
+  reloadUsers();
+}
+
+async function onUsersRequest(req: {
+  pagination: { page: number; rowsPerPage: number; sortBy?: string | null; descending?: boolean };
+}) {
+  const { page, rowsPerPage, sortBy, descending } = req.pagination;
+  await loadUsers({
+    page,
+    rowsPerPage: rowsPerPage || 10,
+    sortBy: sortBy || "displayName",
+    descending: !!descending,
+  });
+}
+
 async function confirmBulkEligibility(eligible: boolean) {
   if (!connectionId.value || !selectedUserIds.value.length) return;
-  const ok = window.confirm(
-    eligible ? t("ad.confirmEnableEligible") : t("ad.confirmDisableEligible"),
-  );
-  if (!ok) return;
+  $q.dialog({
+    title: eligible ? t("ad.bulkEnableEligible") : t("ad.bulkDisableEligible"),
+    message: eligible ? t("ad.confirmEnableEligible") : t("ad.confirmDisableEligible"),
+    cancel: { flat: true, label: t("ad.dialogCancel"), color: "primary" },
+    ok: {
+      unelevated: true,
+      label: eligible ? t("ad.dialogConfirmEnable") : t("ad.dialogConfirmDisable"),
+      color: eligible ? "primary" : "negative",
+    },
+    persistent: true,
+  }).onOk(() => {
+    void applyBulkEligibility(eligible);
+  });
+}
+
+async function applyBulkEligibility(eligible: boolean) {
+  if (!connectionId.value || !selectedUserIds.value.length) return;
   eligibilityBusy.value = true;
   error.value = "";
   info.value = "";
@@ -679,6 +843,47 @@ async function confirmBulkEligibility(eligible: boolean) {
     error.value = err instanceof Error ? err.message : t("ad.eligibilityFail");
   } finally {
     eligibilityBusy.value = false;
+  }
+}
+
+async function confirmBulkArchive(archived: boolean) {
+  if (!connectionId.value || !selectedUserIds.value.length) return;
+  $q.dialog({
+    title: archived ? t("ad.bulkArchive") : t("ad.bulkRestoreArchive"),
+    message: archived ? t("ad.confirmArchive") : t("ad.confirmRestoreArchive"),
+    cancel: { flat: true, label: t("ad.dialogCancel"), color: "primary" },
+    ok: {
+      unelevated: true,
+      label: archived ? t("ad.dialogConfirmArchive") : t("ad.dialogConfirmRestore"),
+      color: archived ? "grey-8" : "primary",
+    },
+    persistent: true,
+  }).onOk(() => {
+    void applyBulkArchive(archived);
+  });
+}
+
+async function applyBulkArchive(archived: boolean) {
+  if (!connectionId.value || !selectedUserIds.value.length) return;
+  archiveBusy.value = true;
+  error.value = "";
+  info.value = "";
+  try {
+    const result = await api.adSetArchived(connectionId.value, selectedUserIds.value, archived);
+    const skipped = result.skipped?.length || 0;
+    const errs = result.errors?.length || 0;
+    if (errs) {
+      error.value = t("ad.archiveError", { updated: result.updated, errors: errs });
+    } else if (skipped) {
+      info.value = t("ad.archivePartial", { updated: result.updated, skipped });
+    } else {
+      info.value = t("ad.archiveOk", { updated: result.updated });
+    }
+    await loadUsers();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : t("ad.archiveFail");
+  } finally {
+    archiveBusy.value = false;
   }
 }
 

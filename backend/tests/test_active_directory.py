@@ -1001,11 +1001,11 @@ def test_directory_users_partial_search(client):
         for i in domain_hit.json()["items"]
     )
 
-    # Department partial: Finance exact in fixture; "fin" should still match.
+    # Department partial: active fixture uses IT (Finance is on disabled orphan → archived list).
     by_dept = client.get(
-        f"/api/v1/admin/active-directory/connections/{cid}/users?department=fin&pageSize=50",
+        f"/api/v1/admin/active-directory/connections/{cid}/users?department=it&pageSize=50",
         headers=headers,
     )
     assert by_dept.status_code == 200, by_dept.text
     assert by_dept.json()["total"] >= 1
-    assert all("fin" in (i.get("department") or "").lower() for i in by_dept.json()["items"])
+    assert all("it" in (i.get("department") or "").lower() for i in by_dept.json()["items"])

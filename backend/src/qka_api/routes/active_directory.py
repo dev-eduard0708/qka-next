@@ -55,6 +55,13 @@ class EligibilityBody(BaseModel):
     eligible: bool = False
 
 
+class ArchiveBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    directoryUserIds: list[uuid.UUID] = Field(default_factory=list)
+    archived: bool = True
+
+
 class EnrollBody(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -308,6 +315,9 @@ def get_users(
     accountStatus: str | None = None,
     eligibility: str | None = None,
     department: str | None = None,
+    archived: bool = False,
+    sortBy: str = "displayName",
+    sortDesc: bool = False,
     page: int = Query(1, ge=1),
     pageSize: int = Query(50, ge=1, le=100),
     settings: Settings = Depends(get_settings_dep),
@@ -323,6 +333,9 @@ def get_users(
             account_status=accountStatus,
             eligibility=eligibility,
             department=department,
+            archived=archived,
+            sort_by=sortBy,
+            sort_desc=sortDesc,
             page=page,
             page_size=pageSize,
         )
@@ -347,6 +360,30 @@ def set_eligibility(
             connection_id,
             body.directoryUserIds,
             eligible=body.eligible,
+        )
+        session.commit()
+        return result
+    except svc.AdValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.post("/connections/{connection_id}/archive")
+def set_archived(
+    connection_id: uuid.UUID,
+    body: ArchiveBody,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    _guard_writes(settings)
+    try:
+        result = svc.set_archived(
+            session,
+            actor.id,
+            connection_id,
+            body.directoryUserIds,
+            archived=body.archived,
         )
         session.commit()
         return result

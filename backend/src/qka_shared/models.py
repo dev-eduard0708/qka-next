@@ -27,6 +27,12 @@ class QkaUser(Base):
     is_super_admin: Mapped[bool] = mapped_column("IsSuperAdmin", Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column("CreatedAt", DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column("UpdatedAt", DateTime(timezone=True))
+    # First successful MCP OAuth token issue for this user (ChatGPT connector).
+    mcp_connected_at: Mapped[datetime | None] = mapped_column("McpConnectedAt", DateTime(timezone=True), nullable=True)
+    # Last successful MCP tool activity for this user.
+    mcp_last_activity_at: Mapped[datetime | None] = mapped_column(
+        "McpLastActivityAt", DateTime(timezone=True), nullable=True
+    )
 
     identities: Mapped[list[ExternalIdentity]] = relationship(back_populates="user")
     memberships: Mapped[list[DepartmentMembership]] = relationship(back_populates="user")

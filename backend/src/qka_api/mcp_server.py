@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session, selectinload
 from qka_api.mcp_oauth import McpOAuthService, QkaTokenVerifier
 from qka_api.services import documents as docs
 from qka_api.services import mcp_capabilities as caps
+from qka_api.services.mcp_session import record_mcp_activity
 from qka_shared.allowlist import evaluate_user
 from qka_shared.chat_access import channel_deny_message, require_mcp_chat
 from qka_shared.config import Settings
@@ -129,10 +130,13 @@ def create_mcp_server(
             channel = require_mcp_chat(session, caller)
             if not channel.allowed:
                 msg = channel_deny_message(channel.reason)
-                _audit(session, tool="search", user_id=caller, succeeded=False, error_category="mcp_channel_denied", detail=msg)
+                category = "permission_denied" if channel.reason in {"mcp_disabled", "inactive", "disabled"} else "mcp_channel_denied"
+                _audit(session, tool="search", user_id=caller, succeeded=False, error_category=category, detail=msg)
                 session.commit()
-                return json.dumps({"results": [], "error": msg})
+                return json.dumps({"results": [], "error": msg, "code": 403 if category == "permission_denied" else "denied"})
             hits, error = docs.search_documents(session, cfg, caller, query)
+            if error is None:
+                record_mcp_activity(session, caller)
             _audit(
                 session,
                 tool="search",
@@ -195,16 +199,21 @@ def create_mcp_server(
                 channel = require_mcp_chat(session, caller)
                 if not channel.allowed:
                     msg = channel_deny_message(channel.reason)
+                    category = (
+                        "permission_denied"
+                        if channel.reason in {"mcp_disabled", "inactive", "disabled"}
+                        else "mcp_channel_denied"
+                    )
                     _audit(
                         session,
                         tool="fetch",
                         user_id=caller,
                         succeeded=False,
-                        error_category="mcp_channel_denied",
+                        error_category=category,
                         detail=msg,
                     )
                     session.commit()
-                    return json.dumps({"id": id, "denied": True, "text": None, "error": msg})
+                    return json.dumps({"id": id, "denied": True, "text": None, "error": msg, "code": 403})
                 try:
                     start = max(0, int(offset or 0))
                 except (TypeError, ValueError):
@@ -222,6 +231,8 @@ def create_mcp_server(
                     chunk_index=chunk_idx,
                 )
                 denied = bool(result.get("denied"))
+                if not denied:
+                    record_mcp_activity(session, caller)
                 _audit(
                     session,
                     tool="fetch",
@@ -333,9 +344,10 @@ def create_mcp_server(
             channel = require_mcp_chat(session, caller)
             if not channel.allowed:
                 msg = channel_deny_message(channel.reason)
-                _audit(session, tool="get_profile", user_id=caller, succeeded=False, error_category="mcp_channel_denied")
+                category = "permission_denied" if channel.reason in {"mcp_disabled", "inactive", "disabled"} else "mcp_channel_denied"
+                _audit(session, tool="get_profile", user_id=caller, succeeded=False, error_category=category)
                 session.commit()
-                return json.dumps({"denied": True, "error": msg})
+                return json.dumps({"denied": True, "error": msg, "code": 403})
             user = session.execute(
                 select(QkaUser)
                 .options(selectinload(QkaUser.identities).selectinload(ExternalIdentity.google))
@@ -346,6 +358,7 @@ def create_mcp_server(
                 if identity.primary_email:
                     email = identity.primary_email
                     break
+            record_mcp_activity(session, caller)
             _audit(session, tool="get_profile", user_id=caller, succeeded=True, error_category=None)
             session.commit()
             return json.dumps(
@@ -364,7 +377,8 @@ def create_mcp_server(
         channel = require_mcp_chat(session, caller)
         if not channel.allowed:
             msg = channel_deny_message(channel.reason)
-            _audit(session, tool=tool, user_id=caller, succeeded=False, error_category="mcp_channel_denied", detail=msg)
+            category = "permission_denied" if channel.reason in {"mcp_disabled", "inactive", "disabled"} else "mcp_channel_denied"
+            _audit(session, tool=tool, user_id=caller, succeeded=False, error_category=category, detail=msg)
             return msg
         return None
 

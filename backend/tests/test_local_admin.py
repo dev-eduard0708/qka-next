@@ -28,20 +28,24 @@ def test_super_admin_password_login_and_allowlist(client) -> None:
     before = {row["email"] for row in listed.json()}
 
     created = client.post(
-        "/api/v1/access/emails",
-        json={"email": "new.person@qehc.edu.sa"},
+        "/api/v1/access/users",
+        json={
+            "email": "new.person@qehc.edu.sa",
+            "displayName": "New Person",
+            "department": "Operations",
+        },
         headers=_csrf(client),
     )
     assert created.status_code == 200, created.text
-    assert created.json()["email"] == "new.person@qehc.edu.sa"
-    assert created.json()["enabled"] is True
+    assert created.json()["primaryEmail"] == "new.person@qehc.edu.sa"
+    allowlist_id = created.json()["allowlistId"]
     after = client.get("/api/v1/access/emails")
     emails = {row["email"] for row in after.json()}
     assert "new.person@qehc.edu.sa" in emails
     assert before.issubset(emails)
 
     disabled = client.post(
-        f"/api/v1/access/emails/{created.json()['id']}/enabled",
+        f"/api/v1/access/emails/{allowlist_id}/enabled",
         json={"enabled": False},
         headers=_csrf(client),
     )
@@ -49,7 +53,7 @@ def test_super_admin_password_login_and_allowlist(client) -> None:
     assert disabled.json()["enabled"] is False
 
     removed = client.post(
-        f"/api/v1/access/emails/{created.json()['id']}/remove",
+        f"/api/v1/access/emails/{allowlist_id}/remove",
         headers=_csrf(client),
     )
     assert removed.status_code == 200
@@ -71,8 +75,12 @@ def test_allowlist_rejects_other_domains(client) -> None:
     login = client.post("/api/v1/auth/login", json={"username": "super", "password": "123"})
     assert login.status_code == 200
     response = client.post(
-        "/api/v1/access/emails",
-        json={"email": "someone@gmail.com"},
+        "/api/v1/access/users",
+        json={
+            "email": "someone@gmail.com",
+            "displayName": "Someone",
+            "department": "Operations",
+        },
         headers=_csrf(client),
     )
     assert response.status_code == 400

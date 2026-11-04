@@ -792,8 +792,12 @@ async function loadDepartments() {
   try {
     const page = await api.listDepartments();
     departmentOptions.value = page.items.map((i) => ({ label: i.label, value: i.value }));
-  } catch {
+    if (!departmentOptions.value.length) {
+      usersError.value = t("access.departmentsEmpty");
+    }
+  } catch (err) {
     departmentOptions.value = [];
+    usersError.value = err instanceof Error ? err.message : t("access.departmentsLoadError");
   } finally {
     departmentsLoading.value = false;
   }

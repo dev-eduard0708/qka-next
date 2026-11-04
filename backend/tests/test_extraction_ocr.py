@@ -350,6 +350,15 @@ def test_mcp_chunk_retrieval_and_auth(client) -> None:
         assert denied.get("text") in (None, "")
 
 
+def test_extract_strips_nul_bytes_for_postgres() -> None:
+    """Binary / mis-decoded text with NULs must not reach PostgreSQL text columns."""
+    result = extract_document("txt", b"Hello\x00World\x00", max_chars=20_000)
+    assert result.status == EXTRACT_SUCCEEDED
+    assert "\x00" not in result.text
+    assert "Hello" in result.text and "World" in result.text
+    assert "\x00" not in result.chunks_json()
+
+
 def test_view_does_not_grant_download(client) -> None:
     """VIEW authorization for fetch must not imply DOWNLOAD."""
     cookies = auth_cookies(ALLOWED_USER)

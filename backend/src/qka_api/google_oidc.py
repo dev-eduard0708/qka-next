@@ -42,7 +42,16 @@ class GoogleOidcService:
     def hosted_domain(self) -> str:
         return (self.settings.google_hosted_domain or "qehc.edu.sa").strip() or "qehc.edu.sa"
 
-    def build_authorization_url(self, state: str, nonce: str, code_challenge: str, redirect_uri: str) -> str:
+    def build_authorization_url(
+        self,
+        state: str,
+        nonce: str,
+        code_challenge: str,
+        redirect_uri: str,
+        *,
+        prompt: str | None = "select_account",
+        login_hint: str | None = None,
+    ) -> str:
         if not self.is_configured():
             raise GoogleOidcError("Google Workspace sign-in is not configured.")
         query = {
@@ -55,8 +64,12 @@ class GoogleOidcService:
             "hd": self.hosted_domain(),
             "code_challenge": code_challenge,
             "code_challenge_method": "S256",
-            "prompt": "select_account",
         }
+        # Omit prompt for MCP seamless reuse of an existing Google browser session.
+        if prompt:
+            query["prompt"] = prompt
+        if login_hint and login_hint.strip():
+            query["login_hint"] = login_hint.strip()
         return f"{self._authorization_endpoint()}?{urlencode(query)}"
 
     def redeem(self, code: str, expected_nonce: str, code_verifier: str, redirect_uri: str) -> GoogleOidcIdentity:
