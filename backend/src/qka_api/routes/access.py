@@ -168,7 +168,7 @@ def list_directory_users(
     identityStatus: str | None = None,
     chatgptMembership: str | None = None,
     page: int = Query(default=1, ge=1),
-    pageSize: int = Query(default=25, ge=1, le=100),
+    pageSize: int = Query(default=25, ge=1, le=200),
     settings: Settings = Depends(get_settings_dep),
     session: Session = Depends(get_session),
 ) -> dict:
