@@ -231,14 +231,22 @@ def test_connection_payload(
         raise AdValidationError("Bind username is required for LDAPS.")
     succeeded, safe_error, checks, discovered = gateway.diagnose(params)
     identity = current_windows_identity() if params.auth_mode == AUTH_WINDOWS_INTEGRATED else None
+    check_map = {c.name: c.status for c in checks}
+    # Only true when negotiation actually succeeded — never imply PASS after Kerberos failure.
+    signing_ok = check_map.get("signing") == "pass" or (
+        params.auth_mode == AUTH_LDAPS and check_map.get("tls") == "pass"
+    )
+    sealing_ok = check_map.get("sealing") == "pass" or (
+        params.auth_mode == AUTH_LDAPS and check_map.get("tls") == "pass"
+    )
     payload = {
         "succeeded": succeeded,
         "safeError": safe_error,
         "discoveredBaseDn": discovered or None,
         "authMode": params.auth_mode,
         "serviceIdentity": identity,
-        "ldapSigning": params.auth_mode == AUTH_WINDOWS_INTEGRATED,
-        "ldapSealing": params.auth_mode == AUTH_WINDOWS_INTEGRATED,
+        "ldapSigning": bool(signing_ok),
+        "ldapSealing": bool(sealing_ok),
         "checks": [{"name": c.name, "status": c.status, "detail": c.detail} for c in checks],
     }
     if persist_on_row and existing is not None:

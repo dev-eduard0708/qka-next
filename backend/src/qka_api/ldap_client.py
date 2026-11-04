@@ -15,6 +15,7 @@ import os
 import re
 import socket
 import ssl
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -30,11 +31,42 @@ _WINDOWS_ADSI_FLAGS = (
     ADS_SECURE_AUTHENTICATION | ADS_USE_SIGNING | ADS_USE_SEALING | ADS_SERVER_BIND
 )
 
+# FastAPI runs sync routes on worker threads. ADSI/COM requires per-thread CoInitialize.
+_thread_com = threading.local()
+
 
 class LdapError(Exception):
     def __init__(self, message: str, *, diagnostics: list[str] | None = None):
         super().__init__(message)
         self.diagnostics = diagnostics or []
+
+
+def ensure_windows_com() -> str:
+    """Initialize COM on the current thread for ADSI/ADO (idempotent per thread).
+
+    Returns the apartment mode used: 'mta', 'sta', 'already', or 'n/a'.
+    """
+    if os.name != "nt":
+        return "n/a"
+    status = getattr(_thread_com, "status", None)
+    if status:
+        return status
+    try:
+        import pythoncom
+    except ImportError as exc:
+        raise LdapError("pywin32/pythoncom is required for Windows Integrated LDAP.") from exc
+    try:
+        # Worker threads (uvicorn/FastAPI threadpool) should use MTA.
+        pythoncom.CoInitializeEx(pythoncom.COINIT_MULTITHREADED)
+        _thread_com.status = "mta"
+    except Exception:
+        try:
+            pythoncom.CoInitialize()
+            _thread_com.status = "sta"
+        except Exception:
+            # Already initialized on this thread with a compatible mode.
+            _thread_com.status = "already"
+    return _thread_com.status
 
 
 @dataclass
@@ -233,18 +265,44 @@ def _ado_scalar(value: Any) -> Any:
     return value
 
 
+def _com_hresult(exc: BaseException) -> str | None:
+    hr = getattr(exc, "hresult", None)
+    if isinstance(hr, int):
+        return f"0x{hr & 0xFFFFFFFF:08X}"
+    args = getattr(exc, "args", ())
+    if args and isinstance(args[0], int):
+        return f"0x{args[0] & 0xFFFFFFFF:08X}"
+    if args and isinstance(args[0], tuple) and args[0] and isinstance(args[0][0], int):
+        return f"0x{args[0][0] & 0xFFFFFFFF:08X}"
+    return None
+
+
 def _safe_kerberos_error(exc: BaseException) -> str:
+    """Sanitized Kerberos/COM failure for UI — never includes secrets/tokens."""
+    hr = _com_hresult(exc)
     text = str(exc)
     lowered = text.lower()
-    if "logon failure" in lowered or "unspecified error" in lowered and "8009030c" in lowered:
-        return "Kerberos/SSPI authentication failed for the Windows service identity."
-    if "access is denied" in lowered:
-        return "Access denied — the Windows service identity lacks directory read permission."
+    # MK_E_SYNTAX — typically COM not initialized on this thread (FastAPI worker).
+    if hr == "0x800401E4" or "invalid syntax" in lowered:
+        suffix = f" ({hr})" if hr else ""
+        return (
+            "Kerberos/SSPI bind failed because the Windows COM/ADSI context was not "
+            f"initialized on the API request thread{suffix}."
+        )
+    if "logon failure" in lowered or "8009030c" in lowered:
+        suffix = f" ({hr})" if hr else ""
+        return f"Kerberos/SSPI authentication failed for the Windows service identity{suffix}."
+    if "access is denied" in lowered or hr == "0x80070005":
+        suffix = f" ({hr})" if hr else ""
+        return f"Access denied — the Windows service identity lacks directory read permission{suffix}."
     if "server is not operational" in lowered or "can't contact" in lowered:
-        return "Directory server is not reachable for Windows-integrated LDAP."
+        suffix = f" ({hr})" if hr else ""
+        return f"Directory server is not reachable for Windows-integrated LDAP{suffix}."
     if "gssapi" in lowered or "kerberos" in lowered or "sspi" in lowered:
-        return "Kerberos/SSPI authentication failed."
-    return "Windows-integrated LDAP authentication failed."
+        suffix = f" ({hr})" if hr else ""
+        return f"Kerberos/SSPI authentication failed{suffix}."
+    suffix = f" ({hr})" if hr else ""
+    return f"Windows-integrated LDAP authentication failed{suffix}."
 
 
 class RealLdapGateway:
@@ -310,14 +368,10 @@ class RealLdapGateway:
             checks[1].detail = f"TCP {port} is not reachable."
             return False, checks[1].detail, checks, ""
 
-        # Signing + sealing are required flags on every Windows ADSI/ADO bind.
-        checks[4].status = "pass"
-        checks[4].detail = "LDAP signing required (ADS_USE_SIGNING)."
-        checks[5].status = "pass"
-        checks[5].detail = "LDAP sealing required (ADS_USE_SEALING)."
-
+        # Signing/sealing stay not_tested until Kerberos/SSPI bind actually succeeds.
         discovered = (params.base_dn or "").strip()
         try:
+            com_mode = ensure_windows_com()
             import win32com.client
 
             dso = win32com.client.GetObject("LDAP:")
@@ -325,7 +379,14 @@ class RealLdapGateway:
             discovered = str(root.Get("defaultNamingContext") or discovered or "")
             dc_host = str(root.Get("dnsHostName") or host)
             checks[3].status = "pass"
-            checks[3].detail = f"Kerberos/SSPI bind succeeded as {display} → {dc_host}"
+            checks[3].detail = (
+                f"Kerberos/SSPI bind succeeded as {display} → {dc_host} (COM {com_mode})"
+            )
+            # Only after a successful signed+sealed OpenDSObject bind.
+            checks[4].status = "pass"
+            checks[4].detail = "LDAP signing negotiated (ADS_USE_SIGNING)."
+            checks[5].status = "pass"
+            checks[5].detail = "LDAP sealing negotiated (ADS_USE_SEALING)."
             checks[6].status = "pass"
             checks[6].detail = f"Base DN: {discovered or '(empty)'}"
             if not discovered:
@@ -333,11 +394,16 @@ class RealLdapGateway:
                 checks[6].detail = "RootDSE did not return a naming context."
                 return False, checks[6].detail, checks, ""
         except Exception as exc:
+            safe = _safe_kerberos_error(exc)
             checks[3].status = "failed"
-            checks[3].detail = _safe_kerberos_error(exc)
+            checks[3].detail = safe
+            checks[4].status = "failed"
+            checks[4].detail = "LDAP signing not negotiated — authentication did not succeed."
+            checks[5].status = "failed"
+            checks[5].detail = "LDAP sealing not negotiated — authentication did not succeed."
             checks[6].status = "failed"
             checks[6].detail = "RootDSE discovery failed."
-            return False, checks[3].detail, checks, ""
+            return False, safe, checks, ""
 
         try:
             rows = self._ado_search(
@@ -492,6 +558,7 @@ class RealLdapGateway:
     def _ado_connection(self):
         if os.name != "nt":
             raise LdapError("Windows Integrated LDAP requires Windows.")
+        ensure_windows_com()
         import win32com.client
 
         conn = win32com.client.Dispatch("ADODB.Connection")
@@ -547,6 +614,7 @@ class RealLdapGateway:
         if not base:
             # Prefer live RootDSE with signing/sealing.
             try:
+                ensure_windows_com()
                 import win32com.client
 
                 dso = win32com.client.GetObject("LDAP:")

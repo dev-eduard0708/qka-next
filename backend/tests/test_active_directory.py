@@ -105,9 +105,10 @@ def test_windows_integrated_test_and_save(client):
     assert failed.status_code == 200, failed.text
     assert failed.json()["succeeded"] is False
     assert failed.json()["authMode"] == "windows_integrated"
-    assert failed.json()["ldapSigning"] is True
-    assert failed.json()["ldapSealing"] is True
     assert any(c["name"] == "kerberos" and c["status"] == "failed" for c in failed.json()["checks"])
+    # Signing/sealing must not claim negotiation success when Kerberos failed.
+    assert any(c["name"] == "signing" and c["status"] == "failed" for c in failed.json()["checks"])
+    assert any(c["name"] == "sealing" and c["status"] == "failed" for c in failed.json()["checks"])
 
     gateway.fail_kerberos = False
     ad._TEST_RATE.clear()
