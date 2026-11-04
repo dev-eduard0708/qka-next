@@ -247,4 +247,12 @@ class FakeLdapGateway:
         rows = list(self.computers)
         if not include_servers:
             rows = [c for c in rows if not c.is_server_or_dc]
+        if ou_dns:
+            scopes = [o.strip().lower() for o in ou_dns if o and o.strip()]
+            filtered = []
+            for c in rows:
+                dn = (c.distinguished_name or "").lower()
+                if any(dn == scope or dn.endswith("," + scope) for scope in scopes):
+                    filtered.append(c)
+            rows = filtered
         return rows[:limit]

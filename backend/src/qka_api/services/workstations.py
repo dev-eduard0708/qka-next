@@ -489,6 +489,19 @@ def sync_workstations(
     }
 
 
+def _saved_sync_ou_dns(session: Session, connection_id: uuid.UUID | None = None) -> list[str]:
+    q = select(AdWorkstationOuScope).where(AdWorkstationOuScope.selected.is_(True))
+    if connection_id is not None:
+        q = q.where(AdWorkstationOuScope.connection_id == connection_id)
+    else:
+        try:
+            conn = _active_connection(session)
+            q = q.where(AdWorkstationOuScope.connection_id == conn.id)
+        except WorkstationValidationError:
+            return []
+    return [r.distinguished_name for r in session.execute(q).scalars().all() if r.distinguished_name]
+
+
 def list_workstations(
     session: Session,
     *,
@@ -500,6 +513,7 @@ def list_workstations(
     assigned: str = "",
     include_missing: bool = False,
     include_servers: bool = False,
+    scope_only: bool = True,
     sort: str = "computerName",
     sort_dir: str = "asc",
     page: int = 1,
@@ -545,6 +559,9 @@ def list_workstations(
 
     # Agent status filter requires post-filter (join desktop devices)
     rows = list(session.execute(q).scalars().all())
+    active_sync_ous = _saved_sync_ou_dns(session)
+    if scope_only and active_sync_ous:
+        rows = [ws for ws in rows if _dn_in_scopes(ws.distinguished_name, active_sync_ous)]
     if agent_status:
         filtered: list[AdWorkstation] = []
         for ws in rows:
@@ -583,70 +600,16 @@ def list_workstations(
     page_rows = rows[start : start + page_size]
     items = [workstation_dto(session, ws) for ws in page_rows]
 
-    present_q = select(func.count()).select_from(AdWorkstation).where(
-        AdWorkstation.is_present.is_(True), AdWorkstation.is_server_or_dc.is_(False)
-    )
+    # Summary + OU filter options match the same scoped row set shown in the table.
     summary = {
-        "totalPresent": int(session.execute(present_q).scalar_one()),
-        "assigned": int(
-            session.execute(
-                select(func.count()).select_from(AdWorkstation).where(
-                    AdWorkstation.is_present.is_(True),
-                    AdWorkstation.is_server_or_dc.is_(False),
-                    AdWorkstation.assigned_qka_user_id.is_not(None),
-                )
-            ).scalar_one()
-        ),
-        "reachable": int(
-            session.execute(
-                select(func.count()).select_from(AdWorkstation).where(
-                    AdWorkstation.is_present.is_(True),
-                    AdWorkstation.is_server_or_dc.is_(False),
-                    AdWorkstation.reachability_status == REACH_REACHABLE,
-                )
-            ).scalar_one()
-        ),
-        "noReply": int(
-            session.execute(
-                select(func.count()).select_from(AdWorkstation).where(
-                    AdWorkstation.is_present.is_(True),
-                    AdWorkstation.is_server_or_dc.is_(False),
-                    AdWorkstation.reachability_status == REACH_NO_REPLY,
-                )
-            ).scalar_one()
-        ),
-        "dnsFailed": int(
-            session.execute(
-                select(func.count()).select_from(AdWorkstation).where(
-                    AdWorkstation.is_present.is_(True),
-                    AdWorkstation.is_server_or_dc.is_(False),
-                    AdWorkstation.reachability_status == REACH_DNS_FAILED,
-                )
-            ).scalar_one()
-        ),
-        "unchecked": int(
-            session.execute(
-                select(func.count()).select_from(AdWorkstation).where(
-                    AdWorkstation.is_present.is_(True),
-                    AdWorkstation.is_server_or_dc.is_(False),
-                    AdWorkstation.reachability_status == REACH_UNCHECKED,
-                )
-            ).scalar_one()
-        ),
+        "totalPresent": len(rows),
+        "assigned": sum(1 for ws in rows if ws.assigned_qka_user_id is not None),
+        "reachable": sum(1 for ws in rows if ws.reachability_status == REACH_REACHABLE),
+        "noReply": sum(1 for ws in rows if ws.reachability_status == REACH_NO_REPLY),
+        "dnsFailed": sum(1 for ws in rows if ws.reachability_status == REACH_DNS_FAILED),
+        "unchecked": sum(1 for ws in rows if ws.reachability_status == REACH_UNCHECKED),
     }
-    ous = [
-        r[0]
-        for r in session.execute(
-            select(AdWorkstation.ou_path)
-            .where(
-                AdWorkstation.is_present.is_(True),
-                AdWorkstation.is_server_or_dc.is_(False),
-                AdWorkstation.ou_path != "",
-            )
-            .distinct()
-            .order_by(AdWorkstation.ou_path)
-        ).all()
-    ]
+    ous = sorted({(ws.ou_path or "") for ws in rows if ws.ou_path})
     return {
         "items": items,
         "total": total,
@@ -654,6 +617,11 @@ def list_workstations(
         "pageSize": page_size,
         "summary": summary,
         "ous": ous,
+        "scopeOnly": bool(scope_only and active_sync_ous),
+        "activeSyncOus": [
+            {"name": dn.split(",")[0].removeprefix("OU=").removeprefix("ou="), "distinguishedName": dn}
+            for dn in active_sync_ous
+        ],
     }
 
 

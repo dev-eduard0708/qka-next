@@ -80,6 +80,59 @@ def test_sync_requires_ou_selection(client):
     assert "Organizational Unit" in denied.json()["detail"]
 
 
+def test_list_defaults_to_selected_sync_ou_scope(client):
+    gateway, _probe = _install(client)
+    headers = _admin(client)
+    conn_id = _ensure_ad_connection(client, headers)
+    # Seed a computer outside Workstations OU to prove scope filtering.
+    from qka_api.ldap_client import AdComputerRecord
+
+    gateway.computers.append(
+        AdComputerRecord(
+            object_guid="c5555555-5555-5555-5555-555555555555",
+            object_sid="S-1-5-21-1-2-3-3005",
+            computer_name="HO-PC01",
+            dns_hostname="ho-pc01.qehc.edu.sa",
+            distinguished_name="CN=HO-PC01,OU=HO,OU=QEHC,DC=qehc,DC=edu,DC=sa",
+            operating_system="Windows 11 Pro",
+            account_enabled=True,
+            is_server_or_dc=False,
+        )
+    )
+    ws_ou = "OU=Workstations,DC=qehc,DC=edu,DC=sa"
+    ho_ou = "OU=HO,OU=QEHC,DC=qehc,DC=edu,DC=sa"
+    # First sync workstations OU (creates PILOT-PC etc.)
+    assert (
+        client.post(
+            "/api/v1/admin/workstations/sync",
+            headers=headers,
+            json={"connectionId": conn_id, "ouDns": [ws_ou]},
+        ).status_code
+        == 200
+    )
+    # Then sync HO only — table with scopeOnly should show only HO.
+    assert (
+        client.post(
+            "/api/v1/admin/workstations/sync",
+            headers=headers,
+            json={"connectionId": conn_id, "ouDns": [ho_ou]},
+        ).status_code
+        == 200
+    )
+    scoped = client.get("/api/v1/admin/workstations?scopeOnly=true", headers=headers)
+    assert scoped.status_code == 200, scoped.text
+    names = {i["computerName"] for i in scoped.json()["items"]}
+    assert names == {"HO-PC01"}
+    assert scoped.json()["summary"]["totalPresent"] == 1
+    assert any(o["distinguishedName"] == ho_ou for o in scoped.json()["activeSyncOus"])
+
+    all_rows = client.get("/api/v1/admin/workstations?scopeOnly=false", headers=headers)
+    assert all_rows.status_code == 200
+    all_names = {i["computerName"] for i in all_rows.json()["items"]}
+    assert "HO-PC01" in all_names
+    assert "PILOT-PC" in all_names
+
+
 def test_sync_ou_options_supports_nested_browse(client):
     _install(client)
     headers = _admin(client)

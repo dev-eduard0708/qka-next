@@ -129,6 +129,8 @@ export type WorkstationsPage = {
     unchecked: number;
   };
   ous: string[];
+  scopeOnly?: boolean;
+  activeSyncOus?: Array<{ name: string; distinguishedName: string }>;
 };
 
 export type DirectoryUsersPage = {
@@ -589,6 +591,7 @@ export const api = {
     assigned?: string;
     includeMissing?: boolean;
     includeServers?: boolean;
+    scopeOnly?: boolean;
     sort?: string;
     sortDir?: string;
     page?: number;
@@ -603,6 +606,8 @@ export const api = {
     if (params?.assigned) q.set("assigned", params.assigned);
     if (params?.includeMissing) q.set("includeMissing", "true");
     if (params?.includeServers) q.set("includeServers", "true");
+    if (params?.scopeOnly === false) q.set("scopeOnly", "false");
+    if (params?.scopeOnly === true) q.set("scopeOnly", "true");
     if (params?.sort) q.set("sort", params.sort);
     if (params?.sortDir) q.set("sortDir", params.sortDir);
     if (params?.page) q.set("page", String(params.page));

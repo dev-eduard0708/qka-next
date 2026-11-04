@@ -19,6 +19,14 @@
 
     <q-banner v-if="error" class="bg-negative text-white q-mb-md">{{ error }}</q-banner>
     <q-banner v-if="syncNote" class="bg-grey-2 q-mb-md">{{ syncNote }}</q-banner>
+    <q-banner v-if="scopeBanner" class="bg-blue-1 q-mb-md">
+      <div class="row items-center">
+        <div class="col">{{ scopeBanner }}</div>
+        <div class="col-auto">
+          <q-toggle v-model="scopeOnly" dense :label="t('workstations.scopeOnlyToggle')" @update:model-value="onScopeToggle" />
+        </div>
+      </div>
+    </q-banner>
 
     <div class="row q-col-gutter-md q-mb-md">
       <div class="col-6 col-sm-4 col-md-2" v-for="card in summaryCards" :key="card.label">
@@ -270,6 +278,8 @@ const selectedRows = ref<Workstation[]>([]);
 const total = ref(0);
 const summary = ref({ totalPresent: 0, assigned: 0, reachable: 0, noReply: 0, dnsFailed: 0, unchecked: 0 });
 const ous = ref<string[]>([]);
+const activeSyncOus = ref<Array<{ name: string; distinguishedName: string }>>([]);
+const scopeOnly = ref(true);
 const search = ref("");
 const ou = ref<string | null>(null);
 const reachability = ref<string | null>(null);
@@ -357,6 +367,11 @@ const summaryCards = computed(() => [
   { label: t("workstations.statDnsFailed"), value: summary.value.dnsFailed },
   { label: t("workstations.statUnchecked"), value: summary.value.unchecked },
 ]);
+const scopeBanner = computed(() => {
+  if (!scopeOnly.value || !activeSyncOus.value.length) return "";
+  const names = activeSyncOus.value.map((o) => o.name).join(", ");
+  return t("workstations.scopeBanner", { ous: names });
+});
 
 function reachColor(status: string) {
   if (status === "reachable") return "positive";
@@ -390,6 +405,7 @@ async function reload() {
       ou: ou.value || undefined,
       reachability: reachability.value || undefined,
       accountStatus: accountStatus.value || undefined,
+      scopeOnly: scopeOnly.value,
       sort: pagination.value.sortBy || "computerName",
       sortDir: pagination.value.descending ? "desc" : "asc",
       page: pagination.value.page,
@@ -400,6 +416,7 @@ async function reload() {
     total.value = page.total;
     summary.value = page.summary;
     ous.value = page.ous;
+    activeSyncOus.value = page.activeSyncOus || [];
     const keep = new Set(selectedRows.value.map((r) => r.id));
     selectedRows.value = rows.value.filter((r) => keep.has(r.id));
   } catch (err) {
@@ -610,6 +627,11 @@ async function saveAssign() {
 
 function onRequest(props: { pagination: typeof pagination.value }) {
   pagination.value = props.pagination;
+  void reload();
+}
+
+function onScopeToggle() {
+  pagination.value.page = 1;
   void reload();
 }
 
