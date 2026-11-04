@@ -39,13 +39,17 @@ Remote ChatGPT users cannot complete loopback authorize from another PC. For mul
 Reuse the Platform tunnel `tunnel_6ae301cc…` / profile `qka-mcp-local` (health `:8080`). Do **not** start a second client against the same tunnel.
 
 ```powershell
-# After backup (see docs/07-MCP-TUNNEL-CUTOVER.md):
+# Restore / keep alive the SAME tunnel (preferred day-to-day):
+.\Start-ExistingTunnelTo5265.ps1
+.\Register-TunnelAutostart.ps1
+# After backup (see docs/07-MCP-TUNNEL-CUTOVER.md) if retargeting:
 .\Cutover-ExistingTunnelTo5265.ps1
 # Rollback:
 .\Rollback-ExistingTunnelTo5255.ps1
 ```
 
 Confirm `http://127.0.0.1:8080/readyz` with MCP target `http://127.0.0.1:5265/mcp`.
+ChatGPT error `Tunnel-client has not been seen for 300 seconds` means the local `tunnel-client` daemon is down — start it with `Start-ExistingTunnelTo5265.ps1` (do not create a new Platform tunnel).
 
 ## ChatGPT Business admin — existing plugin
 

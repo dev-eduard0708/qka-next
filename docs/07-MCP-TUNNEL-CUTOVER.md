@@ -13,6 +13,10 @@
 
 - Cutover: `QKA-Next/scripts/mcp-tunnel/Cutover-ExistingTunnelTo5265.ps1`
 - Rollback: `QKA-Next/scripts/mcp-tunnel/Rollback-ExistingTunnelTo5255.ps1`
+- Start (same tunnel): `QKA-Next/scripts/mcp-tunnel/Start-ExistingTunnelTo5265.ps1`
+- Autostart + 5‑min watchdog: `QKA-Next/scripts/mcp-tunnel/Register-TunnelAutostart.ps1`
+
+`Start-ExistingTunnelTo5265.ps1` reuses profile `qka-mcp-local` / tunnel `tunnel_6ae301cc…` only. Runtime key comes from process env, DPAPI vault (`%LOCALAPPDATA%\QkaMcpTunnel\control-plane-api-key.dpapi`), or `.env` `CONTROL_PLANE_API_KEY` / `OPENAI_API_KEY` — never committed.
 
 ## Rollback
 
