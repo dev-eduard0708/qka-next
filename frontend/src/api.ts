@@ -610,15 +610,20 @@ export const api = {
     const qs = q.toString();
     return request<WorkstationsPage>(`/api/v1/admin/workstations${qs ? `?${qs}` : ""}`);
   },
-  workstationSyncOuOptions: (opts?: { connectionId?: string; search?: string }) => {
+  workstationSyncOuOptions: (opts?: { connectionId?: string; parentDn?: string; search?: string }) => {
     const q = new URLSearchParams();
     if (opts?.connectionId) q.set("connectionId", opts.connectionId);
+    if (opts?.parentDn) q.set("parentDn", opts.parentDn);
     if (opts?.search) q.set("search", opts.search);
     const qs = q.toString();
     return request<{
       connectionId: string;
       connectionName: string;
       baseDn: string;
+      parentDn: string;
+      includesChildOus: boolean;
+      note: string;
+      selectedItems: Array<{ name: string; distinguishedName: string; selected: boolean }>;
       items: Array<{ name: string; distinguishedName: string; selected: boolean }>;
     }>(`/api/v1/admin/workstations/sync-ou-options${qs ? `?${qs}` : ""}`);
   },

@@ -70,6 +70,15 @@ class FakeLdapGateway:
             AdOuNode(name="Users", distinguished_name="OU=Users,DC=qehc,DC=edu,DC=sa"),
             AdOuNode(name="Groups", distinguished_name="OU=Groups,DC=qehc,DC=edu,DC=sa"),
             AdOuNode(name="Workstations", distinguished_name="OU=Workstations,DC=qehc,DC=edu,DC=sa"),
+            AdOuNode(name="QEHC", distinguished_name="OU=QEHC,DC=qehc,DC=edu,DC=sa"),
+            AdOuNode(
+                name="Suspend WorkStations",
+                distinguished_name="OU=Suspend WorkStations,OU=QEHC,DC=qehc,DC=edu,DC=sa",
+            ),
+            AdOuNode(
+                name="CC Female Worksations",
+                distinguished_name="OU=CC Female Worksations,OU=Suspend WorkStations,OU=QEHC,DC=qehc,DC=edu,DC=sa",
+            ),
         ]
         self.computers = [
             AdComputerRecord(
@@ -204,9 +213,22 @@ class FakeLdapGateway:
 
     def list_ous(self, params: LdapConnectParams, *, parent_dn: str = "", search: str = ""):
         needle = (search or "").lower()
+        parent = (parent_dn or params.base_dn or "DC=qehc,DC=edu,DC=sa").strip().lower()
+        rows = list(self.ous)
         if needle:
-            return [o for o in self.ous if needle in o.name.lower()]
-        return list(self.ous)
+            return [o for o in rows if needle in o.name.lower()]
+        # One-level children of parent (same as RealLdapGateway without search).
+        out = []
+        for o in rows:
+            dn = o.distinguished_name
+            dn_l = dn.lower()
+            if dn_l == parent or not dn_l.endswith("," + parent):
+                continue
+            relative = dn[: -(len(parent) + 1)]
+            if "," in relative:
+                continue
+            out.append(o)
+        return out
 
     def search_users(self, params: LdapConnectParams, *, ou_dns: list[str], limit: int = 500):
         return list(self.users)[:limit]

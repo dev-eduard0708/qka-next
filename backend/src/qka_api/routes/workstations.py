@@ -105,12 +105,18 @@ def sync_ou_options(
     session: Session = Depends(get_session),
     settings: Settings = Depends(get_settings_dep),
     connectionId: uuid.UUID | None = Query(default=None),
+    parentDn: str = Query(default=""),
     search: str = Query(default=""),
 ):
     _require_super_admin(request, settings, session, mutating=False)
     try:
         return svc.list_sync_ou_options(
-            session, settings, _ldap(request), connection_id=connectionId, search=search
+            session,
+            settings,
+            _ldap(request),
+            connection_id=connectionId,
+            parent_dn=parentDn,
+            search=search,
         )
     except svc.WorkstationValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

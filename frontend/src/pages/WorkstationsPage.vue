@@ -92,6 +92,10 @@
       {{ t("workstations.loadFailedHint") }}
     </q-banner>
 
+    <div class="text-caption text-grey-7 q-mb-sm" v-if="!loadFailed">
+      {{ t("workstations.tableCount", { shown: rows.length, total }) }}
+    </div>
+
     <q-table
       flat
       bordered
@@ -104,6 +108,7 @@
       v-model:selected="selectedRows"
       v-model:pagination="pagination"
       :rows-number="loadFailed ? 0 : total"
+      :rows-per-page-options="[25, 50, 100, 200]"
       :no-data-label="loadFailed ? t('workstations.noDataBecauseError') : t('workstations.noData')"
       @request="onRequest"
     >
@@ -134,39 +139,72 @@
     <div class="text-caption text-grey-6">{{ t("workstations.deployNote") }}</div>
 
     <q-dialog v-model="syncOpen" persistent>
-      <q-card style="min-width: 520px; max-width: 720px">
+      <q-card style="min-width: 560px; max-width: 760px">
         <q-card-section class="text-h6">{{ t("workstations.syncTitle") }}</q-card-section>
         <q-card-section>
-          <div class="text-body2 text-grey-8 q-mb-md">{{ t("workstations.syncHint") }}</div>
+          <div class="text-body2 text-grey-8 q-mb-sm">{{ t("workstations.syncHint") }}</div>
+          <div class="text-caption text-warning q-mb-md">{{ t("workstations.syncSubtreeNote") }}</div>
           <div class="text-caption text-grey-7 q-mb-sm" v-if="syncConnectionName">
             {{ syncConnectionName }} · {{ syncBaseDn }}
           </div>
+          <div class="row items-center q-gutter-xs q-mb-sm">
+            <q-btn
+              flat
+              dense
+              color="primary"
+              icon="arrow_upward"
+              :disable="!canOuGoUp"
+              :label="t('workstations.ouUp')"
+              @click="goOuUp"
+            />
+            <span class="text-caption text-grey-8">{{ syncParentDn || syncBaseDn }}</span>
+          </div>
           <div class="row q-col-gutter-sm q-mb-md items-center">
             <div class="col">
-              <q-input v-model="syncOuSearch" dense outlined clearable :label="t('workstations.searchOus')" @keyup.enter="loadSyncOus" />
+              <q-input v-model="syncOuSearch" dense outlined clearable :label="t('workstations.searchOus')" @keyup.enter="loadSyncOus()" />
             </div>
             <div class="col-auto">
-              <q-btn outline color="primary" :loading="syncOuLoading" :label="t('workstations.loadOus')" @click="loadSyncOus" />
+              <q-btn outline color="primary" :loading="syncOuLoading" :label="t('workstations.loadOus')" @click="loadSyncOus()" />
             </div>
           </div>
           <div class="row q-mb-sm">
-            <q-btn flat dense color="primary" :label="t('workstations.selectAllOus')" @click="setAllSyncOus(true)" />
-            <q-btn flat dense color="primary" :label="t('workstations.clearOus')" @click="setAllSyncOus(false)" />
+            <q-btn flat dense color="primary" :label="t('workstations.selectAllOus')" @click="setAllVisibleOus(true)" />
+            <q-btn flat dense color="primary" :label="t('workstations.clearOus')" @click="clearSelectedOus" />
           </div>
-          <q-list bordered separator style="max-height: 320px; overflow: auto">
+          <q-list bordered separator style="max-height: 280px; overflow: auto">
             <q-item v-for="item in syncOuItems" :key="item.distinguishedName">
               <q-item-section avatar>
-                <q-checkbox v-model="item.selected" />
+                <q-checkbox
+                  :model-value="!!selectedOuMap[item.distinguishedName]"
+                  @update:model-value="(v: boolean) => toggleOu(item, v)"
+                />
               </q-item-section>
               <q-item-section>
                 <q-item-label>{{ item.name }}</q-item-label>
                 <q-item-label caption>{{ item.distinguishedName }}</q-item-label>
+              </q-item-section>
+              <q-item-section side>
+                <q-btn flat dense color="primary" :label="t('workstations.openOu')" @click="openOuChildren(item.distinguishedName)" />
               </q-item-section>
             </q-item>
             <q-item v-if="!syncOuItems.length">
               <q-item-section class="text-grey-7">{{ t("workstations.noOus") }}</q-item-section>
             </q-item>
           </q-list>
+          <div class="text-subtitle2 q-mt-md q-mb-xs">{{ t("workstations.selectedForSync") }}</div>
+          <div class="q-gutter-xs" style="max-height: 120px; overflow: auto">
+            <q-chip
+              v-for="dn in Object.keys(selectedOuMap)"
+              :key="dn"
+              removable
+              dense
+              color="primary"
+              text-color="white"
+              :label="selectedOuMap[dn].name"
+              @remove="removeSelectedOu(dn)"
+            />
+            <div v-if="selectedSyncOuCount < 1" class="text-caption text-grey-7">{{ t("workstations.noneSelected") }}</div>
+          </div>
           <div class="text-caption q-mt-sm">
             {{ t("workstations.selectedOuCount", { n: selectedSyncOuCount }) }}
           </div>
@@ -246,9 +284,16 @@ const syncOuSearch = ref("");
 const syncConnectionId = ref<string | null>(null);
 const syncConnectionName = ref("");
 const syncBaseDn = ref("");
+const syncParentDn = ref("");
 const syncOuItems = ref<Array<{ name: string; distinguishedName: string; selected: boolean }>>([]);
+const selectedOuMap = ref<Record<string, { name: string; distinguishedName: string }>>({});
 const pagination = ref({ page: 1, rowsPerPage: 25, sortBy: "computerName", descending: false });
-const selectedSyncOuCount = computed(() => syncOuItems.value.filter((i) => i.selected).length);
+const selectedSyncOuCount = computed(() => Object.keys(selectedOuMap.value).length);
+const canOuGoUp = computed(() => {
+  const parent = (syncParentDn.value || "").toLowerCase();
+  const base = (syncBaseDn.value || "").toLowerCase();
+  return Boolean(parent && base && parent !== base);
+});
 
 const columns = [
   { name: "computerName", label: t("workstations.colComputer"), field: "computerName", align: "left" as const, sortable: true },
@@ -373,25 +418,93 @@ async function reload() {
 async function openSyncDialog() {
   syncOpen.value = true;
   error.value = "";
+  syncOuSearch.value = "";
+  syncParentDn.value = "";
   await loadSyncOus();
 }
 
-function setAllSyncOus(selected: boolean) {
-  syncOuItems.value = syncOuItems.value.map((i) => ({ ...i, selected }));
+function toggleOu(item: { name: string; distinguishedName: string }, selected: boolean) {
+  const next = { ...selectedOuMap.value };
+  if (selected) {
+    next[item.distinguishedName] = {
+      name: item.name,
+      distinguishedName: item.distinguishedName,
+    };
+  } else {
+    delete next[item.distinguishedName];
+  }
+  selectedOuMap.value = next;
 }
 
-async function loadSyncOus() {
+function removeSelectedOu(dn: string) {
+  const next = { ...selectedOuMap.value };
+  delete next[dn];
+  selectedOuMap.value = next;
+}
+
+function setAllVisibleOus(selected: boolean) {
+  const next = { ...selectedOuMap.value };
+  for (const item of syncOuItems.value) {
+    if (selected) {
+      next[item.distinguishedName] = {
+        name: item.name,
+        distinguishedName: item.distinguishedName,
+      };
+    } else {
+      delete next[item.distinguishedName];
+    }
+  }
+  selectedOuMap.value = next;
+}
+
+function clearSelectedOus() {
+  selectedOuMap.value = {};
+}
+
+async function openOuChildren(dn: string) {
+  syncOuSearch.value = "";
+  syncParentDn.value = dn;
+  await loadSyncOus(dn);
+}
+
+async function goOuUp() {
+  const parent = syncParentDn.value || syncBaseDn.value;
+  if (!parent || parent.toLowerCase() === (syncBaseDn.value || "").toLowerCase()) {
+    syncParentDn.value = syncBaseDn.value;
+    await loadSyncOus(syncBaseDn.value);
+    return;
+  }
+  const parts = parent.split(",").map((p) => p.trim()).filter(Boolean);
+  const up = parts.slice(1).join(",");
+  syncParentDn.value = up || syncBaseDn.value;
+  await loadSyncOus(syncParentDn.value);
+}
+
+async function loadSyncOus(parentDn?: string) {
   syncOuLoading.value = true;
   error.value = "";
   try {
     const page = await api.workstationSyncOuOptions({
       connectionId: syncConnectionId.value || undefined,
+      parentDn: parentDn || syncParentDn.value || undefined,
       search: syncOuSearch.value || undefined,
     });
     syncConnectionId.value = page.connectionId;
     syncConnectionName.value = page.connectionName;
     syncBaseDn.value = page.baseDn;
+    syncParentDn.value = page.parentDn || page.baseDn;
     syncOuItems.value = page.items.map((i) => ({ ...i }));
+    // Seed basket from saved scope only when opening at domain root with empty basket.
+    if (!Object.keys(selectedOuMap.value).length && page.selectedItems?.length) {
+      const seeded: Record<string, { name: string; distinguishedName: string }> = {};
+      for (const item of page.selectedItems) {
+        seeded[item.distinguishedName] = {
+          name: item.name,
+          distinguishedName: item.distinguishedName,
+        };
+      }
+      selectedOuMap.value = seeded;
+    }
   } catch (err) {
     error.value = formatApiFailure(err, t("workstations.loadOusError"));
   } finally {
@@ -400,7 +513,8 @@ async function loadSyncOus() {
 }
 
 async function confirmSyncInventory() {
-  const ouDns = syncOuItems.value.filter((i) => i.selected).map((i) => i.distinguishedName);
+  const selected = Object.values(selectedOuMap.value);
+  const ouDns = selected.map((i) => i.distinguishedName);
   if (!ouDns.length) {
     error.value = t("workstations.ouRequired");
     return;
@@ -411,7 +525,11 @@ async function confirmSyncInventory() {
   try {
     await api.saveWorkstationOuScope({
       connectionId: syncConnectionId.value || undefined,
-      items: syncOuItems.value,
+      items: selected.map((i) => ({
+        name: i.name,
+        distinguishedName: i.distinguishedName,
+        selected: true,
+      })),
     });
     const result = await api.syncWorkstations({
       connectionId: syncConnectionId.value || undefined,
@@ -427,6 +545,7 @@ async function confirmSyncInventory() {
       missing: result.missingMarked,
       ous: result.syncedOus?.length || ouDns.length,
     });
+    pagination.value.page = 1;
     await reload();
   } catch (err) {
     error.value = formatApiFailure(err, t("workstations.syncError"));

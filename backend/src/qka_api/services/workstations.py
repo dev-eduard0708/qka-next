@@ -236,13 +236,15 @@ def list_sync_ou_options(
     gateway: LdapGateway,
     *,
     connection_id: uuid.UUID | None = None,
+    parent_dn: str = "",
     search: str = "",
 ) -> dict[str, Any]:
     row = ad_svc.get_connection(session, connection_id) if connection_id else _active_connection(session)
     if row.connection_status == ad_svc.STATUS_DISABLED:
         raise WorkstationValidationError("Active Directory connection is disabled.")
     params = ad_svc._bind_params(session, settings, row)
-    nodes = gateway.list_ous(params, parent_dn=row.base_dn, search=search)
+    parent = (parent_dn or row.base_dn or "").strip()
+    nodes = gateway.list_ous(params, parent_dn=parent, search=search)
     selected = {
         s.distinguished_name
         for s in session.execute(
@@ -252,10 +254,30 @@ def list_sync_ou_options(
             )
         ).scalars().all()
     }
+    saved = [
+        {
+            "name": s.name,
+            "distinguishedName": s.distinguished_name,
+            "selected": True,
+        }
+        for s in session.execute(
+            select(AdWorkstationOuScope).where(
+                AdWorkstationOuScope.connection_id == row.id,
+                AdWorkstationOuScope.selected.is_(True),
+            )
+        ).scalars().all()
+    ]
     return {
         "connectionId": str(row.id),
         "connectionName": row.connection_name,
         "baseDn": row.base_dn,
+        "parentDn": parent,
+        "includesChildOus": True,
+        "note": (
+            "Selecting an OU syncs every computer in that OU and all nested child OUs. "
+            "Open a parent OU to choose more specific child OUs (for example exclude Suspend WorkStations)."
+        ),
+        "selectedItems": saved,
         "items": [
             {
                 "name": n.name,

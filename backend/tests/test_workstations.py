@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from qka_api.services import active_directory as ad
 from qka_api.services.network_probe import DnsResult, PingResult
 from tests.conftest import ALLOWED_USER, GOOGLE_ONLY_USER, auth_cookies
@@ -76,6 +78,28 @@ def test_sync_requires_ou_selection(client):
     )
     assert denied.status_code == 400
     assert "Organizational Unit" in denied.json()["detail"]
+
+
+def test_sync_ou_options_supports_nested_browse(client):
+    _install(client)
+    headers = _admin(client)
+    conn_id = _ensure_ad_connection(client, headers)
+    root = client.get(
+        f"/api/v1/admin/workstations/sync-ou-options?connectionId={conn_id}",
+        headers=headers,
+    )
+    assert root.status_code == 200, root.text
+    names = {i["name"] for i in root.json()["items"]}
+    assert "QEHC" in names
+    assert "Suspend WorkStations" not in names
+    nested = client.get(
+        f"/api/v1/admin/workstations/sync-ou-options?connectionId={conn_id}"
+        f"&parentDn={quote('OU=QEHC,DC=qehc,DC=edu,DC=sa')}",
+        headers=headers,
+    )
+    assert nested.status_code == 200, nested.text
+    child_names = {i["name"] for i in nested.json()["items"]}
+    assert "Suspend WorkStations" in child_names
 
 
 def test_sync_excludes_servers_and_preserves_missing(client):
