@@ -794,6 +794,20 @@ REACH_NO_REPLY = 3  # ICMP timeout/blocked — never treated as "powered off"
 REACH_PROBE_ERROR = 4
 
 
+class AdWorkstationOuScope(Base):
+    """OUs selected for workstation computer sync (independent of user AD OU scope)."""
+
+    __tablename__ = "qka_next_ad_workstation_ou_scope"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    connection_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    distinguished_name: Mapped[str] = mapped_column(String(2048))
+    name: Mapped[str] = mapped_column(String(512), default="")
+    selected: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class AdWorkstation(Base):
     """Domain computer object synced from AD for Desktop Agent administration.
 

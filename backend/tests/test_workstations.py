@@ -65,21 +65,43 @@ def test_non_admin_cannot_manage_workstations(client):
     assert response.status_code == 403
 
 
+def test_sync_requires_ou_selection(client):
+    _install(client)
+    headers = _admin(client)
+    conn_id = _ensure_ad_connection(client, headers)
+    denied = client.post(
+        "/api/v1/admin/workstations/sync",
+        headers=headers,
+        json={"connectionId": conn_id, "ouDns": [], "includeServers": False},
+    )
+    assert denied.status_code == 400
+    assert "Organizational Unit" in denied.json()["detail"]
+
+
 def test_sync_excludes_servers_and_preserves_missing(client):
     gateway, _probe = _install(client)
     headers = _admin(client)
     conn_id = _ensure_ad_connection(client, headers)
+    ou = "OU=Workstations,DC=qehc,DC=edu,DC=sa"
+
+    options = client.get(
+        f"/api/v1/admin/workstations/sync-ou-options?connectionId={conn_id}",
+        headers=headers,
+    )
+    assert options.status_code == 200, options.text
+    assert any(i["distinguishedName"] == ou for i in options.json()["items"])
 
     sync = client.post(
         "/api/v1/admin/workstations/sync",
         headers=headers,
-        json={"connectionId": conn_id, "includeServers": False},
+        json={"connectionId": conn_id, "ouDns": [ou], "includeServers": False},
     )
     assert sync.status_code == 200, sync.text
     body = sync.json()
     assert body["discovered"] == 3
     assert body["created"] == 3
     assert body["present"] == 3
+    assert ou in body["syncedOus"]
 
     listed = client.get("/api/v1/admin/workstations", headers=headers)
     assert listed.status_code == 200
@@ -93,7 +115,7 @@ def test_sync_excludes_servers_and_preserves_missing(client):
     again = client.post(
         "/api/v1/admin/workstations/sync",
         headers=headers,
-        json={"connectionId": conn_id},
+        json={"connectionId": conn_id, "ouDns": [ou]},
     )
     assert again.status_code == 200
     assert again.json()["missingMarked"] == 1
@@ -113,10 +135,11 @@ def test_dns_failure_and_icmp_no_reply(client):
     _gateway, probe = _install(client)
     headers = _admin(client)
     conn_id = _ensure_ad_connection(client, headers)
+    ou = "OU=Workstations,DC=qehc,DC=edu,DC=sa"
     client.post(
         "/api/v1/admin/workstations/sync",
         headers=headers,
-        json={"connectionId": conn_id},
+        json={"connectionId": conn_id, "ouDns": [ou]},
     )
     items = client.get("/api/v1/admin/workstations", headers=headers).json()["items"]
     pilot = next(i for i in items if i["computerName"] == "PILOT-PC")
@@ -152,10 +175,11 @@ def test_bulk_ping_only_selected(client):
     _gateway, probe = _install(client)
     headers = _admin(client)
     conn_id = _ensure_ad_connection(client, headers)
+    ou = "OU=Workstations,DC=qehc,DC=edu,DC=sa"
     client.post(
         "/api/v1/admin/workstations/sync",
         headers=headers,
-        json={"connectionId": conn_id},
+        json={"connectionId": conn_id, "ouDns": [ou]},
     )
     items = client.get("/api/v1/admin/workstations", headers=headers).json()["items"]
     ids = [i["id"] for i in items[:2]]
@@ -184,10 +208,11 @@ def test_employee_association_requires_ad_user(client):
     _install(client)
     headers = _admin(client)
     conn_id = _ensure_ad_connection(client, headers)
+    ou = "OU=Workstations,DC=qehc,DC=edu,DC=sa"
     client.post(
         "/api/v1/admin/workstations/sync",
         headers=headers,
-        json={"connectionId": conn_id},
+        json={"connectionId": conn_id, "ouDns": [ou]},
     )
     pilot = next(
         i

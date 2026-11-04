@@ -7,7 +7,7 @@
         <p class="text-body2 text-grey-7 q-mt-sm q-mb-none">{{ t("workstations.body") }}</p>
       </div>
       <div class="col-auto row q-gutter-sm">
-        <q-btn color="primary" outline :loading="syncing" :label="t('workstations.sync')" @click="syncInventory" />
+        <q-btn color="primary" outline :loading="syncing" :label="t('workstations.sync')" @click="openSyncDialog" />
         <q-btn color="primary" unelevated :loading="loading" :label="t('workstations.refresh')" @click="reload" />
       </div>
     </div>
@@ -133,6 +133,58 @@
     <div class="text-caption text-grey-6 q-mt-md">{{ t("workstations.icmpNote") }}</div>
     <div class="text-caption text-grey-6">{{ t("workstations.deployNote") }}</div>
 
+    <q-dialog v-model="syncOpen" persistent>
+      <q-card style="min-width: 520px; max-width: 720px">
+        <q-card-section class="text-h6">{{ t("workstations.syncTitle") }}</q-card-section>
+        <q-card-section>
+          <div class="text-body2 text-grey-8 q-mb-md">{{ t("workstations.syncHint") }}</div>
+          <div class="text-caption text-grey-7 q-mb-sm" v-if="syncConnectionName">
+            {{ syncConnectionName }} · {{ syncBaseDn }}
+          </div>
+          <div class="row q-col-gutter-sm q-mb-md items-center">
+            <div class="col">
+              <q-input v-model="syncOuSearch" dense outlined clearable :label="t('workstations.searchOus')" @keyup.enter="loadSyncOus" />
+            </div>
+            <div class="col-auto">
+              <q-btn outline color="primary" :loading="syncOuLoading" :label="t('workstations.loadOus')" @click="loadSyncOus" />
+            </div>
+          </div>
+          <div class="row q-mb-sm">
+            <q-btn flat dense color="primary" :label="t('workstations.selectAllOus')" @click="setAllSyncOus(true)" />
+            <q-btn flat dense color="primary" :label="t('workstations.clearOus')" @click="setAllSyncOus(false)" />
+          </div>
+          <q-list bordered separator style="max-height: 320px; overflow: auto">
+            <q-item v-for="item in syncOuItems" :key="item.distinguishedName">
+              <q-item-section avatar>
+                <q-checkbox v-model="item.selected" />
+              </q-item-section>
+              <q-item-section>
+                <q-item-label>{{ item.name }}</q-item-label>
+                <q-item-label caption>{{ item.distinguishedName }}</q-item-label>
+              </q-item-section>
+            </q-item>
+            <q-item v-if="!syncOuItems.length">
+              <q-item-section class="text-grey-7">{{ t("workstations.noOus") }}</q-item-section>
+            </q-item>
+          </q-list>
+          <div class="text-caption q-mt-sm">
+            {{ t("workstations.selectedOuCount", { n: selectedSyncOuCount }) }}
+          </div>
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat :label="t('workstations.cancel')" v-close-popup />
+          <q-btn
+            color="primary"
+            unelevated
+            :loading="syncing"
+            :disable="selectedSyncOuCount < 1"
+            :label="t('workstations.syncConfirm')"
+            @click="confirmSyncInventory"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
     <q-dialog v-model="assignOpen">
       <q-card style="min-width: 360px">
         <q-card-section class="text-h6">{{ t("workstations.assignTitle") }}</q-card-section>
@@ -188,7 +240,15 @@ const employees = ref<DirectoryUser[]>([]);
 const assignOpen = ref(false);
 const assignTarget = ref<Workstation | null>(null);
 const assignUserId = ref<string | null>(null);
+const syncOpen = ref(false);
+const syncOuLoading = ref(false);
+const syncOuSearch = ref("");
+const syncConnectionId = ref<string | null>(null);
+const syncConnectionName = ref("");
+const syncBaseDn = ref("");
+const syncOuItems = ref<Array<{ name: string; distinguishedName: string; selected: boolean }>>([]);
 const pagination = ref({ page: 1, rowsPerPage: 25, sortBy: "computerName", descending: false });
+const selectedSyncOuCount = computed(() => syncOuItems.value.filter((i) => i.selected).length);
 
 const columns = [
   { name: "computerName", label: t("workstations.colComputer"), field: "computerName", align: "left" as const, sortable: true },
@@ -310,17 +370,62 @@ async function reload() {
   }
 }
 
-async function syncInventory() {
+async function openSyncDialog() {
+  syncOpen.value = true;
+  error.value = "";
+  await loadSyncOus();
+}
+
+function setAllSyncOus(selected: boolean) {
+  syncOuItems.value = syncOuItems.value.map((i) => ({ ...i, selected }));
+}
+
+async function loadSyncOus() {
+  syncOuLoading.value = true;
+  error.value = "";
+  try {
+    const page = await api.workstationSyncOuOptions({
+      connectionId: syncConnectionId.value || undefined,
+      search: syncOuSearch.value || undefined,
+    });
+    syncConnectionId.value = page.connectionId;
+    syncConnectionName.value = page.connectionName;
+    syncBaseDn.value = page.baseDn;
+    syncOuItems.value = page.items.map((i) => ({ ...i }));
+  } catch (err) {
+    error.value = formatApiFailure(err, t("workstations.loadOusError"));
+  } finally {
+    syncOuLoading.value = false;
+  }
+}
+
+async function confirmSyncInventory() {
+  const ouDns = syncOuItems.value.filter((i) => i.selected).map((i) => i.distinguishedName);
+  if (!ouDns.length) {
+    error.value = t("workstations.ouRequired");
+    return;
+  }
   syncing.value = true;
   error.value = "";
   syncNote.value = "";
   try {
-    const result = await api.syncWorkstations({ includeServers: false });
+    await api.saveWorkstationOuScope({
+      connectionId: syncConnectionId.value || undefined,
+      items: syncOuItems.value,
+    });
+    const result = await api.syncWorkstations({
+      connectionId: syncConnectionId.value || undefined,
+      ouDns,
+      includeServers: false,
+      persistOuScope: true,
+    });
+    syncOpen.value = false;
     syncNote.value = t("workstations.syncDone", {
       discovered: result.discovered,
       created: result.created,
       updated: result.updated,
       missing: result.missingMarked,
+      ous: result.syncedOus?.length || ouDns.length,
     });
     await reload();
   } catch (err) {

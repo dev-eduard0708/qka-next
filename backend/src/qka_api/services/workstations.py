@@ -20,8 +20,8 @@ from qka_shared.models import (
     REACH_REACHABLE,
     REACH_UNCHECKED,
     AdConnection,
-    AdOuScope,
     AdWorkstation,
+    AdWorkstationOuScope,
     DesktopDevice,
     DEVICE_ACTIVE,
     DEVICE_PAUSED,
@@ -59,6 +59,20 @@ def _ou_from_dn(dn: str) -> str:
     # Drop CN=computer; keep OU=/DC= path
     rest = parts[1:] if parts[0].upper().startswith("CN=") else parts
     return ",".join(rest)
+
+
+def _dn_in_scopes(dn: str, ou_dns: list[str]) -> bool:
+    """True when DN is exactly a selected OU or a child of one."""
+    needle = (dn or "").strip().lower()
+    if not needle or not ou_dns:
+        return False
+    for ou in ou_dns:
+        scope = (ou or "").strip().lower()
+        if not scope:
+            continue
+        if needle == scope or needle.endswith("," + scope):
+            return True
+    return False
 
 
 def _short_name(hostname: str) -> str:
@@ -216,13 +230,135 @@ def _active_connection(session: Session) -> AdConnection:
     return row
 
 
+def list_sync_ou_options(
+    session: Session,
+    settings,
+    gateway: LdapGateway,
+    *,
+    connection_id: uuid.UUID | None = None,
+    search: str = "",
+) -> dict[str, Any]:
+    row = ad_svc.get_connection(session, connection_id) if connection_id else _active_connection(session)
+    if row.connection_status == ad_svc.STATUS_DISABLED:
+        raise WorkstationValidationError("Active Directory connection is disabled.")
+    params = ad_svc._bind_params(session, settings, row)
+    nodes = gateway.list_ous(params, parent_dn=row.base_dn, search=search)
+    selected = {
+        s.distinguished_name
+        for s in session.execute(
+            select(AdWorkstationOuScope).where(
+                AdWorkstationOuScope.connection_id == row.id,
+                AdWorkstationOuScope.selected.is_(True),
+            )
+        ).scalars().all()
+    }
+    return {
+        "connectionId": str(row.id),
+        "connectionName": row.connection_name,
+        "baseDn": row.base_dn,
+        "items": [
+            {
+                "name": n.name,
+                "distinguishedName": n.distinguished_name,
+                "selected": n.distinguished_name in selected,
+            }
+            for n in nodes
+        ],
+    }
+
+
+def set_sync_ou_scope(
+    session: Session,
+    *,
+    connection_id: uuid.UUID | None,
+    selections: list[dict[str, Any]],
+) -> dict[str, Any]:
+    row = ad_svc.get_connection(session, connection_id) if connection_id else _active_connection(session)
+    now = _utc_now()
+    existing = {
+        r.distinguished_name: r
+        for r in session.execute(
+            select(AdWorkstationOuScope).where(AdWorkstationOuScope.connection_id == row.id)
+        ).scalars().all()
+    }
+    keep: set[str] = set()
+    selected_count = 0
+    for item in selections[:300]:
+        dn = str(item.get("distinguishedName") or "").strip()
+        if not dn:
+            continue
+        keep.add(dn)
+        selected = bool(item.get("selected", True))
+        if selected:
+            selected_count += 1
+        name = str(item.get("name") or dn.split(",")[0])
+        if dn in existing:
+            existing[dn].selected = selected
+            existing[dn].name = name
+            existing[dn].updated_at = now
+        else:
+            session.add(
+                AdWorkstationOuScope(
+                    id=uuid.uuid4(),
+                    connection_id=row.id,
+                    distinguished_name=dn,
+                    name=name,
+                    selected=selected,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+    for dn, scope_row in existing.items():
+        if dn not in keep:
+            scope_row.selected = False
+            scope_row.updated_at = now
+    session.flush()
+    return {
+        "connectionId": str(row.id),
+        "selectedCount": selected_count,
+        "items": [
+            {
+                "id": str(r.id),
+                "name": r.name,
+                "distinguishedName": r.distinguished_name,
+                "selected": True,
+            }
+            for r in session.execute(
+                select(AdWorkstationOuScope).where(
+                    AdWorkstationOuScope.connection_id == row.id,
+                    AdWorkstationOuScope.selected.is_(True),
+                )
+            ).scalars().all()
+        ],
+    }
+
+
+def _resolve_sync_ou_dns(
+    session: Session,
+    row: AdConnection,
+    ou_dns: list[str] | None,
+) -> list[str]:
+    explicit = [d.strip() for d in (ou_dns or []) if (d or "").strip()]
+    if explicit:
+        return explicit
+    saved = session.execute(
+        select(AdWorkstationOuScope).where(
+            AdWorkstationOuScope.connection_id == row.id,
+            AdWorkstationOuScope.selected.is_(True),
+        )
+    ).scalars().all()
+    return [s.distinguished_name for s in saved if s.distinguished_name]
+
+
 def sync_workstations(
     session: Session,
     settings,
     gateway: LdapGateway,
     *,
     connection_id: uuid.UUID | None = None,
+    ou_dns: list[str] | None = None,
     include_servers: bool = False,
+    persist_ou_scope: bool = True,
     actor_user_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     del actor_user_id  # reserved for future audit
@@ -232,14 +368,24 @@ def sync_workstations(
     if row.connection_status != ad_svc.STATUS_CONNECTED:
         raise WorkstationValidationError("Active Directory connection is not connected.")
 
-    params = ad_svc._bind_params(session, settings, row)
-    scopes = session.execute(
-        select(AdOuScope).where(AdOuScope.connection_id == row.id, AdOuScope.selected.is_(True))
-    ).scalars().all()
-    ou_dns = [s.distinguished_name for s in scopes] if scopes else ([row.base_dn] if row.base_dn else [])
+    resolved_ous = _resolve_sync_ou_dns(session, row, ou_dns)
+    if not resolved_ous:
+        raise WorkstationValidationError(
+            "Select at least one Organizational Unit before syncing workstations."
+        )
+    if persist_ou_scope and ou_dns is not None:
+        set_sync_ou_scope(
+            session,
+            connection_id=row.id,
+            selections=[
+                {"distinguishedName": dn, "name": dn.split(",")[0], "selected": True}
+                for dn in resolved_ous
+            ],
+        )
 
+    params = ad_svc._bind_params(session, settings, row)
     discovered = gateway.search_computers(
-        params, ou_dns=ou_dns, limit=5000, include_servers=include_servers
+        params, ou_dns=resolved_ous, limit=5000, include_servers=include_servers
     )
     now = _utc_now()
     seen_guids: set[str] = set()
@@ -279,7 +425,8 @@ def sync_workstations(
         existing.last_seen_at = now
         existing.updated_at = now
 
-    # Mark missing (do not delete history)
+    # Mark missing only within the OUs that were synced (do not delete history;
+    # do not mark computers outside the selected OU scope as missing).
     missing = 0
     for ws in session.execute(
         select(AdWorkstation).where(
@@ -287,15 +434,15 @@ def sync_workstations(
             AdWorkstation.is_present.is_(True),
         )
     ).scalars().all():
-        if ws.object_guid not in seen_guids:
-            # If include_servers is false, servers previously stored stay as-is unless
-            # they were workstations that disappeared from AD.
-            if not include_servers and ws.is_server_or_dc:
-                continue
-            if ws.object_guid not in seen_guids:
-                ws.is_present = False
-                ws.updated_at = now
-                missing += 1
+        if ws.object_guid in seen_guids:
+            continue
+        if not include_servers and ws.is_server_or_dc:
+            continue
+        if not _dn_in_scopes(ws.distinguished_name, resolved_ous):
+            continue
+        ws.is_present = False
+        ws.updated_at = now
+        missing += 1
 
     session.flush()
     total = session.execute(
@@ -315,6 +462,7 @@ def sync_workstations(
         "total": int(total),
         "present": int(present),
         "includeServers": include_servers,
+        "syncedOus": resolved_ous,
         "syncedAt": now.isoformat(),
     }
 

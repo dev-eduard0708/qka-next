@@ -610,7 +610,36 @@ export const api = {
     const qs = q.toString();
     return request<WorkstationsPage>(`/api/v1/admin/workstations${qs ? `?${qs}` : ""}`);
   },
-  syncWorkstations: (body?: { connectionId?: string; includeServers?: boolean }) =>
+  workstationSyncOuOptions: (opts?: { connectionId?: string; search?: string }) => {
+    const q = new URLSearchParams();
+    if (opts?.connectionId) q.set("connectionId", opts.connectionId);
+    if (opts?.search) q.set("search", opts.search);
+    const qs = q.toString();
+    return request<{
+      connectionId: string;
+      connectionName: string;
+      baseDn: string;
+      items: Array<{ name: string; distinguishedName: string; selected: boolean }>;
+    }>(`/api/v1/admin/workstations/sync-ou-options${qs ? `?${qs}` : ""}`);
+  },
+  saveWorkstationOuScope: (body: {
+    connectionId?: string;
+    items: Array<{ name: string; distinguishedName: string; selected: boolean }>;
+  }) =>
+    request<{
+      connectionId: string;
+      selectedCount: number;
+      items: Array<{ id: string; name: string; distinguishedName: string; selected: boolean }>;
+    }>("/api/v1/admin/workstations/ou-scope", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  syncWorkstations: (body: {
+    connectionId?: string;
+    ouDns: string[];
+    includeServers?: boolean;
+    persistOuScope?: boolean;
+  }) =>
     request<{
       connectionId: string;
       discovered: number;
@@ -620,10 +649,11 @@ export const api = {
       total: number;
       present: number;
       includeServers: boolean;
+      syncedOus: string[];
       syncedAt: string;
     }>("/api/v1/admin/workstations/sync", {
       method: "POST",
-      body: JSON.stringify(body || {}),
+      body: JSON.stringify(body),
     }),
   pingWorkstation: (workstationId: string, timeoutMs = 2000) =>
     request<Workstation>(`/api/v1/admin/workstations/${workstationId}/ping`, {

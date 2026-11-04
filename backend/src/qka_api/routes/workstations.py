@@ -21,7 +21,14 @@ router = APIRouter(prefix="/api/v1/admin/workstations", tags=["workstations-admi
 
 class SyncBody(BaseModel):
     connectionId: uuid.UUID | None = None
+    ouDns: list[str] = Field(default_factory=list)
     includeServers: bool = False
+    persistOuScope: bool = True
+
+
+class OuScopeBody(BaseModel):
+    connectionId: uuid.UUID | None = None
+    items: list[dict] = Field(default_factory=list)
 
 
 class AssociateBody(BaseModel):
@@ -92,6 +99,45 @@ def list_workstations(
     )
 
 
+@router.get("/sync-ou-options")
+def sync_ou_options(
+    request: Request,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings_dep),
+    connectionId: uuid.UUID | None = Query(default=None),
+    search: str = Query(default=""),
+):
+    _require_super_admin(request, settings, session, mutating=False)
+    try:
+        return svc.list_sync_ou_options(
+            session, settings, _ldap(request), connection_id=connectionId, search=search
+        )
+    except svc.WorkstationValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.put("/ou-scope")
+def save_ou_scope(
+    body: OuScopeBody,
+    request: Request,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings_dep),
+):
+    _require_super_admin(request, settings, session, mutating=True)
+    try:
+        result = svc.set_sync_ou_scope(
+            session, connection_id=body.connectionId, selections=body.items
+        )
+        session.commit()
+        return result
+    except svc.WorkstationValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.post("/sync")
 def sync_workstations(
     body: SyncBody,
@@ -106,7 +152,9 @@ def sync_workstations(
             settings,
             _ldap(request),
             connection_id=body.connectionId,
+            ou_dns=body.ouDns,
             include_servers=body.includeServers,
+            persist_ou_scope=body.persistOuScope,
             actor_user_id=admin.id,
         )
         session.commit()

@@ -329,6 +329,21 @@ def seed_db():
         session.execute(
             text(
                 """
+                CREATE TABLE IF NOT EXISTS qka_next_ad_workstation_ou_scope (
+                    id UUID PRIMARY KEY,
+                    connection_id UUID NOT NULL,
+                    distinguished_name VARCHAR(2048) NOT NULL,
+                    name VARCHAR(512) NOT NULL DEFAULT '',
+                    selected BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+        )
+        session.execute(
+            text(
+                """
                 CREATE TABLE IF NOT EXISTS qka_next_ad_workstation (
                     id UUID PRIMARY KEY,
                     connection_id UUID NOT NULL,
@@ -702,6 +717,7 @@ def seed_db():
         session.execute(text("DELETE FROM qka_next_desktop_device"))
         session.execute(text("DELETE FROM qka_next_desktop_enrollment_code"))
         session.execute(text("DELETE FROM qka_next_ad_workstation"))
+        session.execute(text("DELETE FROM qka_next_ad_workstation_ou_scope"))
         session.execute(text("DELETE FROM qka_user"))
         session.add_all(
             [
