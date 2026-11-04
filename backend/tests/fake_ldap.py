@@ -43,6 +43,17 @@ class FakeLdapGateway:
                 distinguished_name="CN=Orphan,OU=Users,DC=qehc,DC=edu,DC=sa",
                 account_enabled=False,
             ),
+            AdUserRecord(
+                object_guid="33333333-3333-3333-3333-333333333333",
+                object_sid="S-1-5-21-1-2-3-1003",
+                sam_account_name="noemail",
+                user_principal_name="noemail@qehc.edu.sa",
+                display_name="No Email User",
+                mail="",
+                department="",
+                distinguished_name="CN=No Email User,OU=Users,DC=qehc,DC=edu,DC=sa",
+                account_enabled=True,
+            ),
         ]
         self.groups = [
             AdGroupRecord(

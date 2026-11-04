@@ -241,7 +241,8 @@ def seed_db():
                 """
                 CREATE TABLE IF NOT EXISTS qka_next_chat_access (
                     id UUID PRIMARY KEY,
-                    allowed_email_id UUID NOT NULL UNIQUE,
+                    allowed_email_id UUID UNIQUE,
+                    qka_user_id UUID UNIQUE,
                     local_chat_enabled BOOLEAN NOT NULL DEFAULT FALSE,
                     mcp_enabled BOOLEAN NOT NULL DEFAULT FALSE,
                     created_at TIMESTAMPTZ NOT NULL,
@@ -251,6 +252,12 @@ def seed_db():
                 """
             )
         )
+        session.execute(text("ALTER TABLE qka_next_chat_access ALTER COLUMN allowed_email_id DROP NOT NULL"))
+        session.execute(text("ALTER TABLE qka_next_chat_access ADD COLUMN IF NOT EXISTS qka_user_id UUID NULL"))
+        session.execute(text('ALTER TABLE qka_user ADD COLUMN IF NOT EXISTS "DirectoryDepartment" VARCHAR(512) NOT NULL DEFAULT \'\''))
+        session.execute(text('ALTER TABLE qka_user ADD COLUMN IF NOT EXISTS "ContactEmail" VARCHAR(256) NULL'))
+        session.execute(text("ALTER TABLE qka_next_ad_directory_user ADD COLUMN IF NOT EXISTS qka_eligible BOOLEAN NOT NULL DEFAULT FALSE"))
+        session.execute(text("ALTER TABLE qka_next_ad_directory_user ADD COLUMN IF NOT EXISTS department_override VARCHAR(512) NOT NULL DEFAULT ''"))
         session.execute(
             text(
                 """
@@ -363,6 +370,8 @@ def seed_db():
                 distinguished_name VARCHAR(2048) NOT NULL DEFAULT '',
                 account_enabled BOOLEAN NOT NULL DEFAULT TRUE,
                 is_present BOOLEAN NOT NULL DEFAULT TRUE,
+                qka_eligible BOOLEAN NOT NULL DEFAULT FALSE,
+                department_override VARCHAR(512) NOT NULL DEFAULT '',
                 mapping_status INTEGER NOT NULL DEFAULT 0,
                 linked_qka_user_id UUID NULL,
                 linked_external_identity_id UUID NULL,
@@ -565,6 +574,13 @@ def seed_db():
         session.execute(text("DELETE FROM qka_next_source_grant"))
         session.execute(text("DELETE FROM qka_next_source_scope"))
         session.execute(text("DELETE FROM qka_next_chat_access"))
+        session.execute(text("DELETE FROM qka_next_ad_group_member"))
+        session.execute(text("DELETE FROM qka_next_ad_directory_group"))
+        session.execute(text("DELETE FROM qka_next_ad_directory_user"))
+        session.execute(text("DELETE FROM qka_next_ad_ou_scope"))
+        session.execute(text("DELETE FROM qka_next_ad_sync_job"))
+        session.execute(text("DELETE FROM qka_next_ad_audit"))
+        session.execute(text("DELETE FROM qka_next_ad_connection"))
         session.execute(text("DELETE FROM qka_next_ai_usage_audit"))
         session.execute(text("DELETE FROM qka_next_ai_message_attachment"))
         session.execute(text("DELETE FROM qka_next_ai_message"))

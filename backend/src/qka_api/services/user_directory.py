@@ -12,7 +12,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from qka_shared.allowlist import ACCOUNT_ENABLED, LINKED, PROVIDER_AD, PROVIDER_GOOGLE, load_verified_emails
-from qka_shared.chat_access import get_or_create_chat_access, set_chat_access
+from qka_shared.chat_access import (
+    get_or_create_chat_access,
+    get_or_create_chat_access_for_user,
+    set_chat_access,
+    set_chat_access_for_user,
+)
 from qka_shared.email_address import try_normalize
 from qka_shared.models import (
     AllowedEmail,
@@ -185,6 +190,18 @@ def promote_allowlist_row_to_user(session: Session, row: AllowedEmail, user: Qka
     get_or_create_chat_access(session, row.id)
 
 
+def _identity_source(user: QkaUser | None, *, has_allowlist: bool) -> str:
+    has_ad = bool(_ad_idents(user))
+    has_google = _google_sub(user) is not None
+    if has_ad and has_google:
+        return "both"
+    if has_ad:
+        return "ad"
+    if has_google or has_allowlist:
+        return "google"
+    return "none"
+
+
 def _user_dto(
     row: AllowedEmail,
     *,
@@ -203,12 +220,17 @@ def _user_dto(
         account_status = "pending"
     admin_name = directory_display_name(row, user)
     mem_status = membership.status if membership is not None else MEMBERSHIP_UNKNOWN
+    ad_idents = _ad_idents(user)
     return {
         "allowlistId": str(row.id),
         "qkaUserId": str(user.id) if user is not None else None,
         "displayName": admin_name,
         "googleProfileName": (row.google_profile_name or "").strip() or None,
         "primaryEmail": row.email_normalized,
+        "contactEmail": (user.contact_email if user else None) or row.email_normalized,
+        "domainUsername": ad_idents[0]["domainUsername"] if ad_idents else None,
+        "department": (user.directory_department if user else "") or "",
+        "identitySource": _identity_source(user, has_allowlist=True),
         "googleSub": _google_sub(user),
         "googleLinked": identity_status == "linked",
         "identityStatus": identity_status,
@@ -222,10 +244,42 @@ def _user_dto(
         "allowlisted": True,
         "allowlistEnabled": bool(row.enabled),
         "canGrant": identity_status in {"linked", "pending"} and bool(row.enabled),
-        "adIdentities": _ad_idents(user),
+        "adIdentities": ad_idents,
         "superAdmin": bool(user.is_super_admin) if user is not None else False,
         "createdAt": row.created_at.isoformat() if row.created_at else None,
         "updatedAt": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
+def _ad_only_user_dto(user: QkaUser, chat: ChatAccess | None) -> dict:
+    ad_idents = _ad_idents(user)
+    return {
+        "allowlistId": None,
+        "qkaUserId": str(user.id),
+        "displayName": user.display_name,
+        "googleProfileName": None,
+        "primaryEmail": user.contact_email or "",
+        "contactEmail": user.contact_email,
+        "domainUsername": ad_idents[0]["domainUsername"] if ad_idents else None,
+        "department": user.directory_department or "",
+        "identitySource": _identity_source(user, has_allowlist=False),
+        "googleSub": _google_sub(user),
+        "googleLinked": False,
+        "identityStatus": "linked" if user.login_enabled or ad_idents else "ad_enrolled",
+        "accountStatus": "active" if user.status == 0 else "disabled",
+        "chatgptMembership": "unknown",
+        "chatgptMembershipSource": "unknown",
+        "chatgptMembershipVerifiedAt": None,
+        "chatgptMemberName": None,
+        "localChatEnabled": bool(chat.local_chat_enabled) if chat else False,
+        "mcpEnabled": bool(chat.mcp_enabled) if chat else False,
+        "allowlisted": False,
+        "allowlistEnabled": True,
+        "canGrant": bool(ad_idents),
+        "adIdentities": ad_idents,
+        "superAdmin": bool(user.is_super_admin),
+        "createdAt": user.created_at.isoformat() if user.created_at else None,
+        "updatedAt": user.updated_at.isoformat() if user.updated_at else None,
     }
 
 
@@ -248,28 +302,55 @@ def list_users(
     page: int = 1,
     page_size: int = 25,
 ) -> dict:
+    from qka_shared.chat_access import get_or_create_chat_access_for_user
+
     rows = session.execute(select(AllowedEmail).order_by(AllowedEmail.email_normalized)).scalars().all()
     by_email = _google_users_by_email(session)
-    chat_by_id = {c.allowed_email_id: c for c in session.execute(select(ChatAccess)).scalars().all()}
+    chat_rows = session.execute(select(ChatAccess)).scalars().all()
+    chat_by_allow = {c.allowed_email_id: c for c in chat_rows if c.allowed_email_id}
+    chat_by_user = {c.qka_user_id: c for c in chat_rows if c.qka_user_id}
     mem_by_id = {m.allowed_email_id: m for m in session.execute(select(ChatgptMembership)).scalars().all()}
 
     items = []
+    seen_user_ids: set[uuid.UUID] = set()
     for row in rows:
         linked = by_email.get(row.email_normalized) or []
         user = linked[0] if linked else None
+        if user is not None:
+            seen_user_ids.add(user.id)
         promote_allowlist_row_to_user(session, row, user)
-        chat = chat_by_id.get(row.id) or get_or_create_chat_access(session, row.id)
-        chat_by_id[row.id] = chat
+        chat = chat_by_allow.get(row.id) or get_or_create_chat_access(session, row.id)
+        chat_by_allow[row.id] = chat
         dto = _user_dto(row, user=user, chat=chat, membership=mem_by_id.get(row.id))
         items.append(dto)
+
+    # Include AD-enrolled QkaUsers that are not already represented by an allowlist row.
+    ad_users = session.execute(
+        select(QkaUser)
+        .options(selectinload(QkaUser.identities).selectinload(ExternalIdentity.google))
+        .join(ExternalIdentity, ExternalIdentity.qka_user_id == QkaUser.id)
+        .where(
+            ExternalIdentity.provider == PROVIDER_AD,
+            ExternalIdentity.link_status == LINKED,
+            QkaUser.is_super_admin.is_(False),
+        )
+    ).scalars().unique().all()
+    for user in ad_users:
+        if user.id in seen_user_ids:
+            continue
+        chat = chat_by_user.get(user.id) or get_or_create_chat_access_for_user(session, user.id)
+        items.append(_ad_only_user_dto(user, chat))
+        seen_user_ids.add(user.id)
 
     q = (search or "").strip().lower()
     if q:
         items = [
             item
             for item in items
-            if q in item["primaryEmail"].lower()
-            or q in (item["displayName"] or "").lower()
+            if q in (item.get("primaryEmail") or "").lower()
+            or q in (item.get("displayName") or "").lower()
+            or q in (item.get("domainUsername") or "").lower()
+            or q in (item.get("department") or "").lower()
             or q in (item.get("chatgptMemberName") or "").lower()
         ]
     if account_status:
@@ -282,6 +363,7 @@ def list_users(
     if chatgpt_membership:
         items = [item for item in items if item["chatgptMembership"] == chatgpt_membership.strip().lower()]
 
+    items.sort(key=lambda i: ((i.get("displayName") or "").lower(), i.get("primaryEmail") or ""))
     total = len(items)
     page = max(1, page)
     page_size = max(1, min(page_size, 100))
@@ -292,6 +374,7 @@ def list_users(
         "page": page,
         "pageSize": page_size,
         "membershipSync": membership_sync_info(),
+        "adOnlyLoginImplemented": False,
     }
 
 
@@ -433,6 +516,79 @@ def update_user(
         select(ChatgptMembership).where(ChatgptMembership.allowed_email_id == row.id)
     ).scalar_one_or_none()
     return _user_dto(row, user=linked[0] if linked else None, chat=chat, membership=membership)
+
+
+def update_ad_only_user(
+    session: Session,
+    actor: QkaUser,
+    qka_user_id: uuid.UUID,
+    *,
+    display_name: str | None = None,
+    enabled: bool | None = None,
+    local_chat_enabled: bool | None = None,
+    mcp_enabled: bool | None = None,
+    department: str | None = None,
+) -> dict:
+    """Update an AD-enrolled QkaUser that has no AllowedEmail row."""
+    user = session.get(QkaUser, qka_user_id)
+    if user is None:
+        raise LookupError("User was not found.")
+    chat = get_or_create_chat_access_for_user(session, user.id)
+    before = {
+        "displayName": user.display_name,
+        "enabled": user.status == 0,
+        "localChat": chat.local_chat_enabled,
+        "mcp": chat.mcp_enabled,
+        "department": user.directory_department or "",
+    }
+    if display_name is not None:
+        name = display_name.strip()
+        if not name:
+            raise ValueError("Full name is required.")
+        user.display_name = name[:256]
+    if department is not None:
+        user.directory_department = department.strip()[:512]
+    if enabled is not None:
+        # Soft-disable QKA account only — never writes to Active Directory.
+        user.status = 0 if enabled else 1
+    user.updated_at = _now()
+    session.flush()
+    if local_chat_enabled is not None or mcp_enabled is not None:
+        set_chat_access_for_user(
+            session,
+            actor.id,
+            user.id,
+            local_chat_enabled=bool(
+                local_chat_enabled if local_chat_enabled is not None else chat.local_chat_enabled
+            ),
+            mcp_enabled=bool(mcp_enabled if mcp_enabled is not None else chat.mcp_enabled),
+        )
+        chat = get_or_create_chat_access_for_user(session, user.id)
+    after = {
+        "displayName": user.display_name,
+        "enabled": user.status == 0,
+        "localChat": chat.local_chat_enabled,
+        "mcp": chat.mcp_enabled,
+        "department": user.directory_department or "",
+    }
+    actions = []
+    if before["displayName"] != after["displayName"] or before["department"] != after["department"]:
+        actions.append("UserEdited")
+    if before["enabled"] != after["enabled"]:
+        actions.append("UserEnabled" if after["enabled"] else "UserDisabled")
+    if before["localChat"] != after["localChat"] or before["mcp"] != after["mcp"]:
+        actions.append("ChannelAccessChanged")
+    for action in actions or ["UserEdited"]:
+        _audit(
+            session,
+            action=action,
+            actor_id=actor.id,
+            employee_email=user.contact_email or "",
+            detail=f"qkaUserId={user.id}; name={user.display_name}",
+            before=before,
+            after=after,
+        )
+    return _ad_only_user_dto(user, chat)
 
 
 def set_google_profile_name(session: Session, email_normalized: str, profile_name: str) -> None:

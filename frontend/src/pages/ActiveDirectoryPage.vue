@@ -137,32 +137,114 @@
 
         <q-tab-panel name="users">
           <div class="row q-col-gutter-sm q-mb-md items-center">
-            <div class="col">
+            <div class="col-12 col-md-3">
               <q-input v-model="userSearch" outlined dense clearable :label="t('ad.searchUsers')" @keyup.enter="loadUsers" />
+            </div>
+            <div class="col-6 col-md-2">
+              <q-input v-model="userDepartment" outlined dense clearable :label="t('ad.filterDepartment')" @keyup.enter="loadUsers" />
+            </div>
+            <div class="col-6 col-md-2">
+              <q-select
+                v-model="filterAccountStatus"
+                outlined
+                dense
+                clearable
+                emit-value
+                map-options
+                :options="accountStatusOptions"
+                :label="t('ad.filterAccountStatus')"
+                @update:model-value="loadUsers"
+              />
+            </div>
+            <div class="col-6 col-md-2">
+              <q-select
+                v-model="filterEligibility"
+                outlined
+                dense
+                clearable
+                emit-value
+                map-options
+                :options="eligibilityOptions"
+                :label="t('ad.filterEligibility')"
+                @update:model-value="loadUsers"
+              />
+            </div>
+            <div class="col-6 col-md-2">
+              <q-select
+                v-model="filterLinkStatus"
+                outlined
+                dense
+                clearable
+                emit-value
+                map-options
+                :options="linkStatusOptions"
+                :label="t('ad.filterLinkStatus')"
+                @update:model-value="loadUsers"
+              />
             </div>
             <div class="col-auto">
               <q-btn color="primary" unelevated :label="t('ad.search')" @click="loadUsers" />
             </div>
           </div>
+          <div class="row q-gutter-sm q-mb-md items-center">
+            <q-btn
+              outline
+              color="primary"
+              :disable="!selectedUserIds.length || eligibilityBusy"
+              :loading="eligibilityBusy"
+              :label="t('ad.bulkEnableEligible')"
+              @click="confirmBulkEligibility(true)"
+            />
+            <q-btn
+              outline
+              color="negative"
+              :disable="!selectedUserIds.length || eligibilityBusy"
+              :loading="eligibilityBusy"
+              :label="t('ad.bulkDisableEligible')"
+              @click="confirmBulkEligibility(false)"
+            />
+            <span class="text-caption text-grey-7">{{ t("ad.eligibilityHint") }}</span>
+          </div>
           <q-table
             flat
             bordered
             row-key="id"
+            selection="multiple"
+            v-model:selected="selectedUsers"
             :rows="users"
             :columns="userColumns"
             :loading="usersLoading"
             hide-pagination
             :rows-per-page-options="[0]"
           >
+            <template #body-cell-qkaEligible="props">
+              <q-td :props="props">
+                <q-badge
+                  :color="props.row.qkaEligible ? 'positive' : 'grey'"
+                  :label="props.row.qkaEligible ? t('ad.eligible') : t('ad.notEligible')"
+                />
+              </q-td>
+            </template>
+            <template #body-cell-accountStatus="props">
+              <q-td :props="props">
+                <q-badge
+                  :color="props.row.accountStatus === 'enabled' ? 'positive' : props.row.accountStatus === 'disabled' ? 'negative' : 'warning'"
+                  :label="accountStatusLabel(props.row.accountStatus)"
+                />
+              </q-td>
+            </template>
             <template #body-cell-mappingLabel="props">
               <q-td :props="props">
-                <span :class="mapClass(props.row.mappingStatus)">{{ props.row.mappingLabel }}</span>
+                <div :class="mapClass(props.row.mappingStatus)">{{ mappingLabel(props.row) }}</div>
+                <div v-if="props.row.suggestedMatchEmail" class="text-caption text-grey-7">
+                  {{ t("ad.suggestedMatch") }}: {{ props.row.suggestedMatchEmail }}
+                </div>
               </q-td>
             </template>
             <template #body-cell-actions="props">
               <q-td :props="props">
                 <q-btn
-                  v-if="props.row.mappingStatus === 1 || props.row.mappingStatus === 0"
+                  v-if="props.row.canApproveLink"
                   flat
                   dense
                   color="primary"
@@ -170,12 +252,20 @@
                   @click="approveLink(props.row)"
                 />
                 <q-btn
-                  v-if="props.row.mappingStatus === 2"
+                  v-if="props.row.canUnlink"
                   flat
                   dense
                   color="negative"
                   :label="t('ad.unlink')"
                   @click="unlink(props.row)"
+                />
+                <q-btn
+                  v-if="props.row.suggestedMatchEmail && !props.row.canApproveLink && props.row.mappingStatus !== 2"
+                  flat
+                  dense
+                  color="grey-7"
+                  :label="t('ad.reviewMatch')"
+                  disable
                 />
               </q-td>
             </template>
@@ -257,6 +347,12 @@ const lastTestOk = ref(false);
 const users = ref<any[]>([]);
 const usersLoading = ref(false);
 const userSearch = ref("");
+const userDepartment = ref("");
+const filterAccountStatus = ref<string | null>(null);
+const filterEligibility = ref<string | null>(null);
+const filterLinkStatus = ref<number | null>(null);
+const selectedUsers = ref<any[]>([]);
+const eligibilityBusy = ref(false);
 const groups = ref<any[]>([]);
 const ous = ref<Array<{ name: string; distinguishedName: string; selected: boolean }>>([]);
 const ouSearch = ref("");
@@ -335,18 +431,36 @@ const overviewStats = computed(() => [
   { label: t("ad.conflicts"), value: overview.value?.conflictMappings ?? "—" },
 ]);
 
+const accountStatusOptions = computed(() => [
+  { label: t("ad.enabled"), value: "enabled" },
+  { label: t("ad.disabled"), value: "disabled" },
+  { label: t("ad.missing"), value: "missing" },
+]);
+const eligibilityOptions = computed(() => [
+  { label: t("ad.eligible"), value: "eligible" },
+  { label: t("ad.notEligible"), value: "not_eligible" },
+]);
+const linkStatusOptions = computed(() => [
+  { label: t("ad.linkLinked"), value: 2 },
+  { label: t("ad.linkPending"), value: 1 },
+  { label: t("ad.linkUnlinked"), value: 0 },
+  { label: t("ad.linkConflict"), value: 3 },
+]);
+const selectedUserIds = computed(() => selectedUsers.value.map((row) => row.id));
+
 const userColumns = computed<QTableColumn[]>(() => [
-  { name: "googleAccount", label: t("ad.colGoogle"), field: "googleAccount", align: "left" },
-  { name: "samAccountName", label: t("ad.colAdUser"), field: "samAccountName", align: "left" },
-  { name: "department", label: t("ad.colDepartment"), field: "department", align: "left" },
-  { name: "mappingLabel", label: t("ad.colIdentityStatus"), field: "mappingLabel", align: "left" },
+  { name: "displayName", label: t("ad.colFullName"), field: "displayName", align: "left" },
+  { name: "samAccountName", label: t("ad.colDomainUsername"), field: "samAccountName", align: "left" },
   {
-    name: "accountEnabled",
-    label: t("ad.colAccountStatus"),
-    field: (row: any) => (row.accountEnabled ? t("ad.enabled") : t("ad.disabled")),
+    name: "department",
+    label: t("ad.colDepartment"),
+    field: (row: any) => row.department || t("ad.departmentNotSet"),
     align: "left",
   },
-  { name: "actions", label: "", field: "id", align: "right" },
+  { name: "accountStatus", label: t("ad.colAccountStatus"), field: "accountStatus", align: "left" },
+  { name: "qkaEligible", label: t("ad.colEligibility"), field: "qkaEligible", align: "left" },
+  { name: "mappingLabel", label: t("ad.colIdentityStatus"), field: "mappingLabel", align: "left" },
+  { name: "actions", label: t("ad.colActions"), field: "id", align: "right" },
 ]);
 
 const groupColumns = computed<QTableColumn[]>(() => [
@@ -408,6 +522,20 @@ function mapClass(status: number) {
   if (status === 2) return "text-positive text-weight-medium";
   if (status === 3) return "text-negative";
   return "text-grey-7";
+}
+
+function mappingLabel(row: any) {
+  if (row.mappingStatus === 2) return t("ad.linkLinked");
+  if (row.mappingStatus === 1) return t("ad.linkPending");
+  if (row.mappingStatus === 3) return t("ad.linkConflict");
+  return t("ad.linkUnlinked");
+}
+
+function accountStatusLabel(status: string) {
+  if (status === "enabled") return t("ad.enabled");
+  if (status === "disabled") return t("ad.disabled");
+  if (status === "missing") return t("ad.missing");
+  return status;
 }
 
 function applyConnection(row: AdConnection | null) {
@@ -512,10 +640,45 @@ async function loadUsers() {
   if (!connectionId.value) return;
   usersLoading.value = true;
   try {
-    const body = await api.adUsers(connectionId.value, { search: userSearch.value });
+    const body = await api.adUsers(connectionId.value, {
+      search: userSearch.value,
+      department: userDepartment.value || undefined,
+      accountStatus: filterAccountStatus.value || undefined,
+      eligibility: filterEligibility.value || undefined,
+      mappingStatus: filterLinkStatus.value != null ? filterLinkStatus.value : undefined,
+    });
     users.value = body.items;
+    selectedUsers.value = [];
   } finally {
     usersLoading.value = false;
+  }
+}
+
+async function confirmBulkEligibility(eligible: boolean) {
+  if (!connectionId.value || !selectedUserIds.value.length) return;
+  const ok = window.confirm(
+    eligible ? t("ad.confirmEnableEligible") : t("ad.confirmDisableEligible"),
+  );
+  if (!ok) return;
+  eligibilityBusy.value = true;
+  error.value = "";
+  info.value = "";
+  try {
+    const result = await api.adSetEligibility(connectionId.value, selectedUserIds.value, eligible);
+    const skipped = result.skipped?.length || 0;
+    const errs = result.errors?.length || 0;
+    if (errs) {
+      error.value = t("ad.eligibilityError", { updated: result.updated, errors: errs });
+    } else if (skipped) {
+      info.value = t("ad.eligibilityPartial", { updated: result.updated, skipped });
+    } else {
+      info.value = t("ad.eligibilityOk", { updated: result.updated });
+    }
+    await loadUsers();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : t("ad.eligibilityFail");
+  } finally {
+    eligibilityBusy.value = false;
   }
 }
 

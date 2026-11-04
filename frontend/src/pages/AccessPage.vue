@@ -40,7 +40,7 @@
                 flat
                 bordered
                 dense
-                row-key="allowlistId"
+                :row-key="(row: DirectoryUser) => row.allowlistId || row.qkaUserId || row.primaryEmail"
                 :rows="userRows"
                 :columns="userColumns"
                 :loading="usersLoading"
@@ -51,17 +51,18 @@
                 <template #body-cell-displayName="props">
                   <q-td :props="props">{{ props.row.displayName }}</q-td>
                 </template>
+                <template #body-cell-domainUsername="props">
+                  <q-td :props="props">{{ props.row.domainUsername || "—" }}</q-td>
+                </template>
                 <template #body-cell-primaryEmail="props">
-                  <q-td :props="props">{{ props.row.primaryEmail }}</q-td>
+                  <q-td :props="props">{{ props.row.primaryEmail || "—" }}</q-td>
                 </template>
-                <template #body-cell-identityStatus="props">
-                  <q-td :props="props">
-                    <q-badge :color="identityBadgeColor(props.row.identityStatus)" :label="identityStatusLabel(props.row.identityStatus)" />
-                  </q-td>
+                <template #body-cell-department="props">
+                  <q-td :props="props">{{ props.row.department || "—" }}</q-td>
                 </template>
-                <template #body-cell-chatgptMembership="props">
+                <template #body-cell-identitySource="props">
                   <q-td :props="props">
-                    <q-badge outline :color="membershipBadgeColor(props.row.chatgptMembership)" :label="membershipLabel(props.row.chatgptMembership)" />
+                    <q-badge outline color="primary" :label="identitySourceLabel(props.row.identitySource)" />
                   </q-td>
                 </template>
                 <template #body-cell-localChatEnabled="props">
@@ -87,10 +88,10 @@
                         flat
                         dense
                         size="sm"
-                        :color="props.row.allowlistEnabled ? 'negative' : 'positive'"
+                        :color="props.row.accountStatus === 'disabled' ? 'positive' : 'negative'"
                         no-caps
-                        :loading="busyUserId === props.row.allowlistId"
-                        :label="props.row.allowlistEnabled ? t('access.disable') : t('access.enable')"
+                        :loading="busyUserId === (props.row.allowlistId || props.row.qkaUserId)"
+                        :label="props.row.accountStatus === 'disabled' ? t('access.enable') : t('access.disable')"
                         @click="toggleUserEnabled(props.row)"
                       />
                     </div>
@@ -101,21 +102,113 @@
           </q-card>
 
           <q-dialog v-model="userDialog">
-            <q-card style="min-width: 420px; max-width: 92vw">
+            <q-card style="min-width: 480px; max-width: 94vw">
               <q-card-section>
                 <div class="text-subtitle1">{{ editingUser ? t("access.editUser") : t("access.addUser") }}</div>
-                <p class="text-caption text-grey-7">{{ t("access.domainHint") }}</p>
+                <p class="text-caption text-grey-7">
+                  {{ editingUser ? t("access.domainHint") : t("access.identitySourceHint") }}
+                </p>
               </q-card-section>
               <q-card-section class="q-gutter-md">
-                <q-input v-model="userForm.displayName" outlined dense :label="t('access.fullName')" />
-                <q-input v-model="userForm.email" outlined dense type="email" :label="t('access.email')" :disable="!!editingUser" />
+                <q-btn-toggle
+                  v-if="!editingUser"
+                  v-model="userForm.identitySource"
+                  spread
+                  unelevated
+                  toggle-color="primary"
+                  :options="identitySourceOptions"
+                  @update:model-value="onIdentitySourceChange"
+                />
+
+                <template v-if="!editingUser && userForm.identitySource === 'active_directory'">
+                  <q-select
+                    v-model="selectedAdUser"
+                    outlined
+                    dense
+                    use-input
+                    fill-input
+                    hide-selected
+                    input-debounce="300"
+                    :options="adPickerOptions"
+                    :loading="adPickerLoading"
+                    option-value="objectGuid"
+                    option-label="label"
+                    emit-value
+                    map-options
+                    :label="t('access.adPicker')"
+                    @filter="filterAdUsers"
+                    @update:model-value="onAdUserSelected"
+                  >
+                    <template #option="scope">
+                      <q-item v-bind="scope.itemProps">
+                        <q-item-section>
+                          <q-item-label>{{ scope.opt.displayName }}</q-item-label>
+                          <q-item-label caption>
+                            {{ scope.opt.samAccountName }}
+                            ·
+                            {{ scope.opt.department || t("access.adDepartmentNotSet") }}
+                          </q-item-label>
+                        </q-item-section>
+                      </q-item>
+                    </template>
+                  </q-select>
+                  <q-input v-model="userForm.displayName" outlined dense :label="t('access.fullName')" readonly />
+                  <q-input v-model="userForm.domainUsername" outlined dense :label="t('access.domainUsername')" readonly />
+                  <q-banner v-if="adDepartmentBlank" dense class="bg-warning text-dark">
+                    {{ t("access.adDepartmentBlank") }}
+                  </q-banner>
+                  <q-input
+                    v-model="userForm.departmentOverride"
+                    outlined
+                    dense
+                    :label="adDepartmentBlank ? t('access.qkaDepartmentRequired') : t('access.departmentOverride')"
+                    :hint="t('access.departmentOverrideHint')"
+                  />
+                  <q-input
+                    v-model="userForm.email"
+                    outlined
+                    dense
+                    type="email"
+                    :label="t('access.optionalContactEmail')"
+                    :hint="t('access.optionalContactEmailHint')"
+                  />
+                  <q-banner v-if="linkExistingPrompt" dense class="bg-info text-dark">
+                    {{ t("access.linkExistingPrompt") }}
+                    <template #action>
+                      <q-btn flat dense color="primary" :label="t('access.linkExistingConfirm')" @click="confirmLinkExisting" />
+                    </template>
+                  </q-banner>
+                </template>
+
+                <template v-else>
+                  <q-input v-model="userForm.displayName" outlined dense :label="t('access.fullName')" />
+                  <q-input
+                    v-model="userForm.email"
+                    outlined
+                    dense
+                    type="email"
+                    :label="t('access.email')"
+                    :disable="!!editingUser"
+                  />
+                </template>
+
                 <q-checkbox v-model="userForm.localChatEnabled" dense :label="t('access.localChat')" />
                 <q-checkbox v-model="userForm.mcpEnabled" dense :label="t('access.mcpChat')" />
                 <div class="text-caption text-grey-7">{{ t("access.channelDefaultOff") }}</div>
+                <div v-if="!editingUser && userForm.identitySource === 'active_directory'" class="text-caption text-warning">
+                  {{ t("access.adOnlyLoginBlocker") }}
+                </div>
               </q-card-section>
               <q-card-actions align="right">
                 <q-btn flat :label="t('access.cancel')" v-close-popup />
-                <q-btn color="primary" unelevated :loading="savingUser" :label="t('access.save')" @click="saveUserDialog" />
+                <q-btn
+                  color="primary"
+                  unelevated
+                  :loading="savingUser"
+                  :label="editingUser ? t('access.save') : t('access.createUser')"
+                  :disable="!canSubmitUser"
+                  @click="saveUserDialog"
+                />
               </q-card-actions>
             </q-card>
           </q-dialog>
@@ -449,7 +542,36 @@ const userDialog = ref(false);
 const editingUser = ref<DirectoryUser | null>(null);
 const savingUser = ref(false);
 const busyUserId = ref<string | null>(null);
-const userForm = ref({ displayName: "", email: "", localChatEnabled: false, mcpEnabled: false });
+const userForm = ref({
+  identitySource: "google" as "google" | "active_directory",
+  displayName: "",
+  email: "",
+  domainUsername: "",
+  departmentOverride: "",
+  objectGuid: "",
+  linkExistingQkaUserId: null as string | null,
+  localChatEnabled: false,
+  mcpEnabled: false,
+});
+const selectedAdUser = ref<string | null>(null);
+const adPickerOptions = ref<
+  Array<{
+    label: string;
+    value: string;
+    objectGuid: string;
+    displayName: string;
+    samAccountName: string;
+    department: string;
+    departmentBlank: boolean;
+    mail: string | null;
+    alreadyLinked: boolean;
+    linkedQkaUserId: string | null;
+  }>
+>([]);
+const adPickerLoading = ref(false);
+const adDepartmentBlank = ref(false);
+const linkExistingPrompt = ref(false);
+const pendingLinkUserId = ref<string | null>(null);
 const importDialog = ref(false);
 const importFile = ref<File | null>(null);
 const importing = ref(false);
@@ -528,16 +650,32 @@ const membershipFilterOptions = computed(() => [
   { label: t("access.memberUnknown"), value: "unknown" },
 ]);
 
+const identitySourceOptions = computed(() => [
+  { label: t("access.sourceActiveDirectory"), value: "active_directory" },
+  { label: t("access.sourceGoogle"), value: "google" },
+]);
+
 const userColumns: QTableProps["columns"] = [
   { name: "displayName", label: "Full Name", field: "displayName", align: "left" },
-  { name: "primaryEmail", label: "Email Address", field: "primaryEmail", align: "left" },
-  { name: "identityStatus", label: "Google Identity", field: "identityStatus", align: "left" },
-  { name: "chatgptMembership", label: "ChatGPT Business", field: "chatgptMembership", align: "left" },
+  { name: "domainUsername", label: "Domain Username", field: "domainUsername", align: "left" },
+  { name: "primaryEmail", label: "Email", field: "primaryEmail", align: "left" },
+  { name: "department", label: "Department", field: "department", align: "left" },
+  { name: "identitySource", label: "Identity Source", field: "identitySource", align: "left" },
   { name: "localChatEnabled", label: "Local AI Chat", field: "localChatEnabled", align: "left" },
   { name: "mcpEnabled", label: "MCP Access", field: "mcpEnabled", align: "left" },
   { name: "accountStatus", label: "Account Status", field: "accountStatus", align: "left" },
   { name: "actions", label: "Actions", field: "actions", align: "right" },
 ];
+
+const canSubmitUser = computed(() => {
+  if (editingUser.value) return !!(userForm.value.displayName || "").trim();
+  if (userForm.value.identitySource === "active_directory") {
+    if (!(userForm.value.objectGuid || "").trim()) return false;
+    if (adDepartmentBlank.value && !(userForm.value.departmentOverride || "").trim()) return false;
+    return true;
+  }
+  return !!(userForm.value.displayName || "").trim() && !!(userForm.value.email || "").trim();
+});
 
 const auditColumns: QTableProps["columns"] = [
   { name: "createdAt", label: "Date / Time", field: "createdAt", align: "left" },
@@ -613,7 +751,14 @@ const canSaveRule = computed(() => {
 function identityStatusLabel(status: SourceEmployee["identityStatus"]) {
   if (status === "linked") return t("access.statusLinked");
   if (status === "pending") return t("access.statusPending");
+  if (status === "ad_enrolled") return t("access.statusAdEnrolled");
   return t("access.statusDisabled");
+}
+function identitySourceLabel(source?: DirectoryUser["identitySource"]) {
+  if (source === "ad") return t("access.sourceAdShort");
+  if (source === "both") return t("access.sourceBothShort");
+  if (source === "google") return t("access.sourceGoogleShort");
+  return t("access.sourceNoneShort");
 }
 function identityBadgeColor(status: SourceEmployee["identityStatus"]) {
   if (status === "linked") return "positive";
@@ -691,21 +836,113 @@ async function onUsersRequest(req: { pagination: { page: number; rowsPerPage: nu
   await loadUsers();
 }
 
+function resetUserForm() {
+  userForm.value = {
+    identitySource: "google",
+    displayName: "",
+    email: "",
+    domainUsername: "",
+    departmentOverride: "",
+    objectGuid: "",
+    linkExistingQkaUserId: null,
+    localChatEnabled: false,
+    mcpEnabled: false,
+  };
+  selectedAdUser.value = null;
+  adDepartmentBlank.value = false;
+  linkExistingPrompt.value = false;
+  pendingLinkUserId.value = null;
+  adPickerOptions.value = [];
+}
+
 function openAddUser() {
   editingUser.value = null;
-  userForm.value = { displayName: "", email: "", localChatEnabled: false, mcpEnabled: false };
+  resetUserForm();
   userDialog.value = true;
 }
 
 function openEditUser(row: DirectoryUser) {
   editingUser.value = row;
   userForm.value = {
+    identitySource: row.identitySource === "ad" || row.identitySource === "both" ? "active_directory" : "google",
     displayName: row.displayName,
     email: row.primaryEmail,
+    domainUsername: row.domainUsername || "",
+    departmentOverride: row.department || "",
+    objectGuid: "",
+    linkExistingQkaUserId: null,
     localChatEnabled: row.localChatEnabled,
     mcpEnabled: row.mcpEnabled,
   };
   userDialog.value = true;
+}
+
+function onIdentitySourceChange() {
+  selectedAdUser.value = null;
+  userForm.value.objectGuid = "";
+  userForm.value.displayName = "";
+  userForm.value.domainUsername = "";
+  userForm.value.departmentOverride = "";
+  userForm.value.email = "";
+  userForm.value.linkExistingQkaUserId = null;
+  adDepartmentBlank.value = false;
+  linkExistingPrompt.value = false;
+  pendingLinkUserId.value = null;
+}
+
+async function filterAdUsers(val: string, update: (fn: () => void) => void) {
+  adPickerLoading.value = true;
+  try {
+    const page = await api.adEligibleUsers({ search: val || "", pageSize: 25 });
+    update(() => {
+      adPickerOptions.value = page.items.map((item) => ({
+        label: `${item.displayName} · ${item.samAccountName}`,
+        value: item.objectGuid,
+        objectGuid: item.objectGuid,
+        displayName: item.displayName,
+        samAccountName: item.samAccountName,
+        department: item.department,
+        departmentBlank: item.departmentBlank,
+        mail: item.mail,
+        alreadyLinked: item.alreadyLinked,
+        linkedQkaUserId: item.linkedQkaUserId,
+      }));
+    });
+  } catch (err) {
+    usersError.value = err instanceof Error ? err.message : t("access.adPickerError");
+    update(() => {
+      adPickerOptions.value = [];
+    });
+  } finally {
+    adPickerLoading.value = false;
+  }
+}
+
+function onAdUserSelected(guid: string | null) {
+  const hit = adPickerOptions.value.find((o) => o.objectGuid === guid);
+  if (!hit) {
+    userForm.value.objectGuid = "";
+    return;
+  }
+  if (hit.alreadyLinked && hit.linkedQkaUserId) {
+    usersError.value = t("access.adAlreadyLinked", { id: hit.linkedQkaUserId });
+  }
+  userForm.value.objectGuid = hit.objectGuid;
+  userForm.value.displayName = hit.displayName;
+  userForm.value.domainUsername = hit.samAccountName;
+  userForm.value.departmentOverride = hit.department || "";
+  userForm.value.email = hit.mail || "";
+  adDepartmentBlank.value = hit.departmentBlank;
+  linkExistingPrompt.value = false;
+  pendingLinkUserId.value = null;
+  userForm.value.linkExistingQkaUserId = null;
+}
+
+function confirmLinkExisting() {
+  if (!pendingLinkUserId.value) return;
+  userForm.value.linkExistingQkaUserId = pendingLinkUserId.value;
+  linkExistingPrompt.value = false;
+  void saveUserDialog();
 }
 
 async function saveUserDialog() {
@@ -713,13 +950,33 @@ async function saveUserDialog() {
   usersError.value = "";
   try {
     if (editingUser.value) {
-      await api.updateDirectoryUser(editingUser.value.allowlistId, {
+      if (editingUser.value.allowlistId) {
+        await api.updateDirectoryUser(editingUser.value.allowlistId, {
+          displayName: userForm.value.displayName,
+          localChatEnabled: userForm.value.localChatEnabled,
+          mcpEnabled: userForm.value.mcpEnabled,
+        });
+      } else if (editingUser.value.qkaUserId) {
+        await api.updateAdDirectoryUser(editingUser.value.qkaUserId, {
+          displayName: userForm.value.displayName,
+          localChatEnabled: userForm.value.localChatEnabled,
+          mcpEnabled: userForm.value.mcpEnabled,
+        });
+      }
+    } else if (userForm.value.identitySource === "active_directory") {
+      await api.createDirectoryUser({
+        identitySource: "active_directory",
+        objectGuid: userForm.value.objectGuid,
         displayName: userForm.value.displayName,
-        localChatEnabled: userForm.value.localChatEnabled,
-        mcpEnabled: userForm.value.mcpEnabled,
+        departmentOverride: userForm.value.departmentOverride || null,
+        contactEmail: userForm.value.email || null,
+        linkExistingQkaUserId: userForm.value.linkExistingQkaUserId,
+        localChatEnabled: false,
+        mcpEnabled: false,
       });
     } else {
       await api.createDirectoryUser({
+        identitySource: "google",
         displayName: userForm.value.displayName,
         email: userForm.value.email,
         localChatEnabled: userForm.value.localChatEnabled,
@@ -729,16 +986,29 @@ async function saveUserDialog() {
     userDialog.value = false;
     await loadUsers();
   } catch (err) {
-    usersError.value = err instanceof Error ? err.message : t("access.addError");
+    const message = err instanceof Error ? err.message : t("access.addError");
+    const match = /qkaUserId=([0-9a-fA-F-]{36})/.exec(message);
+    if (match && userForm.value.identitySource === "active_directory" && !userForm.value.linkExistingQkaUserId) {
+      pendingLinkUserId.value = match[1];
+      linkExistingPrompt.value = true;
+      usersError.value = message;
+    } else {
+      usersError.value = message;
+    }
   } finally {
     savingUser.value = false;
   }
 }
 
 async function toggleUserEnabled(row: DirectoryUser) {
-  busyUserId.value = row.allowlistId;
+  busyUserId.value = row.allowlistId || row.qkaUserId;
   try {
-    await api.updateDirectoryUser(row.allowlistId, { enabled: !row.allowlistEnabled });
+    const enable = row.accountStatus === "disabled";
+    if (row.allowlistId) {
+      await api.updateDirectoryUser(row.allowlistId, { enabled: enable });
+    } else if (row.qkaUserId) {
+      await api.updateAdDirectoryUser(row.qkaUserId, { enabled: enable });
+    }
     await loadUsers();
   } catch (err) {
     usersError.value = err instanceof Error ? err.message : t("access.updateError");

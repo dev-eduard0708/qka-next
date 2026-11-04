@@ -18,6 +18,10 @@ class QkaUser(Base):
     display_name: Mapped[str] = mapped_column("DisplayName", String(256))
     status: Mapped[int] = mapped_column("Status", Integer, default=0)
     effective_department_id: Mapped[uuid.UUID | None] = mapped_column("EffectiveDepartmentId", Uuid(as_uuid=True), nullable=True)
+    # Admin-assigned directory department (AD override or Google enrollment). Not overwritten by AD resync.
+    directory_department: Mapped[str] = mapped_column("DirectoryDepartment", String(512), default="")
+    # Optional contact email (may differ from verified Google identity email).
+    contact_email: Mapped[str | None] = mapped_column("ContactEmail", String(256), nullable=True)
     login_enabled: Mapped[bool] = mapped_column("LoginEnabled", Boolean, default=False)
     is_directory_operator: Mapped[bool] = mapped_column("IsDirectoryOperator", Boolean, default=False)
     is_super_admin: Mapped[bool] = mapped_column("IsSuperAdmin", Boolean, default=False)
@@ -123,12 +127,16 @@ class AllowedEmail(Base):
 
 
 class ChatAccess(Base):
-    """Per-allowlist QKA chat channel flags (Local AI Chat / ChatGPT MCP). Not ChatGPT seat assignment."""
+    """QKA chat channel flags (Local AI Chat / ChatGPT MCP). Not ChatGPT seat assignment.
+
+    Rows are keyed by AllowedEmail (Google allowlist path) and/or QkaUser (AD enrollment path).
+    """
 
     __tablename__ = "qka_next_chat_access"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
-    allowed_email_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), unique=True, index=True)
+    allowed_email_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), unique=True, index=True, nullable=True)
+    qka_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), unique=True, index=True, nullable=True)
     local_chat_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     mcp_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -664,6 +672,10 @@ class AdDirectoryUser(Base):
     distinguished_name: Mapped[str] = mapped_column(String(2048), default="")
     account_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     is_present: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Admin-controlled QKA enrollment eligibility (PostgreSQL only; never written to AD).
+    qka_eligible: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Department chosen at QKA enrollment when AD department is blank or overridden.
+    department_override: Mapped[str] = mapped_column(String(512), default="")
     mapping_status: Mapped[int] = mapped_column(Integer, default=0)  # 0 unlinked 1 pending 2 linked 3 conflict
     linked_qka_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     linked_external_identity_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)

@@ -32,7 +32,12 @@ class SetEnabledRequest(BaseModel):
 
 class CreateUserRequest(BaseModel):
     displayName: str
-    email: str
+    email: str = ""
+    identitySource: str = "google"  # google | active_directory
+    objectGuid: str | None = None
+    departmentOverride: str | None = None
+    contactEmail: str | None = None
+    linkExistingQkaUserId: uuid.UUID | None = None
     localChatEnabled: bool = False
     mcpEnabled: bool = False
     enabled: bool = True
@@ -195,7 +200,51 @@ def create_directory_user(
     actor = _require_super_admin(request, settings, session, mutating=True)
     if settings.database_read_only:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="The database is read-only.")
+    source = (body.identitySource or "google").strip().lower().replace("-", "_")
+    if source in {"active_directory", "ad", "windows_integrated"}:
+        from qka_api.services import active_directory as ad_svc
+
+        if body.localChatEnabled or body.mcpEnabled:
+            # Still allow explicit flags, but defaults remain off unless requested.
+            pass
+        try:
+            enrolled = ad_svc.enroll_directory_user(
+                session,
+                actor.id,
+                object_guid=body.objectGuid or "",
+                department_override=body.departmentOverride,
+                contact_email=body.contactEmail if body.contactEmail is not None else (body.email or None),
+                link_existing_qka_user_id=body.linkExistingQkaUserId,
+            )
+        except ad_svc.AdValidationError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except ad_svc.AdConflictError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        session.flush()
+        # Map enrollment result into directory list shape for the UI.
+        return {
+            "allowlistId": None,
+            "qkaUserId": enrolled["qkaUserId"],
+            "displayName": enrolled["displayName"],
+            "primaryEmail": enrolled.get("contactEmail") or "",
+            "contactEmail": enrolled.get("contactEmail"),
+            "domainUsername": enrolled.get("domainUsername"),
+            "department": enrolled.get("department") or "",
+            "identitySource": "ad",
+            "identityStatus": "ad_enrolled",
+            "accountStatus": "active",
+            "localChatEnabled": False,
+            "mcpEnabled": False,
+            "allowlisted": bool(enrolled.get("contactEmail")),
+            "adOnlyLoginImplemented": False,
+            "created": enrolled.get("created"),
+            "linkedExisting": enrolled.get("linkedExisting"),
+            "objectGuid": enrolled.get("objectGuid"),
+            "objectSid": enrolled.get("objectSid"),
+        }
     try:
+        if not (body.email or "").strip():
+            raise ValueError("Email is required for Google / email enrollment.")
         created = directory.create_user(
             session,
             actor,
@@ -261,6 +310,36 @@ def update_directory_user(
             session,
             actor,
             allowlist_id,
+            display_name=body.displayName,
+            enabled=body.enabled,
+            local_chat_enabled=body.localChatEnabled,
+            mcp_enabled=body.mcpEnabled,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    session.flush()
+    return updated
+
+
+@router.post("/users/qka/{qka_user_id}")
+def update_ad_directory_user(
+    qka_user_id: uuid.UUID,
+    body: UpdateUserRequest,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    """Update AD-enrolled QkaUser (no AllowedEmail). Does not write to Active Directory."""
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    if settings.database_read_only:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="The database is read-only.")
+    try:
+        updated = directory.update_ad_only_user(
+            session,
+            actor,
+            qka_user_id,
             display_name=body.displayName,
             enabled=body.enabled,
             local_chat_enabled=body.localChatEnabled,

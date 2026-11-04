@@ -22,14 +22,18 @@ export type AllowedEmail = {
 };
 
 export type DirectoryUser = {
-  allowlistId: string;
+  allowlistId: string | null;
   qkaUserId: string | null;
   displayName: string;
   googleProfileName?: string | null;
   primaryEmail: string;
+  contactEmail?: string | null;
+  domainUsername?: string | null;
+  department?: string;
+  identitySource?: "ad" | "google" | "both" | "none";
   googleSub: string | null;
   googleLinked: boolean;
-  identityStatus: "linked" | "pending" | "disabled";
+  identityStatus: "linked" | "pending" | "disabled" | "ad_enrolled";
   accountStatus: "active" | "disabled" | "pending";
   chatgptMembership: "verified_member" | "verified_nonmember" | "unknown";
   chatgptMembershipSource?: string;
@@ -44,6 +48,9 @@ export type DirectoryUser = {
   superAdmin: boolean;
   createdAt?: string | null;
   updatedAt?: string | null;
+  adOnlyLoginImplemented?: boolean;
+  created?: boolean;
+  linkedExisting?: boolean;
 };
 
 export type SourceEmployee = DirectoryUser;
@@ -355,8 +362,13 @@ export const api = {
     return request<DirectoryUsersPage>(`/api/v1/access/users${suffix}`);
   },
   createDirectoryUser: (body: {
-    displayName: string;
-    email: string;
+    displayName?: string;
+    email?: string;
+    identitySource?: "google" | "active_directory";
+    objectGuid?: string;
+    departmentOverride?: string | null;
+    contactEmail?: string | null;
+    linkExistingQkaUserId?: string | null;
     localChatEnabled?: boolean;
     mcpEnabled?: boolean;
     enabled?: boolean;
@@ -378,6 +390,45 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  updateAdDirectoryUser: (
+    qkaUserId: string,
+    body: {
+      displayName?: string;
+      enabled?: boolean;
+      localChatEnabled?: boolean;
+      mcpEnabled?: boolean;
+    },
+  ) =>
+    request<DirectoryUser>(`/api/v1/access/users/qka/${qkaUserId}`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  adEligibleUsers: (opts?: { search?: string; connectionId?: string; page?: number; pageSize?: number }) => {
+    const q = new URLSearchParams();
+    if (opts?.search) q.set("search", opts.search);
+    if (opts?.connectionId) q.set("connectionId", opts.connectionId);
+    if (opts?.page) q.set("page", String(opts.page));
+    if (opts?.pageSize) q.set("pageSize", String(opts.pageSize));
+    const suffix = q.toString() ? `?${q}` : "";
+    return request<{
+      items: Array<{
+        id: string;
+        objectGuid: string;
+        objectSid: string;
+        displayName: string;
+        samAccountName: string;
+        department: string;
+        departmentBlank: boolean;
+        mail: string | null;
+        alreadyLinked: boolean;
+        linkedQkaUserId: string | null;
+        connectionId: string;
+      }>;
+      total: number;
+      page: number;
+      pageSize: number;
+    }>(`/api/v1/admin/active-directory/eligible-users${suffix}`);
+  },
   membershipSyncInfo: () =>
     request<{ mode: string; automaticSyncSupported: boolean; note: string; acceptedCsvColumns: string[] }>(
       "/api/v1/access/users/membership-sync",
@@ -603,16 +654,34 @@ export const api = {
       `/api/v1/admin/active-directory/connections/${connectionId}/ou-scope`,
       { method: "PUT", body: JSON.stringify({ items }) },
     ),
-  adUsers: (connectionId: string, opts?: { search?: string; mappingStatus?: number; page?: number }) => {
+  adUsers: (
+    connectionId: string,
+    opts?: {
+      search?: string;
+      mappingStatus?: number;
+      accountStatus?: string;
+      eligibility?: string;
+      department?: string;
+      page?: number;
+    },
+  ) => {
     const q = new URLSearchParams();
     if (opts?.search) q.set("search", opts.search);
     if (opts?.mappingStatus != null) q.set("mappingStatus", String(opts.mappingStatus));
+    if (opts?.accountStatus) q.set("accountStatus", opts.accountStatus);
+    if (opts?.eligibility) q.set("eligibility", opts.eligibility);
+    if (opts?.department) q.set("department", opts.department);
     if (opts?.page) q.set("page", String(opts.page));
     const suffix = q.toString() ? `?${q}` : "";
     return request<{ items: any[]; total: number }>(
       `/api/v1/admin/active-directory/connections/${connectionId}/users${suffix}`,
     );
   },
+  adSetEligibility: (connectionId: string, directoryUserIds: string[], eligible: boolean) =>
+    request<{ ok: boolean; updated: number; skipped: any[]; errors: any[]; eligible: boolean }>(
+      `/api/v1/admin/active-directory/connections/${connectionId}/eligibility`,
+      { method: "POST", body: JSON.stringify({ directoryUserIds, eligible }) },
+    ),
   adGroups: (connectionId: string, opts?: { search?: string }) => {
     const q = new URLSearchParams();
     if (opts?.search) q.set("search", opts.search);

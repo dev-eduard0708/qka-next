@@ -99,6 +99,28 @@ def get_or_create_chat_access(session: Session, allowlist_id: uuid.UUID) -> Chat
     row = ChatAccess(
         id=uuid.uuid4(),
         allowed_email_id=allowlist_id,
+        qka_user_id=None,
+        local_chat_enabled=False,
+        mcp_enabled=False,
+        created_at=now,
+        updated_at=now,
+        updated_by_user_id=None,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def get_or_create_chat_access_for_user(session: Session, qka_user_id: uuid.UUID) -> ChatAccess:
+    """Chat channel row for AD-enrolled users (no AllowedEmail required). Defaults OFF."""
+    row = session.execute(select(ChatAccess).where(ChatAccess.qka_user_id == qka_user_id)).scalar_one_or_none()
+    if row is not None:
+        return row
+    now = _now()
+    row = ChatAccess(
+        id=uuid.uuid4(),
+        allowed_email_id=None,
+        qka_user_id=qka_user_id,
         local_chat_enabled=False,
         mcp_enabled=False,
         created_at=now,
@@ -145,6 +167,52 @@ def set_chat_access(
                 grant_id=None,
                 detail=f"email={allow.email_normalized}",
                 employee_email=allow.email_normalized,
+                share_name="",
+                before_detail=str(before),
+                after_detail=str(after),
+                created_at=_now(),
+            )
+        )
+    return row
+
+
+def set_chat_access_for_user(
+    session: Session,
+    actor_id: uuid.UUID,
+    qka_user_id: uuid.UUID,
+    *,
+    local_chat_enabled: bool,
+    mcp_enabled: bool,
+) -> ChatAccess:
+    """Update Local AI / MCP flags for an AD-enrolled QkaUser (no AllowedEmail required)."""
+    user = session.get(QkaUser, qka_user_id)
+    if user is None:
+        raise LookupError("User was not found.")
+    row = get_or_create_chat_access_for_user(session, qka_user_id)
+    before = {"localChat": row.local_chat_enabled, "mcp": row.mcp_enabled}
+    row.local_chat_enabled = bool(local_chat_enabled)
+    row.mcp_enabled = bool(mcp_enabled)
+    row.updated_at = _now()
+    row.updated_by_user_id = actor_id
+    session.flush()
+    after = {"localChat": row.local_chat_enabled, "mcp": row.mcp_enabled}
+    actions = []
+    if before["localChat"] != after["localChat"]:
+        actions.append("LocalChatEnabled" if after["localChat"] else "LocalChatDisabled")
+    if before["mcp"] != after["mcp"]:
+        actions.append("McpEnabled" if after["mcp"] else "McpDisabled")
+    email = (user.contact_email or "").strip()
+    for action in actions or ["ChatAccessUpdated"]:
+        session.add(
+            SourceGrantAudit(
+                id=uuid.uuid4(),
+                action=action,
+                actor_user_id=actor_id,
+                target_user_id=qka_user_id,
+                scope_id=None,
+                grant_id=None,
+                detail=f"qkaUserId={qka_user_id}",
+                employee_email=email,
                 share_name="",
                 before_detail=str(before),
                 after_detail=str(after),

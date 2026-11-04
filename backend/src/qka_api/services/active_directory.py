@@ -24,7 +24,8 @@ from qka_api.ldap_client import (
     domain_dns_to_base_dn,
     normalize_auth_mode,
 )
-from qka_shared.allowlist import ACCOUNT_ENABLED, LINKED, PROVIDER_AD, PROVIDER_GOOGLE
+from qka_shared.allowlist import ACCOUNT_ENABLED, LINKED, PROVIDER_AD, PROVIDER_GOOGLE, USER_ACTIVE
+from qka_shared.chat_access import get_or_create_chat_access, get_or_create_chat_access_for_user
 from qka_shared.config import Settings
 from qka_shared.email_address import try_normalize
 from qka_shared.models import (
@@ -35,6 +36,7 @@ from qka_shared.models import (
     AdGroupMemberEdge,
     AdOuScope,
     AdSyncJob,
+    AllowedEmail,
     ExternalIdentity,
     GoogleWorkspaceAccount,
     QkaUser,
@@ -839,6 +841,8 @@ def run_sync_job(session: Session, settings: Settings, gateway: LdapGateway, job
                     distinguished_name=record.distinguished_name,
                     account_enabled=record.account_enabled,
                     is_present=True,
+                    qka_eligible=False,  # Discovery never enrolls; admin marks eligible later.
+                    department_override="",
                     mapping_status=mapping,
                     candidate_qka_user_id=cand_user,
                     candidate_google_email=cand_email,
@@ -984,12 +988,76 @@ def run_sync_job(session: Session, settings: Settings, gateway: LdapGateway, job
         session.flush()
 
 
+def _mapping_label(status: int) -> str:
+    return {0: "unlinked", 1: "pending", 2: "linked", 3: "conflict"}.get(status, "unlinked")
+
+
+def _directory_user_dto(session: Session, row: AdDirectoryUser) -> dict:
+    suggested_email = row.candidate_google_email or None
+    suggested_user_id = str(row.candidate_qka_user_id) if row.candidate_qka_user_id else None
+    linked_google_email = None
+    if row.linked_qka_user_id:
+        identity = session.execute(
+            select(ExternalIdentity)
+            .options(selectinload(ExternalIdentity.google))
+            .where(
+                ExternalIdentity.qka_user_id == row.linked_qka_user_id,
+                ExternalIdentity.provider == PROVIDER_GOOGLE,
+                ExternalIdentity.link_status == LINKED,
+            )
+        ).scalars().first()
+        if identity:
+            linked_google_email = (
+                (identity.google.primary_email if identity.google else None) or identity.primary_email or None
+            )
+    can_mark_eligible = bool(row.is_present and row.account_enabled)
+    can_link = bool(
+        row.is_present
+        and row.account_enabled
+        and row.mapping_status in {MAP_UNLINKED, MAP_PENDING, MAP_CONFLICT}
+        and (row.candidate_qka_user_id or row.mapping_status == MAP_UNLINKED)
+    )
+    return {
+        "id": str(row.id),
+        "objectGuid": row.object_guid,
+        "objectSid": row.object_sid,
+        "samAccountName": row.sam_account_name,
+        "userPrincipalName": row.user_principal_name,
+        "displayName": row.display_name,
+        "mail": row.mail or None,
+        "department": row.department or "",
+        "departmentOverride": row.department_override or "",
+        "effectiveDepartment": (row.department_override or row.department or "").strip(),
+        "distinguishedName": row.distinguished_name,
+        "accountEnabled": row.account_enabled,
+        "isPresent": row.is_present,
+        "accountStatus": (
+            "missing" if not row.is_present else ("enabled" if row.account_enabled else "disabled")
+        ),
+        "qkaEligible": bool(row.qka_eligible),
+        "eligibilityLabel": "eligible" if row.qka_eligible else "not_eligible",
+        "mappingStatus": row.mapping_status,
+        "mappingLabel": _mapping_label(row.mapping_status),
+        "suggestedMatchEmail": suggested_email,
+        "suggestedMatchUserId": suggested_user_id,
+        "linkedGoogleEmail": linked_google_email,
+        "linkedQkaUserId": str(row.linked_qka_user_id) if row.linked_qka_user_id else None,
+        "candidateQkaUserId": suggested_user_id,
+        "canMarkEligible": can_mark_eligible,
+        "canApproveLink": can_link and row.mapping_status in {MAP_PENDING, MAP_CONFLICT},
+        "canUnlink": row.mapping_status == MAP_LINKED,
+    }
+
+
 def list_users(
     session: Session,
     connection_id: uuid.UUID,
     *,
     search: str = "",
     mapping_status: int | None = None,
+    account_status: str | None = None,
+    eligibility: str | None = None,
+    department: str | None = None,
     page: int = 1,
     page_size: int = 50,
 ) -> dict:
@@ -1011,45 +1079,143 @@ def list_users(
         )
     if mapping_status is not None:
         filters.append(AdDirectoryUser.mapping_status == mapping_status)
+    acct = (account_status or "").strip().lower()
+    if acct == "enabled":
+        filters.append(AdDirectoryUser.is_present.is_(True))
+        filters.append(AdDirectoryUser.account_enabled.is_(True))
+    elif acct == "disabled":
+        filters.append(AdDirectoryUser.is_present.is_(True))
+        filters.append(AdDirectoryUser.account_enabled.is_(False))
+    elif acct == "missing":
+        filters.append(AdDirectoryUser.is_present.is_(False))
+    elig = (eligibility or "").strip().lower()
+    if elig in {"eligible", "true", "1", "yes"}:
+        filters.append(AdDirectoryUser.qka_eligible.is_(True))
+    elif elig in {"not_eligible", "false", "0", "no"}:
+        filters.append(AdDirectoryUser.qka_eligible.is_(False))
+    dept = (department or "").strip()
+    if dept:
+        filters.append(AdDirectoryUser.department.ilike(dept))
     base = select(AdDirectoryUser).where(*filters)
     total = session.scalar(select(func.count()).select_from(base.subquery())) or 0
     rows = session.execute(
-        base.order_by(AdDirectoryUser.sam_account_name).offset((page - 1) * page_size).limit(page_size)
+        base.order_by(AdDirectoryUser.display_name, AdDirectoryUser.sam_account_name)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).scalars().all()
+    return {
+        "items": [_directory_user_dto(session, row) for row in rows],
+        "total": int(total),
+        "page": page,
+        "pageSize": page_size,
+    }
+
+
+def set_eligibility(
+    session: Session,
+    actor_id: uuid.UUID,
+    connection_id: uuid.UUID,
+    directory_user_ids: list[uuid.UUID],
+    *,
+    eligible: bool,
+) -> dict:
+    """Mark discovered AD users eligible for Access Management enrollment. Never writes to AD."""
+    get_connection(session, connection_id)
+    ids = list(dict.fromkeys(directory_user_ids))[:500]
+    if not ids:
+        raise AdValidationError("Select at least one directory user.")
+    updated = 0
+    skipped: list[dict] = []
+    errors: list[dict] = []
+    for uid in ids:
+        row = session.get(AdDirectoryUser, uid)
+        if row is None or row.connection_id != connection_id:
+            errors.append({"id": str(uid), "error": "Directory user was not found."})
+            continue
+        if eligible and (not row.is_present or not row.account_enabled):
+            skipped.append(
+                {
+                    "id": str(uid),
+                    "samAccountName": row.sam_account_name,
+                    "reason": "Disabled or missing AD accounts cannot be newly marked eligible.",
+                }
+            )
+            continue
+        if bool(row.qka_eligible) == bool(eligible):
+            continue
+        # Unchecking eligibility must NOT revoke existing QKA accounts — only clears the flag.
+        row.qka_eligible = bool(eligible)
+        row.updated_at = _now()
+        updated += 1
+        _audit(
+            session,
+            action="eligibility_enable" if eligible else "eligibility_disable",
+            actor_id=actor_id,
+            connection_id=connection_id,
+            detail=f"guid={row.object_guid}; sam={row.sam_account_name}; eligible={eligible}",
+        )
+    session.flush()
+    return {
+        "ok": len(errors) == 0,
+        "updated": updated,
+        "skipped": skipped,
+        "errors": errors,
+        "eligible": bool(eligible),
+    }
+
+
+def search_eligible_directory_users(
+    session: Session,
+    *,
+    search: str = "",
+    connection_id: uuid.UUID | None = None,
+    page: int = 1,
+    page_size: int = 25,
+) -> dict:
+    """Access Management AD picker: eligible + present + enabled only."""
+    page = max(1, page)
+    page_size = max(1, min(page_size, 50))
+    filters = [
+        AdDirectoryUser.qka_eligible.is_(True),
+        AdDirectoryUser.is_present.is_(True),
+        AdDirectoryUser.account_enabled.is_(True),
+    ]
+    if connection_id is not None:
+        filters.append(AdDirectoryUser.connection_id == connection_id)
+    q = (search or "").strip()
+    if q:
+        like = f"%{q}%"
+        filters.append(
+            or_(
+                AdDirectoryUser.display_name.ilike(like),
+                AdDirectoryUser.sam_account_name.ilike(like),
+                AdDirectoryUser.department.ilike(like),
+                AdDirectoryUser.mail.ilike(like),
+            )
+        )
+    base = select(AdDirectoryUser).where(*filters)
+    total = session.scalar(select(func.count()).select_from(base.subquery())) or 0
+    rows = session.execute(
+        base.order_by(AdDirectoryUser.display_name, AdDirectoryUser.sam_account_name)
+        .offset((page - 1) * page_size)
+        .limit(page_size)
     ).scalars().all()
     items = []
     for row in rows:
-        google_email = row.candidate_google_email
-        if row.linked_qka_user_id:
-            # Prefer linked Google email for display
-            identity = session.execute(
-                select(ExternalIdentity)
-                .options(selectinload(ExternalIdentity.google))
-                .where(
-                    ExternalIdentity.qka_user_id == row.linked_qka_user_id,
-                    ExternalIdentity.provider == PROVIDER_GOOGLE,
-                    ExternalIdentity.link_status == LINKED,
-                )
-            ).scalars().first()
-            if identity:
-                google_email = (identity.google.primary_email if identity.google else None) or identity.primary_email or google_email
+        already = row.mapping_status == MAP_LINKED and row.linked_qka_user_id is not None
         items.append(
             {
                 "id": str(row.id),
                 "objectGuid": row.object_guid,
                 "objectSid": row.object_sid,
-                "samAccountName": row.sam_account_name,
-                "userPrincipalName": row.user_principal_name,
                 "displayName": row.display_name,
-                "mail": row.mail,
-                "department": row.department,
-                "distinguishedName": row.distinguished_name,
-                "accountEnabled": row.account_enabled,
-                "isPresent": row.is_present,
-                "mappingStatus": row.mapping_status,
-                "mappingLabel": {0: "unlinked", 1: "pending", 2: "linked", 3: "conflict"}.get(row.mapping_status, "unlinked"),
-                "googleAccount": google_email or None,
+                "samAccountName": row.sam_account_name,
+                "department": row.department or "",
+                "departmentBlank": not bool((row.department or "").strip()),
+                "mail": row.mail or None,
+                "alreadyLinked": already,
                 "linkedQkaUserId": str(row.linked_qka_user_id) if row.linked_qka_user_id else None,
-                "candidateQkaUserId": str(row.candidate_qka_user_id) if row.candidate_qka_user_id else None,
+                "connectionId": str(row.connection_id),
             }
         )
     return {"items": items, "total": int(total), "page": page, "pageSize": page_size}
@@ -1138,6 +1304,8 @@ def approve_link(
     row = session.get(AdDirectoryUser, directory_user_id)
     if row is None or row.connection_id != connection_id:
         raise AdValidationError("Directory user was not found.")
+    if not row.is_present or not row.account_enabled:
+        raise AdValidationError("Disabled or missing AD accounts cannot be linked.")
     target = qka_user_id or row.candidate_qka_user_id
     if target is None:
         raise AdValidationError("A QKA user target is required to approve the link.")
@@ -1267,3 +1435,271 @@ def audit_history(session: Session, connection_id: uuid.UUID | None = None, *, t
         }
         for r in rows
     ]
+
+
+def _resolve_enrollment_department(row: AdDirectoryUser, department_override: str | None) -> str:
+    override = (department_override if department_override is not None else row.department_override or "").strip()
+    ad_dept = (row.department or "").strip()
+    if override:
+        return override[:512]
+    if ad_dept:
+        return ad_dept[:512]
+    raise AdValidationError(
+        "AD department is not set. Choose a QKA department before creating the user."
+    )
+
+
+def _link_ad_identity_to_user(
+    session: Session,
+    *,
+    row: AdDirectoryUser,
+    user: QkaUser,
+    actor_id: uuid.UUID,
+) -> ExternalIdentity:
+    if not row.object_sid:
+        raise AdValidationError("AD objectSid is required before linking.")
+    existing_ad = session.execute(
+        select(ExternalIdentity).where(
+            ExternalIdentity.provider == PROVIDER_AD,
+            ExternalIdentity.stable_external_id == row.object_sid,
+        )
+    ).scalar_one_or_none()
+    now = _now()
+    if existing_ad is not None:
+        if existing_ad.qka_user_id and existing_ad.qka_user_id != user.id and existing_ad.link_status == LINKED:
+            raise AdConflictError("This AD SID is already linked to another QKA user.")
+        existing_ad.qka_user_id = user.id
+        existing_ad.domain_username = row.sam_account_name
+        existing_ad.upn = row.user_principal_name or None
+        existing_ad.primary_email = row.mail or None
+        existing_ad.account_status = ACCOUNT_ENABLED
+        existing_ad.link_status = LINKED
+        existing_ad.directory_presence = 1
+        existing_ad.updated_at = now
+        identity = existing_ad
+    else:
+        identity = ExternalIdentity(
+            id=uuid.uuid4(),
+            qka_user_id=user.id,
+            provider=PROVIDER_AD,
+            stable_external_id=row.object_sid,
+            domain_username=row.sam_account_name,
+            upn=row.user_principal_name or None,
+            primary_email=row.mail or None,
+            account_status=ACCOUNT_ENABLED,
+            link_status=LINKED,
+            directory_presence=1,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(identity)
+        session.flush()
+    row.mapping_status = MAP_LINKED
+    row.linked_qka_user_id = user.id
+    row.linked_external_identity_id = identity.id
+    row.updated_at = now
+    _audit(
+        session,
+        action="identity_link",
+        actor_id=actor_id,
+        connection_id=row.connection_id,
+        detail=f"guid={row.object_guid}; user={user.id}",
+    )
+    return identity
+
+
+def enroll_directory_user(
+    session: Session,
+    actor_id: uuid.UUID,
+    *,
+    object_guid: str,
+    department_override: str | None = None,
+    contact_email: str | None = None,
+    link_existing_qka_user_id: uuid.UUID | None = None,
+) -> dict:
+    """Create or link a QKA application user from an eligible AD directory identity.
+
+    Does not grant Synology/Source Access, Local Chat, or MCP. Does not implement AD login.
+    """
+    guid = (object_guid or "").strip()
+    if not guid:
+        raise AdValidationError("Select an Active Directory user by objectGUID.")
+    # Prefer a present inventory row; objectGUID is unique per connection.
+    rows = session.execute(
+        select(AdDirectoryUser)
+        .where(AdDirectoryUser.object_guid == guid)
+        .order_by(AdDirectoryUser.is_present.desc(), AdDirectoryUser.updated_at.desc())
+    ).scalars().all()
+    row = next((r for r in rows if r.is_present and r.account_enabled), None) or (rows[0] if rows else None)
+    if row is None:
+        raise AdValidationError("Active Directory user was not found in the synchronized inventory.")
+    if not row.qka_eligible:
+        raise AdValidationError("This AD user is not marked eligible for QKA enrollment.")
+    if not row.is_present or not row.account_enabled:
+        raise AdValidationError("Disabled or missing AD accounts cannot be enrolled.")
+    if not row.object_sid:
+        raise AdValidationError("AD objectSid is required before enrollment.")
+
+    # Concurrent / duplicate SID protection
+    existing_ad = session.execute(
+        select(ExternalIdentity).where(
+            ExternalIdentity.provider == PROVIDER_AD,
+            ExternalIdentity.stable_external_id == row.object_sid,
+            ExternalIdentity.link_status == LINKED,
+            ExternalIdentity.qka_user_id.is_not(None),
+        )
+    ).scalar_one_or_none()
+    if existing_ad is not None and link_existing_qka_user_id is None:
+        if row.linked_qka_user_id and row.linked_qka_user_id == existing_ad.qka_user_id:
+            raise AdConflictError(
+                f"This AD identity is already linked to QKA user {existing_ad.qka_user_id}."
+            )
+        raise AdConflictError("This AD SID is already linked to a QKA user.")
+
+    contact = None
+    raw_email = (contact_email if contact_email is not None else row.mail or "").strip()
+    if raw_email:
+        contact, err = try_normalize(raw_email)
+        if contact is None:
+            raise AdValidationError(err or "Contact email is invalid.")
+
+    department = _resolve_enrollment_department(row, department_override)
+    now = _now()
+
+    # Optional: explicit link to existing Google-backed QkaUser (never auto-merge).
+    if link_existing_qka_user_id is not None:
+        user = session.get(QkaUser, link_existing_qka_user_id)
+        if user is None:
+            raise AdValidationError("Existing QKA user was not found.")
+        # Do not overwrite Google identity — only attach AD.
+        _link_ad_identity_to_user(session, row=row, user=user, actor_id=actor_id)
+        if department and not (user.directory_department or "").strip():
+            user.directory_department = department
+        if contact and not user.contact_email:
+            user.contact_email = contact
+        user.updated_at = now
+        row.department_override = department if department != (row.department or "").strip() else row.department_override
+        get_or_create_chat_access_for_user(session, user.id)
+        _audit(
+            session,
+            action="ad_enroll_link_existing",
+            actor_id=actor_id,
+            connection_id=row.connection_id,
+            detail=f"guid={row.object_guid}; user={user.id}",
+        )
+        session.flush()
+        return {
+            "created": False,
+            "linkedExisting": True,
+            "qkaUserId": str(user.id),
+            "displayName": user.display_name,
+            "domainUsername": row.sam_account_name,
+            "department": user.directory_department or department,
+            "contactEmail": user.contact_email,
+            "objectGuid": row.object_guid,
+            "objectSid": row.object_sid,
+            "loginEnabled": bool(user.login_enabled),
+            "adOnlyLoginImplemented": False,
+        }
+
+    if row.mapping_status == MAP_LINKED and row.linked_qka_user_id:
+        raise AdConflictError(f"This AD identity is already linked to QKA user {row.linked_qka_user_id}.")
+
+    # Matching Google user suggestion — require explicit linkExistingQkaUserId instead of auto-merge.
+    if contact:
+        google_hit = session.execute(
+            select(ExternalIdentity)
+            .options(selectinload(ExternalIdentity.user))
+            .where(
+                ExternalIdentity.provider == PROVIDER_GOOGLE,
+                ExternalIdentity.link_status == LINKED,
+                ExternalIdentity.qka_user_id.is_not(None),
+                or_(
+                    ExternalIdentity.primary_email == contact,
+                    ExternalIdentity.upn == contact,
+                ),
+            )
+        ).scalars().first()
+        if google_hit is None:
+            # Also match GoogleWorkspaceAccount
+            google_hit_row = session.execute(
+                select(ExternalIdentity)
+                .join(GoogleWorkspaceAccount, GoogleWorkspaceAccount.external_identity_id == ExternalIdentity.id)
+                .where(
+                    ExternalIdentity.provider == PROVIDER_GOOGLE,
+                    ExternalIdentity.link_status == LINKED,
+                    ExternalIdentity.qka_user_id.is_not(None),
+                    GoogleWorkspaceAccount.primary_email == contact,
+                )
+            ).scalars().first()
+            google_hit = google_hit_row
+        if google_hit is not None and google_hit.qka_user_id:
+            raise AdConflictError(
+                "A Google-linked QKA user already matches this email. "
+                f"Confirm Link to Existing User (qkaUserId={google_hit.qka_user_id})."
+            )
+
+    # Create new QkaUser — AD-only login is NOT enabled (browser auth remains Google/local).
+    user = QkaUser(
+        id=uuid.uuid4(),
+        display_name=(row.display_name or row.sam_account_name or "AD User")[:256],
+        status=USER_ACTIVE,
+        effective_department_id=None,
+        directory_department=department,
+        contact_email=contact,
+        login_enabled=False,
+        is_directory_operator=False,
+        is_super_admin=False,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(user)
+    session.flush()
+    _link_ad_identity_to_user(session, row=row, user=user, actor_id=actor_id)
+    if department != (row.department or "").strip():
+        row.department_override = department
+    # Optional contact email allowlist (Google login path) — chat defaults OFF.
+    if contact:
+        allow = session.execute(
+            select(AllowedEmail).where(AllowedEmail.email_normalized == contact)
+        ).scalar_one_or_none()
+        if allow is None:
+            allow = AllowedEmail(
+                id=uuid.uuid4(),
+                email=contact,
+                email_normalized=contact,
+                enabled=True,
+                display_name=user.display_name[:256],
+                google_profile_name="",
+                created_at=now,
+                updated_at=now,
+                created_by_user_id=actor_id,
+                updated_by_user_id=actor_id,
+            )
+            session.add(allow)
+            session.flush()
+        get_or_create_chat_access(session, allow.id)
+    get_or_create_chat_access_for_user(session, user.id)
+    _audit(
+        session,
+        action="ad_enroll_create",
+        actor_id=actor_id,
+        connection_id=row.connection_id,
+        detail=f"guid={row.object_guid}; user={user.id}; sam={row.sam_account_name}",
+    )
+    session.flush()
+    return {
+        "created": True,
+        "linkedExisting": False,
+        "qkaUserId": str(user.id),
+        "displayName": user.display_name,
+        "domainUsername": row.sam_account_name,
+        "department": department,
+        "contactEmail": contact,
+        "objectGuid": row.object_guid,
+        "objectSid": row.object_sid,
+        "loginEnabled": False,
+        "adOnlyLoginImplemented": False,
+        "localChatEnabled": False,
+        "mcpEnabled": False,
+    }

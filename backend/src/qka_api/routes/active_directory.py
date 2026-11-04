@@ -48,6 +48,22 @@ class LinkBody(BaseModel):
     qkaUserId: uuid.UUID | None = None
 
 
+class EligibilityBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    directoryUserIds: list[uuid.UUID] = Field(default_factory=list)
+    eligible: bool = False
+
+
+class EnrollBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    objectGuid: str
+    departmentOverride: str | None = None
+    contactEmail: str | None = None
+    linkExistingQkaUserId: uuid.UUID | None = None
+
+
 def _require_super_admin(
     request: Request,
     settings: Settings,
@@ -289,6 +305,9 @@ def get_users(
     request: Request,
     search: str = "",
     mappingStatus: int | None = None,
+    accountStatus: str | None = None,
+    eligibility: str | None = None,
+    department: str | None = None,
     page: int = Query(1, ge=1),
     pageSize: int = Query(50, ge=1, le=100),
     settings: Settings = Depends(get_settings_dep),
@@ -297,10 +316,84 @@ def get_users(
     _require_super_admin(request, settings, session, mutating=False)
     try:
         return svc.list_users(
-            session, connection_id, search=search, mapping_status=mappingStatus, page=page, page_size=pageSize
+            session,
+            connection_id,
+            search=search,
+            mapping_status=mappingStatus,
+            account_status=accountStatus,
+            eligibility=eligibility,
+            department=department,
+            page=page,
+            page_size=pageSize,
         )
     except svc.AdValidationError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
+@router.post("/connections/{connection_id}/eligibility")
+def set_eligibility(
+    connection_id: uuid.UUID,
+    body: EligibilityBody,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    _guard_writes(settings)
+    try:
+        result = svc.set_eligibility(
+            session,
+            actor.id,
+            connection_id,
+            body.directoryUserIds,
+            eligible=body.eligible,
+        )
+        session.commit()
+        return result
+    except svc.AdValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/eligible-users")
+def eligible_users_picker(
+    request: Request,
+    search: str = "",
+    connectionId: uuid.UUID | None = None,
+    page: int = Query(1, ge=1),
+    pageSize: int = Query(25, ge=1, le=50),
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    _require_super_admin(request, settings, session, mutating=False)
+    return svc.search_eligible_directory_users(
+        session, search=search, connection_id=connectionId, page=page, page_size=pageSize
+    )
+
+
+@router.post("/enroll")
+def enroll_user(
+    body: EnrollBody,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    _guard_writes(settings)
+    try:
+        result = svc.enroll_directory_user(
+            session,
+            actor.id,
+            object_guid=body.objectGuid,
+            department_override=body.departmentOverride,
+            contact_email=body.contactEmail,
+            link_existing_qka_user_id=body.linkExistingQkaUserId,
+        )
+        session.commit()
+        return result
+    except svc.AdValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except svc.AdConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
 @router.get("/connections/{connection_id}/groups")

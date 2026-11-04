@@ -307,3 +307,293 @@ def test_reject_insecure_ldap_protocol(client):
         },
     )
     assert response.status_code == 400
+
+
+def _sync_connection(client, headers) -> str:
+    created = client.post(
+        "/api/v1/admin/active-directory/connections",
+        headers=headers,
+        json=_windows_body(),
+    )
+    assert created.status_code == 200, created.text
+    cid = created.json()["id"]
+    scope = client.put(
+        f"/api/v1/admin/active-directory/connections/{cid}/ou-scope",
+        headers=headers,
+        json={
+            "items": [
+                {"name": "Users", "distinguishedName": "OU=Users,DC=qehc,DC=edu,DC=sa", "selected": True}
+            ]
+        },
+    )
+    assert scope.status_code == 200
+    synced = client.post(f"/api/v1/admin/active-directory/connections/{cid}/sync", headers=headers)
+    assert synced.status_code == 200, synced.text
+    assert synced.json()["status"] == ad.JOB_COMPLETED
+    return cid
+
+
+def test_ad_discovery_eligibility_and_enrollment(client):
+    from qka_shared.models import AdAuditEvent, AdDirectoryUser, ChatAccess, ExternalIdentity as Ext
+    from tests.conftest import ALLOWED_USER, auth_cookies
+
+    _install_fake(client)
+    headers = _admin(client)
+    cid = _sync_connection(client, headers)
+
+    users = client.get(f"/api/v1/admin/active-directory/connections/{cid}/users", headers=headers)
+    assert users.status_code == 200
+    items = users.json()["items"]
+    assert all(item["qkaEligible"] is False for item in items)
+    # Discovery must not create QKA application users for AD SIDs.
+    with client.app.state.session_factory() as session:
+        before_ad = session.execute(
+            select(Ext).where(Ext.provider == PROVIDER_AD, Ext.link_status == LINKED)
+        ).scalars().all()
+        # Seed fixtures may already have AD identities for pilot users; none from this sync GUID set.
+        synced_sids = {i["objectSid"] for i in items}
+        assert not any(row.stable_external_id in synced_sids for row in before_ad)
+
+    employee1 = next(i for i in items if i["samAccountName"] == "employee1")
+    orphan = next(i for i in items if i["samAccountName"] == "orphan")
+    noemail = next(i for i in items if i["samAccountName"] == "noemail")
+
+    # Non-admin cannot change eligibility.
+    denied = client.post(
+        f"/api/v1/admin/active-directory/connections/{cid}/eligibility",
+        cookies=auth_cookies(ALLOWED_USER),
+        json={"directoryUserIds": [employee1["id"]], "eligible": True},
+    )
+    assert denied.status_code == 403
+
+    # Disabled AD account cannot be newly marked eligible.
+    skip = client.post(
+        f"/api/v1/admin/active-directory/connections/{cid}/eligibility",
+        headers=headers,
+        json={"directoryUserIds": [orphan["id"]], "eligible": True},
+    )
+    assert skip.status_code == 200
+    assert skip.json()["updated"] == 0
+    assert skip.json()["skipped"]
+
+    mark = client.post(
+        f"/api/v1/admin/active-directory/connections/{cid}/eligibility",
+        headers=headers,
+        json={"directoryUserIds": [employee1["id"], noemail["id"]], "eligible": True},
+    )
+    assert mark.status_code == 200, mark.text
+    assert mark.json()["updated"] == 2
+    with client.app.state.session_factory() as session:
+        audits = session.execute(
+            select(AdAuditEvent).where(AdAuditEvent.action == "eligibility_enable")
+        ).scalars().all()
+        assert len(audits) >= 2
+
+    # Eligibility persists across resync.
+    ad._TEST_RATE.clear()
+    resync = client.post(f"/api/v1/admin/active-directory/connections/{cid}/resync", headers=headers)
+    assert resync.status_code == 200
+    after = client.get(f"/api/v1/admin/active-directory/connections/{cid}/users", headers=headers)
+    by_sam = {i["samAccountName"]: i for i in after.json()["items"]}
+    assert by_sam["employee1"]["qkaEligible"] is True
+    assert by_sam["noemail"]["qkaEligible"] is True
+    assert by_sam["orphan"]["qkaEligible"] is False
+
+    # Picker returns only eligible + enabled + present.
+    picker = client.get("/api/v1/admin/active-directory/eligible-users?search=employee", headers=headers)
+    assert picker.status_code == 200
+    picker_sams = {i["samAccountName"] for i in picker.json()["items"]}
+    assert "employee1" in picker_sams
+    assert "orphan" not in picker_sams
+
+    # Disabled cannot enroll even if somehow eligible.
+    with client.app.state.session_factory() as session:
+        row = session.get(AdDirectoryUser, uuid.UUID(orphan["id"]))
+        assert row is not None
+        row.qka_eligible = True
+        session.commit()
+    enroll_disabled = client.post(
+        "/api/v1/admin/active-directory/enroll",
+        headers=headers,
+        json={"objectGuid": orphan["objectGuid"]},
+    )
+    assert enroll_disabled.status_code == 400
+
+    # AD-only user without email (department override required when AD dept blank).
+    enroll_noemail = client.post(
+        "/api/v1/access/users",
+        headers=headers,
+        json={
+            "identitySource": "active_directory",
+            "objectGuid": noemail["objectGuid"],
+            "displayName": "",
+            "departmentOverride": "Operations",
+            "localChatEnabled": False,
+            "mcpEnabled": False,
+        },
+    )
+    assert enroll_noemail.status_code == 200, enroll_noemail.text
+    body = enroll_noemail.json()
+    assert body["created"] is True
+    assert body["primaryEmail"] == ""
+    assert body["domainUsername"] == "noemail"
+    assert body["department"] == "Operations"
+    assert body["identitySource"] == "ad"
+    assert body["localChatEnabled"] is False
+    assert body["mcpEnabled"] is False
+    assert body["adOnlyLoginImplemented"] is False
+    qka_id = body["qkaUserId"]
+
+    with client.app.state.session_factory() as session:
+        chat = session.execute(
+            select(ChatAccess).where(ChatAccess.qka_user_id == uuid.UUID(qka_id))
+        ).scalar_one_or_none()
+        assert chat is not None
+        assert chat.local_chat_enabled is False
+        assert chat.mcp_enabled is False
+        user = session.get(QkaUser, uuid.UUID(qka_id))
+        assert user is not None
+        assert user.login_enabled is False
+        assert user.contact_email is None
+
+    # Duplicate GUID/SID rejected.
+    dup = client.post(
+        "/api/v1/access/users",
+        headers=headers,
+        json={
+            "identitySource": "active_directory",
+            "objectGuid": noemail["objectGuid"],
+            "displayName": "",
+            "departmentOverride": "Operations",
+        },
+    )
+    assert dup.status_code == 409
+
+    # Directory list includes AD-only user alongside Google allowlist users.
+    listing = client.get("/api/v1/access/users?search=noemail", headers=headers)
+    assert listing.status_code == 200
+    hit = next(i for i in listing.json()["items"] if i["qkaUserId"] == qka_id)
+    assert hit["allowlistId"] is None
+    assert hit["domainUsername"] == "noemail"
+
+    # Seed a Google-linked QKA user matching employee1 mail — must not auto-merge.
+    with client.app.state.session_factory() as session:
+        now = datetime.now(timezone.utc)
+        google_user = QkaUser(
+            id=uuid.uuid4(),
+            display_name="Employee One Google",
+            status=0,
+            login_enabled=True,
+            is_directory_operator=False,
+            is_super_admin=False,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(google_user)
+        session.flush()
+        gid = google_user.id
+        g_ident = Ext(
+            id=uuid.uuid4(),
+            qka_user_id=gid,
+            provider=PROVIDER_GOOGLE,
+            stable_external_id="google-sub-employee1-link",
+            primary_email="employee1@qehc.edu.sa",
+            account_status=0,
+            link_status=LINKED,
+            directory_presence=0,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(g_ident)
+        session.flush()
+        session.add(
+            GoogleWorkspaceAccount(
+                id=uuid.uuid4(),
+                external_identity_id=g_ident.id,
+                google_user_id="google-sub-employee1-link",
+                primary_email="employee1@qehc.edu.sa",
+            )
+        )
+        session.commit()
+
+    enroll_auto = client.post(
+        "/api/v1/access/users",
+        headers=headers,
+        json={
+            "identitySource": "active_directory",
+            "objectGuid": employee1["objectGuid"],
+            "displayName": "",
+            "contactEmail": "employee1@qehc.edu.sa",
+        },
+    )
+    assert enroll_auto.status_code == 409
+    assert "Link to Existing User" in enroll_auto.json()["detail"]
+
+    enroll_link = client.post(
+        "/api/v1/access/users",
+        headers=headers,
+        json={
+            "identitySource": "active_directory",
+            "objectGuid": employee1["objectGuid"],
+            "displayName": "",
+            "contactEmail": "employee1@qehc.edu.sa",
+            "linkExistingQkaUserId": str(gid),
+        },
+    )
+    assert enroll_link.status_code == 200, enroll_link.text
+    assert enroll_link.json()["linkedExisting"] is True
+    assert enroll_link.json()["qkaUserId"] == str(gid)
+    with client.app.state.session_factory() as session:
+        google_still = session.execute(
+            select(Ext).where(
+                Ext.provider == PROVIDER_GOOGLE,
+                Ext.stable_external_id == "google-sub-employee1-link",
+                Ext.link_status == LINKED,
+            )
+        ).scalars().one()
+        assert google_still.qka_user_id == gid
+        ad_on_google = session.execute(
+            select(Ext).where(
+                Ext.provider == PROVIDER_AD,
+                Ext.stable_external_id == "S-1-5-21-1-2-3-1001",
+                Ext.link_status == LINKED,
+            )
+        ).scalars().one()
+        assert ad_on_google.qka_user_id == gid
+
+    # Unchecking eligibility must not revoke the enrolled QKA account.
+    clear = client.post(
+        f"/api/v1/admin/active-directory/connections/{cid}/eligibility",
+        headers=headers,
+        json={"directoryUserIds": [noemail["id"]], "eligible": False},
+    )
+    assert clear.status_code == 200
+    with client.app.state.session_factory() as session:
+        still = session.get(QkaUser, uuid.UUID(qka_id))
+        assert still is not None
+        assert still.status == 0
+        ad_ident = session.execute(
+            select(Ext).where(
+                Ext.provider == PROVIDER_AD,
+                Ext.stable_external_id == "S-1-5-21-1-2-3-1003",
+                Ext.link_status == LINKED,
+            )
+        ).scalars().first()
+        assert ad_ident is not None
+
+
+def test_eligibility_filters(client):
+    _install_fake(client)
+    headers = _admin(client)
+    cid = _sync_connection(client, headers)
+    users = client.get(
+        f"/api/v1/admin/active-directory/connections/{cid}/users?accountStatus=disabled",
+        headers=headers,
+    )
+    assert users.status_code == 200
+    assert all(i["accountStatus"] == "disabled" for i in users.json()["items"])
+    users2 = client.get(
+        f"/api/v1/admin/active-directory/connections/{cid}/users?eligibility=eligible",
+        headers=headers,
+    )
+    assert users2.json()["total"] == 0
