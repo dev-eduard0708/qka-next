@@ -7,8 +7,9 @@ from sqlalchemy import select
 
 from qka_api.services import active_directory as ad
 from qka_shared.allowlist import LINKED, PROVIDER_AD, PROVIDER_GOOGLE
-from qka_shared.models import ExternalIdentity, GoogleWorkspaceAccount, QkaUser
+from qka_shared.models import AllowedEmail, ChatAccess, ExternalIdentity, GoogleWorkspaceAccount, QkaUser
 from tests.fake_ldap import FakeLdapGateway
+from qka_api.services import user_directory as directory
 
 
 def _admin(client):
@@ -355,8 +356,13 @@ def test_ad_discovery_eligibility_and_enrollment(client):
         assert not any(row.stable_external_id in synced_sids for row in before_ad)
 
     employee1 = next(i for i in items if i["samAccountName"] == "employee1")
-    orphan = next(i for i in items if i["samAccountName"] == "orphan")
     noemail = next(i for i in items if i["samAccountName"] == "noemail")
+    # Disabled accounts are archived by default and omitted from the active list.
+    archived_items = client.get(
+        f"/api/v1/admin/active-directory/connections/{cid}/users?archived=true&pageSize=50",
+        headers=headers,
+    ).json()["items"]
+    orphan = next(i for i in archived_items if i["samAccountName"] == "orphan")
 
     # Non-admin cannot change eligibility.
     denied = client.post(
@@ -397,7 +403,12 @@ def test_ad_discovery_eligibility_and_enrollment(client):
     by_sam = {i["samAccountName"]: i for i in after.json()["items"]}
     assert by_sam["employee1"]["qkaEligible"] is True
     assert by_sam["noemail"]["qkaEligible"] is True
-    assert by_sam["orphan"]["qkaEligible"] is False
+    after_archived = client.get(
+        f"/api/v1/admin/active-directory/connections/{cid}/users?archived=true&pageSize=50",
+        headers=headers,
+    )
+    by_sam_arch = {i["samAccountName"]: i for i in after_archived.json()["items"]}
+    assert by_sam_arch["orphan"]["qkaEligible"] is False
 
     # Picker returns only eligible + enabled + present.
     picker = client.get("/api/v1/admin/active-directory/eligible-users?search=employee", headers=headers)
@@ -582,6 +593,180 @@ def test_ad_discovery_eligibility_and_enrollment(client):
         assert ad_ident is not None
 
 
+def test_ad_enroll_with_and_without_contact_email_single_row(client):
+    """AD enrollment creates one canonical QkaUser; contact email must not create AllowedEmail."""
+    Ext = ExternalIdentity
+    _install_fake(client)
+    headers = _admin(client)
+    cid = _sync_connection(client, headers)
+    items = client.get(
+        f"/api/v1/admin/active-directory/connections/{cid}/users?pageSize=50",
+        headers=headers,
+    ).json()["items"]
+    employee1 = next(i for i in items if i["samAccountName"] == "employee1")
+    noemail = next(i for i in items if i["samAccountName"] == "noemail")
+
+    mark = client.post(
+        f"/api/v1/admin/active-directory/connections/{cid}/eligibility",
+        headers=headers,
+        json={"directoryUserIds": [employee1["id"], noemail["id"]], "eligible": True},
+    )
+    assert mark.status_code == 200, mark.text
+
+    # With optional contact email — contact only; no Google allowlist side-effect.
+    with_email = client.post(
+        "/api/v1/access/users",
+        headers=headers,
+        json={
+            "identitySource": "active_directory",
+            "objectGuid": employee1["objectGuid"],
+            "displayName": "",
+            "contactEmail": "employee1@qehc.edu.sa",
+            "localChatEnabled": False,
+            "mcpEnabled": False,
+        },
+    )
+    assert with_email.status_code == 200, with_email.text
+    body = with_email.json()
+    assert body["created"] is True
+    assert body["allowlisted"] is False
+    assert body["allowlistId"] is None
+    assert body["contactEmail"] == "employee1@qehc.edu.sa"
+    assert body["identitySource"] == "ad"
+    assert body["identityStatus"] == "ad_enrolled"
+    assert body["accountStatus"] == "active"
+    qka_with = body["qkaUserId"]
+
+    with client.app.state.session_factory() as session:
+        allow = session.execute(
+            select(AllowedEmail).where(AllowedEmail.email_normalized == "employee1@qehc.edu.sa")
+        ).scalar_one_or_none()
+        assert allow is None
+        user = session.get(QkaUser, uuid.UUID(qka_with))
+        assert user is not None
+        assert user.contact_email == "employee1@qehc.edu.sa"
+        assert user.login_enabled is False
+        ad_ident = session.execute(
+            select(Ext).where(
+                Ext.provider == PROVIDER_AD,
+                Ext.qka_user_id == user.id,
+                Ext.link_status == LINKED,
+            )
+        ).scalars().one()
+        assert ad_ident.stable_external_id
+        chat = session.execute(
+            select(ChatAccess).where(ChatAccess.qka_user_id == user.id)
+        ).scalar_one_or_none()
+        assert chat is not None
+        assert chat.local_chat_enabled is False
+        assert chat.mcp_enabled is False
+
+    listing = client.get("/api/v1/access/users?search=employee1", headers=headers)
+    assert listing.status_code == 200
+    hits = [i for i in listing.json()["items"] if i.get("qkaUserId") == qka_with or i.get("primaryEmail") == "employee1@qehc.edu.sa"]
+    assert len(hits) == 1, hits
+    assert hits[0]["identitySource"] == "ad"
+    assert hits[0]["accountStatus"] == "active"
+    assert hits[0]["identityStatus"] == "ad_enrolled"
+    assert hits[0]["allowlistId"] is None
+
+    # Without contact email — still one AD row.
+    without = client.post(
+        "/api/v1/access/users",
+        headers=headers,
+        json={
+            "identitySource": "active_directory",
+            "objectGuid": noemail["objectGuid"],
+            "displayName": "",
+            "departmentOverride": "Operations",
+        },
+    )
+    assert without.status_code == 200, without.text
+    qka_no = without.json()["qkaUserId"]
+    listing2 = client.get("/api/v1/access/users?search=noemail", headers=headers)
+    hits2 = [i for i in listing2.json()["items"] if i.get("qkaUserId") == qka_no]
+    assert len(hits2) == 1
+    assert hits2[0]["allowlistId"] is None
+    assert hits2[0]["identitySource"] == "ad"
+
+
+def test_redundant_ad_contact_allowlist_cleanup(client):
+    """Cleanup removes contact-only AllowedEmail; preserves AD QkaUser and refuses independent rows."""
+    Ext = ExternalIdentity
+    _install_fake(client)
+    headers = _admin(client)
+    cid = _sync_connection(client, headers)
+    items = client.get(
+        f"/api/v1/admin/active-directory/connections/{cid}/users?pageSize=50",
+        headers=headers,
+    ).json()["items"]
+    employee1 = next(i for i in items if i["samAccountName"] == "employee1")
+    client.post(
+        f"/api/v1/admin/active-directory/connections/{cid}/eligibility",
+        headers=headers,
+        json={"directoryUserIds": [employee1["id"]], "eligible": True},
+    )
+    # Enroll AD user with contact (no allowlist after fix).
+    enrolled = client.post(
+        "/api/v1/access/users",
+        headers=headers,
+        json={
+            "identitySource": "active_directory",
+            "objectGuid": employee1["objectGuid"],
+            "displayName": "",
+            "contactEmail": "employee1@qehc.edu.sa",
+        },
+    )
+    assert enrolled.status_code == 200, enrolled.text
+    qka_id = uuid.UUID(enrolled.json()["qkaUserId"])
+
+    # Simulate legacy bug: insert redundant contact AllowedEmail + empty chat row.
+    with client.app.state.session_factory() as session:
+        now = datetime.now(timezone.utc)
+        allow = AllowedEmail(
+            id=uuid.uuid4(),
+            email="employee1@qehc.edu.sa",
+            email_normalized="employee1@qehc.edu.sa",
+            enabled=True,
+            display_name="Employee One",
+            google_profile_name="",
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(allow)
+        session.flush()
+        session.add(
+            ChatAccess(
+                id=uuid.uuid4(),
+                allowed_email_id=allow.id,
+                qka_user_id=None,
+                local_chat_enabled=False,
+                mcp_enabled=False,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.commit()
+        allow_id = allow.id
+
+    # Duplicate display would have been two rows before list dedupe; cleanup removes the orphan.
+    with client.app.state.session_factory() as session:
+        result = directory.cleanup_redundant_ad_contact_allowlists(session, None, dry_run=False)
+        session.commit()
+        assert result["removedCount"] >= 1
+        assert any(r["allowlistId"] == str(allow_id) for r in result["removed"])
+        assert session.get(AllowedEmail, allow_id) is None
+        assert session.get(QkaUser, qka_id) is not None
+        assert session.execute(
+            select(Ext).where(Ext.provider == PROVIDER_AD, Ext.qka_user_id == qka_id, Ext.link_status == LINKED)
+        ).scalars().first() is not None
+
+    listing = client.get("/api/v1/access/users?search=employee1", headers=headers)
+    hits = [i for i in listing.json()["items"] if i.get("qkaUserId") == str(qka_id)]
+    assert len(hits) == 1
+    assert hits[0]["identitySource"] == "ad"
+
+
 def test_eligibility_filters(client):
     _install_fake(client)
     headers = _admin(client)
@@ -597,3 +782,140 @@ def test_eligibility_filters(client):
         headers=headers,
     )
     assert users2.json()["total"] == 0
+
+
+def test_directory_users_sort(client):
+    _install_fake(client)
+    headers = _admin(client)
+    cid = _sync_connection(client, headers)
+    asc = client.get(
+        f"/api/v1/admin/active-directory/connections/{cid}/users?sortBy=samAccountName&sortDesc=false&pageSize=50",
+        headers=headers,
+    )
+    assert asc.status_code == 200, asc.text
+    names_asc = [i["samAccountName"] for i in asc.json()["items"]]
+    assert names_asc == sorted(names_asc, key=str.lower)
+    assert asc.json()["sortBy"] == "samAccountName"
+    assert asc.json()["sortDesc"] is False
+
+    desc = client.get(
+        f"/api/v1/admin/active-directory/connections/{cid}/users?sortBy=samAccountName&sortDesc=true&pageSize=50",
+        headers=headers,
+    )
+    assert desc.status_code == 200, desc.text
+    names_desc = [i["samAccountName"] for i in desc.json()["items"]]
+    assert names_desc == sorted(names_desc, key=str.lower, reverse=True)
+    assert names_desc != names_asc or len(names_asc) <= 1
+
+
+def test_directory_users_archive_view(client):
+    _install_fake(client)
+    headers = _admin(client)
+    cid = _sync_connection(client, headers)
+
+    active = client.get(
+        f"/api/v1/admin/active-directory/connections/{cid}/users?pageSize=50",
+        headers=headers,
+    )
+    assert active.status_code == 200
+    active_items = active.json()["items"]
+    assert all(i["accountStatus"] == "enabled" for i in active_items)
+    assert all(i["archived"] is False for i in active_items)
+    assert any(i["samAccountName"] == "employee1" for i in active_items)
+    assert all(i["samAccountName"] != "orphan" for i in active_items)
+
+    archived = client.get(
+        f"/api/v1/admin/active-directory/connections/{cid}/users?archived=true&pageSize=50",
+        headers=headers,
+    )
+    assert archived.status_code == 200
+    arch_items = archived.json()["items"]
+    assert any(i["samAccountName"] == "orphan" for i in arch_items)
+    assert all(i["archived"] is True for i in arch_items)
+
+    employee1 = next(i for i in active_items if i["samAccountName"] == "employee1")
+    # Mark eligible then refuse archive.
+    mark = client.post(
+        f"/api/v1/admin/active-directory/connections/{cid}/eligibility",
+        headers=headers,
+        json={"directoryUserIds": [employee1["id"]], "eligible": True},
+    )
+    assert mark.status_code == 200
+    refused = client.post(
+        f"/api/v1/admin/active-directory/connections/{cid}/archive",
+        headers=headers,
+        json={"directoryUserIds": [employee1["id"]], "archived": True},
+    )
+    assert refused.status_code == 200
+    assert refused.json()["updated"] == 0
+    assert refused.json()["skipped"]
+
+    # Clear eligibility, then archive.
+    client.post(
+        f"/api/v1/admin/active-directory/connections/{cid}/eligibility",
+        headers=headers,
+        json={"directoryUserIds": [employee1["id"]], "eligible": False},
+    )
+    archived_ok = client.post(
+        f"/api/v1/admin/active-directory/connections/{cid}/archive",
+        headers=headers,
+        json={"directoryUserIds": [employee1["id"]], "archived": True},
+    )
+    assert archived_ok.status_code == 200, archived_ok.text
+    assert archived_ok.json()["updated"] == 1
+    active2 = client.get(
+        f"/api/v1/admin/active-directory/connections/{cid}/users?pageSize=50",
+        headers=headers,
+    )
+    assert all(i["samAccountName"] != "employee1" for i in active2.json()["items"])
+
+
+def test_directory_users_partial_search(client):
+    _install_fake(client)
+    headers = _admin(client)
+    cid = _sync_connection(client, headers)
+
+    # Name/username substring — must not match solely on "@qehc.edu.sa".
+    by_name = client.get(
+        f"/api/v1/admin/active-directory/connections/{cid}/users?search=ploy&pageSize=50",
+        headers=headers,
+    )
+    assert by_name.status_code == 200, by_name.text
+    items = by_name.json()["items"]
+    assert items
+    assert all(
+        "ploy" in (i["displayName"] + i["samAccountName"]).lower()
+        or "ploy" in (i.get("department") or "").lower()
+        for i in items
+    )
+
+    # Domain fragment alone must not match every "@qehc.edu.sa" UPN/mail.
+    all_users = client.get(
+        f"/api/v1/admin/active-directory/connections/{cid}/users?pageSize=50",
+        headers=headers,
+    )
+    domain_hit = client.get(
+        f"/api/v1/admin/active-directory/connections/{cid}/users?search=edu&pageSize=50",
+        headers=headers,
+    )
+    assert domain_hit.status_code == 200
+    assert domain_hit.json()["total"] < all_users.json()["total"]
+    assert all(
+        "edu" in (
+            (i["displayName"] or "")
+            + (i["samAccountName"] or "")
+            + (i.get("department") or "")
+            + ((i.get("userPrincipalName") or "").split("@")[0])
+            + ((i.get("mail") or "").split("@")[0])
+        ).lower()
+        for i in domain_hit.json()["items"]
+    )
+
+    # Department partial: Finance exact in fixture; "fin" should still match.
+    by_dept = client.get(
+        f"/api/v1/admin/active-directory/connections/{cid}/users?department=fin&pageSize=50",
+        headers=headers,
+    )
+    assert by_dept.status_code == 200, by_dept.text
+    assert by_dept.json()["total"] >= 1
+    assert all("fin" in (i.get("department") or "").lower() for i in by_dept.json()["items"])

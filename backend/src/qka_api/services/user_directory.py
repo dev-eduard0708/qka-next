@@ -209,18 +209,25 @@ def _user_dto(
     chat: ChatAccess | None,
     membership: ChatgptMembership | None,
 ) -> dict:
+    ad_idents = _ad_idents(user)
+    has_google = _google_sub(user) is not None
     if not row.enabled:
         identity_status = "disabled"
         account_status = "disabled"
-    elif user is not None:
+    elif user is not None and (has_google or user.login_enabled):
+        # Verified Google bind (or login-enabled QKA user) — active.
         identity_status = "linked"
         account_status = "active"
+    elif user is not None and ad_idents:
+        # Canonical AD user that also has an explicit Google allowlist row (not yet bound).
+        identity_status = "ad_enrolled"
+        account_status = "active"
     else:
+        # Explicit Google allowlist awaiting first verified Workspace sign-in.
         identity_status = "pending"
-        account_status = "pending"
+        account_status = "awaiting_google_login"
     admin_name = directory_display_name(row, user)
     mem_status = membership.status if membership is not None else MEMBERSHIP_UNKNOWN
-    ad_idents = _ad_idents(user)
     return {
         "allowlistId": str(row.id),
         "qkaUserId": str(user.id) if user is not None else None,
@@ -232,7 +239,7 @@ def _user_dto(
         "department": (user.directory_department if user else "") or "",
         "identitySource": _identity_source(user, has_allowlist=True),
         "googleSub": _google_sub(user),
-        "googleLinked": identity_status == "linked",
+        "googleLinked": has_google,
         "identityStatus": identity_status,
         "accountStatus": account_status,
         "chatgptMembership": _membership_label(mem_status),
@@ -243,7 +250,7 @@ def _user_dto(
         "mcpEnabled": bool(chat.mcp_enabled) if chat else False,
         "allowlisted": True,
         "allowlistEnabled": bool(row.enabled),
-        "canGrant": identity_status in {"linked", "pending"} and bool(row.enabled),
+        "canGrant": identity_status in {"linked", "pending", "ad_enrolled"} and bool(row.enabled),
         "adIdentities": ad_idents,
         "superAdmin": bool(user.is_super_admin) if user is not None else False,
         "createdAt": row.created_at.isoformat() if row.created_at else None,
@@ -253,6 +260,16 @@ def _user_dto(
 
 def _ad_only_user_dto(user: QkaUser, chat: ChatAccess | None) -> dict:
     ad_idents = _ad_idents(user)
+    has_google = _google_sub(user) is not None
+    if user.status != 0:
+        identity_status = "disabled"
+        account_status = "disabled"
+    elif has_google or user.login_enabled:
+        identity_status = "linked"
+        account_status = "active"
+    else:
+        identity_status = "ad_enrolled"
+        account_status = "active"
     return {
         "allowlistId": None,
         "qkaUserId": str(user.id),
@@ -264,9 +281,9 @@ def _ad_only_user_dto(user: QkaUser, chat: ChatAccess | None) -> dict:
         "department": user.directory_department or "",
         "identitySource": _identity_source(user, has_allowlist=False),
         "googleSub": _google_sub(user),
-        "googleLinked": False,
-        "identityStatus": "linked" if user.login_enabled or ad_idents else "ad_enrolled",
-        "accountStatus": "active" if user.status == 0 else "disabled",
+        "googleLinked": has_google,
+        "identityStatus": identity_status,
+        "accountStatus": account_status,
         "chatgptMembership": "unknown",
         "chatgptMembershipSource": "unknown",
         "chatgptMembershipVerifiedAt": None,
@@ -281,6 +298,47 @@ def _ad_only_user_dto(user: QkaUser, chat: ChatAccess | None) -> dict:
         "createdAt": user.created_at.isoformat() if user.created_at else None,
         "updatedAt": user.updated_at.isoformat() if user.updated_at else None,
     }
+
+
+def _ad_users_by_contact_email(session: Session) -> dict[str, QkaUser]:
+    """Map normalized contact email → AD-linked QkaUser (never merges by name alone)."""
+    rows = session.execute(
+        select(QkaUser)
+        .options(selectinload(QkaUser.identities).selectinload(ExternalIdentity.google))
+        .join(ExternalIdentity, ExternalIdentity.qka_user_id == QkaUser.id)
+        .where(
+            ExternalIdentity.provider == PROVIDER_AD,
+            ExternalIdentity.link_status == LINKED,
+            QkaUser.is_super_admin.is_(False),
+            QkaUser.contact_email.is_not(None),
+        )
+    ).scalars().unique().all()
+    by_email: dict[str, QkaUser] = {}
+    for user in rows:
+        email = (user.contact_email or "").strip().lower()
+        if email and email not in by_email:
+            by_email[email] = user
+    return by_email
+
+
+def _allowlist_has_independent_use(
+    session: Session,
+    row: AllowedEmail,
+    *,
+    chat: ChatAccess | None,
+    membership: ChatgptMembership | None,
+) -> bool:
+    """True when the allowlist row owns Google/channel/source identity of its own."""
+    if membership is not None and int(membership.status or 0) != MEMBERSHIP_UNKNOWN:
+        return True
+    if chat is not None and (chat.local_chat_enabled or chat.mcp_enabled):
+        return True
+    from qka_shared.models import SourceGrant
+
+    grant_count = session.execute(
+        select(SourceGrant.id).where(SourceGrant.allowed_email_id == row.id).limit(1)
+    ).scalar_one_or_none()
+    return grant_count is not None
 
 
 def membership_sync_info() -> dict:
@@ -306,6 +364,7 @@ def list_users(
 
     rows = session.execute(select(AllowedEmail).order_by(AllowedEmail.email_normalized)).scalars().all()
     by_email = _google_users_by_email(session)
+    ad_by_contact = _ad_users_by_contact_email(session)
     chat_rows = session.execute(select(ChatAccess)).scalars().all()
     chat_by_allow = {c.allowed_email_id: c for c in chat_rows if c.allowed_email_id}
     chat_by_user = {c.qka_user_id: c for c in chat_rows if c.qka_user_id}
@@ -315,13 +374,32 @@ def list_users(
     seen_user_ids: set[uuid.UUID] = set()
     for row in rows:
         linked = by_email.get(row.email_normalized) or []
-        user = linked[0] if linked else None
+        google_user = linked[0] if linked else None
+        ad_contact_user = ad_by_contact.get(row.email_normalized)
+        chat = chat_by_allow.get(row.id) or get_or_create_chat_access(session, row.id)
+        chat_by_allow[row.id] = chat
+        membership = mem_by_id.get(row.id)
+
+        # Redundant AD-enroll contact allowlist (no Google bind, no independent grants/channels):
+        # collapse to the canonical AD QkaUser row — never emit a second "Google pending" card.
+        if (
+            google_user is None
+            and ad_contact_user is not None
+            and not _allowlist_has_independent_use(session, row, chat=chat, membership=membership)
+        ):
+            if ad_contact_user.id not in seen_user_ids:
+                user_chat = chat_by_user.get(ad_contact_user.id) or get_or_create_chat_access_for_user(
+                    session, ad_contact_user.id
+                )
+                items.append(_ad_only_user_dto(ad_contact_user, user_chat))
+                seen_user_ids.add(ad_contact_user.id)
+            continue
+
+        user = google_user or ad_contact_user
         if user is not None:
             seen_user_ids.add(user.id)
         promote_allowlist_row_to_user(session, row, user)
-        chat = chat_by_allow.get(row.id) or get_or_create_chat_access(session, row.id)
-        chat_by_allow[row.id] = chat
-        dto = _user_dto(row, user=user, chat=chat, membership=mem_by_id.get(row.id))
+        dto = _user_dto(row, user=user, chat=chat, membership=membership)
         items.append(dto)
 
     # Include AD-enrolled QkaUsers that are not already represented by an allowlist row.
@@ -354,7 +432,12 @@ def list_users(
             or q in (item.get("chatgptMemberName") or "").lower()
         ]
     if account_status:
-        items = [item for item in items if item["accountStatus"] == account_status.strip().lower()]
+        want_acct = account_status.strip().lower()
+        if want_acct == "pending":
+            # Legacy filter value — treat as awaiting Google login.
+            items = [item for item in items if item["accountStatus"] in {"pending", "awaiting_google_login"}]
+        else:
+            items = [item for item in items if item["accountStatus"] == want_acct]
     if identity_status:
         want = identity_status.strip().lower()
         if want == "pending_google_login":
@@ -818,4 +901,93 @@ def import_chatgpt_membership_csv(
         "nonmemberCount": batch.nonmember_count,
         "markMissingAsNonmember": bool(mark_missing_as_nonmember),
         "note": MEMBERSHIP_SYNC_NOTE,
+    }
+
+
+def cleanup_redundant_ad_contact_allowlists(
+    session: Session,
+    actor_id: uuid.UUID | None,
+    *,
+    dry_run: bool = False,
+) -> dict:
+    """Remove AllowedEmail rows that exist only as AD contact side-effects.
+
+    Preserves AD QkaUser, ExternalIdentity(AD), ChatAccess(qka_user_id), Source grants on
+    the user, Google OAuth, MCP, and any allowlist with independent identity/grants/channels.
+    """
+    from qka_shared.models import SourceGrant
+
+    ad_by_contact = _ad_users_by_contact_email(session)
+    removed: list[dict] = []
+    skipped: list[dict] = []
+    for email, user in ad_by_contact.items():
+        # Skip if a verified Google identity already uses this email or user.
+        google_on_user = _google_sub(user) is not None
+        google_by_email = bool(_google_users_by_email(session).get(email))
+        if google_on_user or google_by_email:
+            skipped.append({"email": email, "reason": "google_identity_present", "qkaUserId": str(user.id)})
+            continue
+        row = session.execute(
+            select(AllowedEmail).where(AllowedEmail.email_normalized == email)
+        ).scalar_one_or_none()
+        if row is None:
+            continue
+        chat = session.execute(
+            select(ChatAccess).where(ChatAccess.allowed_email_id == row.id)
+        ).scalar_one_or_none()
+        membership = session.execute(
+            select(ChatgptMembership).where(ChatgptMembership.allowed_email_id == row.id)
+        ).scalar_one_or_none()
+        if _allowlist_has_independent_use(session, row, chat=chat, membership=membership):
+            skipped.append(
+                {
+                    "email": email,
+                    "reason": "independent_allowlist_use",
+                    "allowlistId": str(row.id),
+                    "qkaUserId": str(user.id),
+                }
+            )
+            continue
+        backup = {
+            "allowlistId": str(row.id),
+            "email": row.email_normalized,
+            "displayName": row.display_name,
+            "enabled": bool(row.enabled),
+            "createdAt": row.created_at.isoformat() if row.created_at else None,
+            "chatAccessId": str(chat.id) if chat else None,
+            "localChatEnabled": bool(chat.local_chat_enabled) if chat else False,
+            "mcpEnabled": bool(chat.mcp_enabled) if chat else False,
+            "membershipStatus": int(membership.status) if membership else None,
+            "canonicalQkaUserId": str(user.id),
+        }
+        _audit(
+            session,
+            action="RedundantAdContactAllowlistCleanup",
+            actor_id=actor_id,
+            employee_email=row.email_normalized,
+            target_user_id=user.id,
+            detail=f"allowlist={row.id}; dry_run={dry_run}",
+            before=backup,
+            after={"removed": not dry_run, "preservedQkaUserId": str(user.id)},
+        )
+        removed.append(backup)
+        if dry_run:
+            continue
+        # No independent SourceGrant rows (guarded above); still clear any zero-cap leftovers.
+        for grant in session.execute(
+            select(SourceGrant).where(SourceGrant.allowed_email_id == row.id)
+        ).scalars().all():
+            session.delete(grant)
+        if membership is not None:
+            session.delete(membership)
+        if chat is not None:
+            session.delete(chat)
+        session.delete(row)
+    session.flush()
+    return {
+        "dryRun": dry_run,
+        "removedCount": len(removed),
+        "removed": removed,
+        "skippedCount": len(skipped),
+        "skipped": skipped,
     }

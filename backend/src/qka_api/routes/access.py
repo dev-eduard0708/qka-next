@@ -235,7 +235,7 @@ def create_directory_user(
             "accountStatus": "active",
             "localChatEnabled": False,
             "mcpEnabled": False,
-            "allowlisted": bool(enrolled.get("contactEmail")),
+            "allowlisted": False,
             "adOnlyLoginImplemented": False,
             "created": enrolled.get("created"),
             "linkedExisting": enrolled.get("linkedExisting"),

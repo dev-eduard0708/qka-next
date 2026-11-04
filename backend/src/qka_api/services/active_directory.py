@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from qka_api.ldap_client import (
@@ -25,7 +25,7 @@ from qka_api.ldap_client import (
     normalize_auth_mode,
 )
 from qka_shared.allowlist import ACCOUNT_ENABLED, LINKED, PROVIDER_AD, PROVIDER_GOOGLE, USER_ACTIVE
-from qka_shared.chat_access import get_or_create_chat_access, get_or_create_chat_access_for_user
+from qka_shared.chat_access import get_or_create_chat_access_for_user
 from qka_shared.config import Settings
 from qka_shared.email_address import try_normalize
 from qka_shared.models import (
@@ -36,7 +36,6 @@ from qka_shared.models import (
     AdGroupMemberEdge,
     AdOuScope,
     AdSyncJob,
-    AllowedEmail,
     ExternalIdentity,
     GoogleWorkspaceAccount,
     QkaUser,
@@ -842,6 +841,7 @@ def run_sync_job(session: Session, settings: Settings, gateway: LdapGateway, job
                     account_enabled=record.account_enabled,
                     is_present=True,
                     qka_eligible=False,  # Discovery never enrolls; admin marks eligible later.
+                    qka_archived=False,
                     department_override="",
                     mapping_status=mapping,
                     candidate_qka_user_id=cand_user,
@@ -992,6 +992,19 @@ def _mapping_label(status: int) -> str:
     return {0: "unlinked", 1: "pending", 2: "linked", 3: "conflict"}.get(status, "unlinked")
 
 
+def _is_effectively_archived(row: AdDirectoryUser) -> bool:
+    """Disabled/missing AD accounts are archived by default; manual flag also archives."""
+    return bool(row.qka_archived) or (not row.is_present) or (not row.account_enabled)
+
+
+def _archived_sql_clause():
+    return or_(
+        AdDirectoryUser.qka_archived.is_(True),
+        AdDirectoryUser.is_present.is_(False),
+        AdDirectoryUser.account_enabled.is_(False),
+    )
+
+
 def _directory_user_dto(session: Session, row: AdDirectoryUser) -> dict:
     suggested_email = row.candidate_google_email or None
     suggested_user_id = str(row.candidate_qka_user_id) if row.candidate_qka_user_id else None
@@ -1010,7 +1023,11 @@ def _directory_user_dto(session: Session, row: AdDirectoryUser) -> dict:
             linked_google_email = (
                 (identity.google.primary_email if identity.google else None) or identity.primary_email or None
             )
+    archived = _is_effectively_archived(row)
     can_mark_eligible = bool(row.is_present and row.account_enabled)
+    # Enabled + eligible users cannot be manually archived.
+    can_archive = bool(not (row.is_present and row.account_enabled and row.qka_eligible))
+    can_unarchive = bool(row.qka_archived and row.is_present and row.account_enabled)
     can_link = bool(
         row.is_present
         and row.account_enabled
@@ -1036,6 +1053,13 @@ def _directory_user_dto(session: Session, row: AdDirectoryUser) -> dict:
         ),
         "qkaEligible": bool(row.qka_eligible),
         "eligibilityLabel": "eligible" if row.qka_eligible else "not_eligible",
+        "qkaArchived": bool(row.qka_archived),
+        "archived": archived,
+        "archiveReason": (
+            "missing"
+            if not row.is_present
+            else ("disabled" if not row.account_enabled else ("manual" if row.qka_archived else None))
+        ),
         "mappingStatus": row.mapping_status,
         "mappingLabel": _mapping_label(row.mapping_status),
         "suggestedMatchEmail": suggested_email,
@@ -1044,9 +1068,38 @@ def _directory_user_dto(session: Session, row: AdDirectoryUser) -> dict:
         "linkedQkaUserId": str(row.linked_qka_user_id) if row.linked_qka_user_id else None,
         "candidateQkaUserId": suggested_user_id,
         "canMarkEligible": can_mark_eligible,
+        "canArchive": can_archive and not archived,
+        "canUnarchive": can_unarchive,
         "canApproveLink": can_link and row.mapping_status in {MAP_PENDING, MAP_CONFLICT},
         "canUnlink": row.mapping_status == MAP_LINKED,
     }
+
+
+_USER_SORT_COLUMNS = {
+    "displayName": AdDirectoryUser.display_name,
+    "samAccountName": AdDirectoryUser.sam_account_name,
+    "department": AdDirectoryUser.department,
+    "qkaEligible": AdDirectoryUser.qka_eligible,
+    "mappingLabel": AdDirectoryUser.mapping_status,
+    "mappingStatus": AdDirectoryUser.mapping_status,
+}
+
+
+def _user_sort_exprs(sort_by: str, descending: bool):
+    key = (sort_by or "").strip()
+    primary = _USER_SORT_COLUMNS.get(key)
+    if key == "accountStatus":
+        # missing < disabled < enabled (asc)
+        primary = case(
+            (AdDirectoryUser.is_present.is_(False), 0),
+            (AdDirectoryUser.account_enabled.is_(False), 1),
+            else_=2,
+        )
+    if primary is None:
+        primary = AdDirectoryUser.display_name
+    expr = primary.desc() if descending else primary.asc()
+    tie = AdDirectoryUser.sam_account_name.desc() if descending else AdDirectoryUser.sam_account_name.asc()
+    return expr, tie
 
 
 def list_users(
@@ -1058,6 +1111,9 @@ def list_users(
     account_status: str | None = None,
     eligibility: str | None = None,
     department: str | None = None,
+    archived: bool = False,
+    sort_by: str = "displayName",
+    sort_desc: bool = False,
     page: int = 1,
     page_size: int = 50,
 ) -> dict:
@@ -1065,18 +1121,36 @@ def list_users(
     page = max(1, page)
     page_size = max(1, min(page_size, 100))
     filters = [AdDirectoryUser.connection_id == connection_id]
+    # Default list = active (present + enabled + not manually archived).
+    # Archived list = disabled/missing OR manually archived.
+    if archived:
+        filters.append(_archived_sql_clause())
+    else:
+        filters.append(AdDirectoryUser.qka_archived.is_(False))
+        filters.append(AdDirectoryUser.is_present.is_(True))
+        filters.append(AdDirectoryUser.account_enabled.is_(True))
     q = (search or "").strip()
     if q:
         like = f"%{q}%"
-        filters.append(
-            or_(
-                AdDirectoryUser.sam_account_name.ilike(like),
-                AdDirectoryUser.user_principal_name.ilike(like),
-                AdDirectoryUser.mail.ilike(like),
-                AdDirectoryUser.display_name.ilike(like),
-                AdDirectoryUser.department.ilike(like),
+        # Match name/username/department, and email/UPN local-part only.
+        # Avoid "%edu%" matching every "@qehc.edu.sa" address.
+        local_upn = func.split_part(AdDirectoryUser.user_principal_name, "@", 1)
+        local_mail = func.split_part(AdDirectoryUser.mail, "@", 1)
+        clauses = [
+            AdDirectoryUser.sam_account_name.ilike(like),
+            AdDirectoryUser.display_name.ilike(like),
+            AdDirectoryUser.department.ilike(like),
+            local_upn.ilike(like),
+            local_mail.ilike(like),
+        ]
+        if "@" in q:
+            clauses.extend(
+                [
+                    AdDirectoryUser.user_principal_name.ilike(like),
+                    AdDirectoryUser.mail.ilike(like),
+                ]
             )
-        )
+        filters.append(or_(*clauses))
     if mapping_status is not None:
         filters.append(AdDirectoryUser.mapping_status == mapping_status)
     acct = (account_status or "").strip().lower()
@@ -1095,11 +1169,13 @@ def list_users(
         filters.append(AdDirectoryUser.qka_eligible.is_(False))
     dept = (department or "").strip()
     if dept:
-        filters.append(AdDirectoryUser.department.ilike(dept))
+        # Partial match: "admin" finds "Admin Support".
+        filters.append(AdDirectoryUser.department.ilike(f"%{dept}%"))
     base = select(AdDirectoryUser).where(*filters)
     total = session.scalar(select(func.count()).select_from(base.subquery())) or 0
+    order_primary, order_tie = _user_sort_exprs(sort_by, sort_desc)
     rows = session.execute(
-        base.order_by(AdDirectoryUser.display_name, AdDirectoryUser.sam_account_name)
+        base.order_by(order_primary, order_tie)
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).scalars().all()
@@ -1108,6 +1184,9 @@ def list_users(
         "total": int(total),
         "page": page,
         "pageSize": page_size,
+        "sortBy": sort_by or "displayName",
+        "sortDesc": bool(sort_desc),
+        "archived": bool(archived),
     }
 
 
@@ -1145,6 +1224,9 @@ def set_eligibility(
             continue
         # Unchecking eligibility must NOT revoke existing QKA accounts — only clears the flag.
         row.qka_eligible = bool(eligible)
+        if eligible and row.qka_archived:
+            # Eligible enabled users cannot remain manually archived.
+            row.qka_archived = False
         row.updated_at = _now()
         updated += 1
         _audit(
@@ -1164,6 +1246,93 @@ def set_eligibility(
     }
 
 
+def set_archived(
+    session: Session,
+    actor_id: uuid.UUID,
+    connection_id: uuid.UUID,
+    directory_user_ids: list[uuid.UUID],
+    *,
+    archived: bool,
+) -> dict:
+    """Manually archive/unarchive directory users in QKA. Never writes to AD.
+
+    Disabled/missing accounts are already treated as archived (no flag required).
+    Enabled + eligible users cannot be archived.
+    """
+    get_connection(session, connection_id)
+    ids = list(dict.fromkeys(directory_user_ids))[:500]
+    if not ids:
+        raise AdValidationError("Select at least one directory user.")
+    updated = 0
+    skipped: list[dict] = []
+    errors: list[dict] = []
+    for uid in ids:
+        row = session.get(AdDirectoryUser, uid)
+        if row is None or row.connection_id != connection_id:
+            errors.append({"id": str(uid), "error": "Directory user was not found."})
+            continue
+        if archived:
+            if row.is_present and row.account_enabled and row.qka_eligible:
+                skipped.append(
+                    {
+                        "id": str(uid),
+                        "samAccountName": row.sam_account_name,
+                        "reason": "Enabled eligible users cannot be archived.",
+                    }
+                )
+                continue
+            if not row.is_present or not row.account_enabled:
+                # Already archived by account status — nothing to store.
+                skipped.append(
+                    {
+                        "id": str(uid),
+                        "samAccountName": row.sam_account_name,
+                        "reason": "Disabled or missing accounts are already archived.",
+                    }
+                )
+                continue
+            if row.qka_archived:
+                continue
+            row.qka_archived = True
+        else:
+            if not row.qka_archived:
+                skipped.append(
+                    {
+                        "id": str(uid),
+                        "samAccountName": row.sam_account_name,
+                        "reason": "User is not manually archived (disabled/missing stay archived).",
+                    }
+                )
+                continue
+            if not row.is_present or not row.account_enabled:
+                skipped.append(
+                    {
+                        "id": str(uid),
+                        "samAccountName": row.sam_account_name,
+                        "reason": "Disabled or missing accounts cannot be restored from archive.",
+                    }
+                )
+                continue
+            row.qka_archived = False
+        row.updated_at = _now()
+        updated += 1
+        _audit(
+            session,
+            action="archive_enable" if archived else "archive_restore",
+            actor_id=actor_id,
+            connection_id=connection_id,
+            detail=f"guid={row.object_guid}; sam={row.sam_account_name}; archived={archived}",
+        )
+    session.flush()
+    return {
+        "ok": len(errors) == 0,
+        "updated": updated,
+        "skipped": skipped,
+        "errors": errors,
+        "archived": bool(archived),
+    }
+
+
 def search_eligible_directory_users(
     session: Session,
     *,
@@ -1179,6 +1348,7 @@ def search_eligible_directory_users(
         AdDirectoryUser.qka_eligible.is_(True),
         AdDirectoryUser.is_present.is_(True),
         AdDirectoryUser.account_enabled.is_(True),
+        AdDirectoryUser.qka_archived.is_(False),
     ]
     if connection_id is not None:
         filters.append(AdDirectoryUser.connection_id == connection_id)
@@ -1658,27 +1828,8 @@ def enroll_directory_user(
     _link_ad_identity_to_user(session, row=row, user=user, actor_id=actor_id)
     if department != (row.department or "").strip():
         row.department_override = department
-    # Optional contact email allowlist (Google login path) — chat defaults OFF.
-    if contact:
-        allow = session.execute(
-            select(AllowedEmail).where(AllowedEmail.email_normalized == contact)
-        ).scalar_one_or_none()
-        if allow is None:
-            allow = AllowedEmail(
-                id=uuid.uuid4(),
-                email=contact,
-                email_normalized=contact,
-                enabled=True,
-                display_name=user.display_name[:256],
-                google_profile_name="",
-                created_at=now,
-                updated_at=now,
-                created_by_user_id=actor_id,
-                updated_by_user_id=actor_id,
-            )
-            session.add(allow)
-            session.flush()
-        get_or_create_chat_access(session, allow.id)
+    # Contact email is informational only — never auto-create AllowedEmail / Google allowlist.
+    # Google Workspace access requires a separate explicit allowlist + verified bind.
     get_or_create_chat_access_for_user(session, user.id)
     _audit(
         session,

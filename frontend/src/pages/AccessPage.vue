@@ -636,11 +636,13 @@ const auditActionOptions = [
 
 const accountFilterOptions = computed(() => [
   { label: t("access.accountActive"), value: "active" },
-  { label: t("access.accountPending"), value: "pending" },
+  { label: t("access.accountAwaitingGoogle"), value: "awaiting_google_login" },
+  { label: t("access.accountAwaitingAdmin"), value: "awaiting_admin_approval" },
   { label: t("access.accountDisabled"), value: "disabled" },
 ]);
 const identityFilterOptions = computed(() => [
   { label: t("access.statusLinked"), value: "linked" },
+  { label: t("access.statusAdEnrolled"), value: "ad_enrolled" },
   { label: t("access.statusPending"), value: "pending" },
   { label: t("access.statusDisabled"), value: "disabled" },
 ]);
@@ -749,7 +751,7 @@ const canSaveRule = computed(() => {
 });
 
 function identityStatusLabel(status: SourceEmployee["identityStatus"]) {
-  if (status === "linked") return t("access.statusLinked");
+  if (status === "linked") return t("access.statusActiveQka");
   if (status === "pending") return t("access.statusPending");
   if (status === "ad_enrolled") return t("access.statusAdEnrolled");
   return t("access.statusDisabled");
@@ -762,6 +764,7 @@ function identitySourceLabel(source?: DirectoryUser["identitySource"]) {
 }
 function identityBadgeColor(status: SourceEmployee["identityStatus"]) {
   if (status === "linked") return "positive";
+  if (status === "ad_enrolled") return "info";
   if (status === "pending") return "warning";
   return "negative";
 }
@@ -777,12 +780,15 @@ function membershipBadgeColor(status: DirectoryUser["chatgptMembership"]) {
 }
 function accountStatusLabel(status: DirectoryUser["accountStatus"]) {
   if (status === "active") return t("access.accountActive");
-  if (status === "pending") return t("access.accountPending");
+  if (status === "awaiting_google_login" || status === "pending") return t("access.accountAwaitingGoogle");
+  if (status === "awaiting_admin_approval") return t("access.accountAwaitingAdmin");
   return t("access.accountDisabled");
 }
 function accountBadgeColor(status: DirectoryUser["accountStatus"]) {
   if (status === "active") return "positive";
-  if (status === "pending") return "warning";
+  if (status === "awaiting_google_login" || status === "pending" || status === "awaiting_admin_approval") {
+    return "warning";
+  }
   return "negative";
 }
 function formatWhen(value: string | null) {

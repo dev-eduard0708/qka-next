@@ -34,7 +34,7 @@ export type DirectoryUser = {
   googleSub: string | null;
   googleLinked: boolean;
   identityStatus: "linked" | "pending" | "disabled" | "ad_enrolled";
-  accountStatus: "active" | "disabled" | "pending";
+  accountStatus: "active" | "disabled" | "pending" | "awaiting_google_login" | "awaiting_admin_approval";
   chatgptMembership: "verified_member" | "verified_nonmember" | "unknown";
   chatgptMembershipSource?: string;
   chatgptMembershipVerifiedAt?: string | null;
@@ -662,7 +662,11 @@ export const api = {
       accountStatus?: string;
       eligibility?: string;
       department?: string;
+      archived?: boolean;
+      sortBy?: string;
+      sortDesc?: boolean;
       page?: number;
+      pageSize?: number;
     },
   ) => {
     const q = new URLSearchParams();
@@ -671,9 +675,13 @@ export const api = {
     if (opts?.accountStatus) q.set("accountStatus", opts.accountStatus);
     if (opts?.eligibility) q.set("eligibility", opts.eligibility);
     if (opts?.department) q.set("department", opts.department);
+    if (opts?.archived) q.set("archived", "true");
+    q.set("sortBy", opts?.sortBy || "displayName");
+    q.set("sortDesc", opts?.sortDesc ? "true" : "false");
     if (opts?.page) q.set("page", String(opts.page));
+    if (opts?.pageSize) q.set("pageSize", String(opts.pageSize));
     const suffix = q.toString() ? `?${q}` : "";
-    return request<{ items: any[]; total: number }>(
+    return request<{ items: any[]; total: number; page: number; pageSize: number; sortBy?: string; sortDesc?: boolean; archived?: boolean }>(
       `/api/v1/admin/active-directory/connections/${connectionId}/users${suffix}`,
     );
   },
@@ -681,6 +689,11 @@ export const api = {
     request<{ ok: boolean; updated: number; skipped: any[]; errors: any[]; eligible: boolean }>(
       `/api/v1/admin/active-directory/connections/${connectionId}/eligibility`,
       { method: "POST", body: JSON.stringify({ directoryUserIds, eligible }) },
+    ),
+  adSetArchived: (connectionId: string, directoryUserIds: string[], archived: boolean) =>
+    request<{ ok: boolean; updated: number; skipped: any[]; errors: any[]; archived: boolean }>(
+      `/api/v1/admin/active-directory/connections/${connectionId}/archive`,
+      { method: "POST", body: JSON.stringify({ directoryUserIds, archived }) },
     ),
   adGroups: (connectionId: string, opts?: { search?: string }) => {
     const q = new URLSearchParams();
