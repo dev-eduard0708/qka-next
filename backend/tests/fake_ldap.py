@@ -5,6 +5,7 @@ from __future__ import annotations
 from qka_api.ldap_client import (
     AUTH_LDAPS,
     AUTH_WINDOWS_INTEGRATED,
+    AdComputerRecord,
     AdGroupRecord,
     AdOuNode,
     AdUserRecord,
@@ -68,6 +69,49 @@ class FakeLdapGateway:
         self.ous = [
             AdOuNode(name="Users", distinguished_name="OU=Users,DC=qehc,DC=edu,DC=sa"),
             AdOuNode(name="Groups", distinguished_name="OU=Groups,DC=qehc,DC=edu,DC=sa"),
+            AdOuNode(name="Workstations", distinguished_name="OU=Workstations,DC=qehc,DC=edu,DC=sa"),
+        ]
+        self.computers = [
+            AdComputerRecord(
+                object_guid="c1111111-1111-1111-1111-111111111111",
+                object_sid="S-1-5-21-1-2-3-3001",
+                computer_name="PILOT-PC",
+                dns_hostname="pilot-pc.qehc.edu.sa",
+                distinguished_name="CN=PILOT-PC,OU=Workstations,DC=qehc,DC=edu,DC=sa",
+                operating_system="Windows 11 Pro",
+                account_enabled=True,
+                is_server_or_dc=False,
+            ),
+            AdComputerRecord(
+                object_guid="c2222222-2222-2222-2222-222222222222",
+                object_sid="S-1-5-21-1-2-3-3002",
+                computer_name="FINANCE-01",
+                dns_hostname="finance-01.qehc.edu.sa",
+                distinguished_name="CN=FINANCE-01,OU=Workstations,DC=qehc,DC=edu,DC=sa",
+                operating_system="Windows 10 Enterprise",
+                account_enabled=True,
+                is_server_or_dc=False,
+            ),
+            AdComputerRecord(
+                object_guid="c3333333-3333-3333-3333-333333333333",
+                object_sid="S-1-5-21-1-2-3-3003",
+                computer_name="DISABLED-PC",
+                dns_hostname="disabled-pc.qehc.edu.sa",
+                distinguished_name="CN=DISABLED-PC,OU=Workstations,DC=qehc,DC=edu,DC=sa",
+                operating_system="Windows 11 Pro",
+                account_enabled=False,
+                is_server_or_dc=False,
+            ),
+            AdComputerRecord(
+                object_guid="c4444444-4444-4444-4444-444444444444",
+                object_sid="S-1-5-21-1-2-3-3004",
+                computer_name="QEHC-DC01",
+                dns_hostname="qehc-dc01.qehc.edu.sa",
+                distinguished_name="CN=QEHC-DC01,OU=Domain Controllers,DC=qehc,DC=edu,DC=sa",
+                operating_system="Windows Server 2022",
+                account_enabled=True,
+                is_server_or_dc=True,
+            ),
         ]
 
     def diagnose(self, params: LdapConnectParams):
@@ -169,3 +213,16 @@ class FakeLdapGateway:
 
     def search_groups(self, params: LdapConnectParams, *, ou_dns: list[str], limit: int = 500):
         return list(self.groups)[:limit]
+
+    def search_computers(
+        self,
+        params: LdapConnectParams,
+        *,
+        ou_dns: list[str],
+        limit: int = 2000,
+        include_servers: bool = False,
+    ):
+        rows = list(self.computers)
+        if not include_servers:
+            rows = [c for c in rows if not c.is_server_or_dc]
+        return rows[:limit]

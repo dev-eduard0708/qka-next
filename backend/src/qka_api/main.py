@@ -29,9 +29,11 @@ from qka_api.routes.desktop_agent import admin_router as desktop_admin_router
 from qka_api.routes.desktop_agent import agent_router as desktop_agent_router
 from qka_api.routes.mcp_oauth import router as mcp_oauth_router
 from qka_api.routes.synology import router as synology_router
+from qka_api.routes.workstations import router as workstations_router
 from mcp.server.transport_security import TransportSecuritySettings
 
 from qka_api.ldap_client import default_ldap_gateway
+from qka_api.services.network_probe import default_network_probe
 from qka_api.smb import default_gateway
 from qka_shared.config import get_settings
 from qka_workers.synology import should_embed, start_embedded_worker
@@ -70,6 +72,7 @@ def create_app() -> FastAPI:
         app.state.google_oidc = GoogleOidcService(settings)
         app.state.smb_gateway = default_gateway()
         app.state.ldap_gateway = default_ldap_gateway()
+        app.state.network_probe = default_network_probe()
         app.state.mcp_oauth = mcp_oauth
         app.state.mcp = mcp
         _MCP_CONTEXT.clear()
@@ -112,6 +115,7 @@ def create_app() -> FastAPI:
     app.include_router(integrations_router)
     app.include_router(desktop_agent_router)
     app.include_router(desktop_admin_router)
+    app.include_router(workstations_router)
     app.include_router(mcp_oauth_router)
     # Must call streamable_http_app before lifespan uses session_manager.
     transport_security = TransportSecuritySettings(

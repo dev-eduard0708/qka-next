@@ -785,6 +785,46 @@ INDEX_PAUSED = 2
 INDEX_ERROR = 3
 
 
+# --- AD Workstation inventory (Sources → Employee Computers → Workstations) ---
+
+REACH_UNCHECKED = 0
+REACH_DNS_FAILED = 1
+REACH_REACHABLE = 2
+REACH_NO_REPLY = 3  # ICMP timeout/blocked — never treated as "powered off"
+REACH_PROBE_ERROR = 4
+
+
+class AdWorkstation(Base):
+    """Domain computer object synced from AD for Desktop Agent administration.
+
+    Employee assignment is explicit (Super Admin); never inferred from computer name.
+    """
+
+    __tablename__ = "qka_next_ad_workstation"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    connection_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    object_guid: Mapped[str] = mapped_column(String(64), index=True)
+    object_sid: Mapped[str] = mapped_column(String(256), default="")
+    computer_name: Mapped[str] = mapped_column(String(256), default="", index=True)
+    dns_hostname: Mapped[str] = mapped_column(String(512), default="")
+    distinguished_name: Mapped[str] = mapped_column(String(2048), default="")
+    ou_path: Mapped[str] = mapped_column(String(2048), default="", index=True)
+    operating_system: Mapped[str] = mapped_column(String(512), default="")
+    account_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_present: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_server_or_dc: Mapped[bool] = mapped_column(Boolean, default=False)
+    assigned_qka_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True, index=True)
+    desktop_device_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True, index=True)
+    resolved_ip: Mapped[str] = mapped_column(String(64), default="")
+    reachability_status: Mapped[int] = mapped_column(Integer, default=REACH_UNCHECKED)
+    reachability_detail: Mapped[str] = mapped_column(String(1024), default="")
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class DesktopEnrollmentCode(Base):
     """One-time enrollment code bound to a QKA user. Never embedded in the MSI."""
 

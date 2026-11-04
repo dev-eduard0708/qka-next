@@ -85,6 +85,52 @@ export type DesktopDevice = {
   gpoDeployment?: { supported: boolean; status: string; note: string };
 };
 
+export type Workstation = {
+  id: string;
+  connectionId: string;
+  computerName: string;
+  dnsHostname: string;
+  ipAddress: string;
+  ou: string;
+  operatingSystem: string;
+  accountStatus: string;
+  accountEnabled: boolean;
+  isPresent: boolean;
+  isServerOrDc: boolean;
+  assignedEmployeeId: string | null;
+  assignedEmployeeName: string;
+  assignedEmployeeEmail: string;
+  reachabilityStatus: string;
+  reachabilityDetail: string;
+  reachabilityNote: string;
+  lastCheckedAt: string | null;
+  lastSeenAt: string | null;
+  agentStatus: string;
+  agentStatusLabel: string;
+  agentVersion: string;
+  lastHeartbeatAt: string | null;
+  indexingStatus: string;
+  online: boolean;
+  desktopDeviceId: string | null;
+  deployAgent: { enabled: boolean; status: string; note: string };
+};
+
+export type WorkstationsPage = {
+  items: Workstation[];
+  total: number;
+  page: number;
+  pageSize: number;
+  summary: {
+    totalPresent: number;
+    assigned: number;
+    reachable: number;
+    noReply: number;
+    dnsFailed: number;
+    unchecked: number;
+  };
+  ous: string[];
+};
+
 export type DirectoryUsersPage = {
   items: DirectoryUser[];
   total: number;
@@ -534,6 +580,83 @@ export const api = {
     }),
   revokeDesktopDevice: (deviceId: string) =>
     request<DesktopDevice>(`/api/v1/admin/desktop-devices/${deviceId}/revoke`, { method: "POST" }),
+  workstations: (params?: {
+    search?: string;
+    ou?: string;
+    accountStatus?: string;
+    reachability?: string;
+    agentStatus?: string;
+    assigned?: string;
+    includeMissing?: boolean;
+    includeServers?: boolean;
+    sort?: string;
+    sortDir?: string;
+    page?: number;
+    pageSize?: number;
+  }) => {
+    const q = new URLSearchParams();
+    if (params?.search) q.set("search", params.search);
+    if (params?.ou) q.set("ou", params.ou);
+    if (params?.accountStatus) q.set("accountStatus", params.accountStatus);
+    if (params?.reachability) q.set("reachability", params.reachability);
+    if (params?.agentStatus) q.set("agentStatus", params.agentStatus);
+    if (params?.assigned) q.set("assigned", params.assigned);
+    if (params?.includeMissing) q.set("includeMissing", "true");
+    if (params?.includeServers) q.set("includeServers", "true");
+    if (params?.sort) q.set("sort", params.sort);
+    if (params?.sortDir) q.set("sortDir", params.sortDir);
+    if (params?.page) q.set("page", String(params.page));
+    if (params?.pageSize) q.set("pageSize", String(params.pageSize));
+    const qs = q.toString();
+    return request<WorkstationsPage>(`/api/v1/admin/workstations${qs ? `?${qs}` : ""}`);
+  },
+  syncWorkstations: (body?: { connectionId?: string; includeServers?: boolean }) =>
+    request<{
+      connectionId: string;
+      discovered: number;
+      created: number;
+      updated: number;
+      missingMarked: number;
+      total: number;
+      present: number;
+      includeServers: boolean;
+      syncedAt: string;
+    }>("/api/v1/admin/workstations/sync", {
+      method: "POST",
+      body: JSON.stringify(body || {}),
+    }),
+  pingWorkstation: (workstationId: string, timeoutMs = 2000) =>
+    request<Workstation>(`/api/v1/admin/workstations/${workstationId}/ping`, {
+      method: "POST",
+      body: JSON.stringify({ timeoutMs }),
+    }),
+  pingWorkstationsBulk: (workstationIds: string[], opts?: { timeoutMs?: number; concurrency?: number }) =>
+    request<{
+      processed: number;
+      concurrency: number;
+      timeoutMs: number;
+      results: Array<{
+        id: string;
+        computerName: string;
+        reachabilityStatus: string;
+        ipAddress: string;
+        detail: string;
+      }>;
+      items: Workstation[];
+      note: string;
+    }>("/api/v1/admin/workstations/ping-bulk", {
+      method: "POST",
+      body: JSON.stringify({
+        workstationIds,
+        timeoutMs: opts?.timeoutMs ?? 2000,
+        concurrency: opts?.concurrency ?? 8,
+      }),
+    }),
+  assignWorkstationEmployee: (workstationId: string, qkaUserId: string | null) =>
+    request<Workstation>(`/api/v1/admin/workstations/${workstationId}/employee`, {
+      method: "PUT",
+      body: JSON.stringify({ qkaUserId }),
+    }),
   sourceFolderTree: (approvedShareId: string, rootPrefix?: string | null) => {
     const q = new URLSearchParams({ approvedShareId });
     // "" / omitted → entire share; otherwise scoped prefix

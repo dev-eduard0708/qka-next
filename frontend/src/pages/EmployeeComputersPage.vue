@@ -11,6 +11,11 @@
       </div>
     </div>
 
+    <q-tabs dense class="q-mb-md" active-color="primary" indicator-color="primary" align="left">
+      <q-route-tab :label="t('workstations.tabAgents')" :to="{ name: 'employee-computers' }" />
+      <q-route-tab :label="t('workstations.tabWorkstations')" :to="{ name: 'workstations' }" />
+    </q-tabs>
+
     <q-banner v-if="error" class="bg-negative text-white q-mb-md">{{ error }}</q-banner>
 
     <div class="row q-col-gutter-md q-mb-md">

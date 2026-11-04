@@ -27,6 +27,12 @@ export const router = createRouter({
           meta: { superAdmin: true },
           component: () => import("@/pages/EmployeeComputersPage.vue"),
         },
+        {
+          path: "sources/employee-computers/workstations",
+          name: "workstations",
+          meta: { superAdmin: true },
+          component: () => import("@/pages/WorkstationsPage.vue"),
+        },
         { path: "integrations", name: "integrations", component: () => import("@/pages/IntegrationsPage.vue") },
         {
           path: "integrations/synology",

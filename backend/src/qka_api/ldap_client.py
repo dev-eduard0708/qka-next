@@ -101,6 +101,18 @@ class AdGroupRecord:
 
 
 @dataclass
+class AdComputerRecord:
+    object_guid: str
+    object_sid: str
+    computer_name: str
+    dns_hostname: str
+    distinguished_name: str
+    operating_system: str
+    account_enabled: bool
+    is_server_or_dc: bool
+
+
+@dataclass
 class AdOuNode:
     name: str
     distinguished_name: str
@@ -214,6 +226,16 @@ class LdapGateway(Protocol):
     ) -> list[AdGroupRecord]:
         ...
 
+    def search_computers(
+        self,
+        params: LdapConnectParams,
+        *,
+        ou_dns: list[str],
+        limit: int = 2000,
+        include_servers: bool = False,
+    ) -> list[AdComputerRecord]:
+        ...
+
 
 def _guid_to_str(raw: Any) -> str:
     if raw is None:
@@ -257,6 +279,42 @@ def _uac_enabled(uac: Any) -> bool:
         return (int(uac) & 0x2) == 0
     except (TypeError, ValueError):
         return True
+
+
+# ADS_UF_SERVER_TRUST_ACCOUNT — domain controllers.
+_UAC_SERVER_TRUST = 0x2000
+
+
+def _is_server_or_dc(uac: Any, operating_system: str) -> bool:
+    try:
+        if int(uac) & _UAC_SERVER_TRUST:
+            return True
+    except (TypeError, ValueError):
+        pass
+    os_name = (operating_system or "").lower()
+    return "server" in os_name
+
+
+def _computer_from_attrs(
+    *,
+    object_guid: str,
+    object_sid: str,
+    computer_name: str,
+    dns_hostname: str,
+    distinguished_name: str,
+    operating_system: str,
+    uac: Any,
+) -> AdComputerRecord:
+    return AdComputerRecord(
+        object_guid=object_guid,
+        object_sid=object_sid,
+        computer_name=(computer_name or "").rstrip("$"),
+        dns_hostname=dns_hostname or "",
+        distinguished_name=distinguished_name or "",
+        operating_system=operating_system or "",
+        account_enabled=_uac_enabled(uac),
+        is_server_or_dc=_is_server_or_dc(uac, operating_system or ""),
+    )
 
 
 def _ado_scalar(value: Any) -> Any:
@@ -885,6 +943,109 @@ class RealLdapGateway:
                         is_security_group=is_sec,
                         member_guids=members,
                         member_sids=[],
+                    )
+                )
+        conn.unbind()
+        return out[:limit]
+
+    def search_computers(
+        self,
+        params: LdapConnectParams,
+        *,
+        ou_dns: list[str],
+        limit: int = 2000,
+        include_servers: bool = False,
+    ) -> list[AdComputerRecord]:
+        mode = normalize_auth_mode(params.auth_mode)
+        if mode == AUTH_WINDOWS_INTEGRATED:
+            rows = self._search_computers_windows(params, ou_dns=ou_dns, limit=limit)
+        else:
+            rows = self._search_computers_ldaps(params, ou_dns=ou_dns, limit=limit)
+        if include_servers:
+            return rows[:limit]
+        return [r for r in rows if not r.is_server_or_dc][:limit]
+
+    def _search_computers_windows(
+        self, params: LdapConnectParams, *, ou_dns: list[str], limit: int
+    ) -> list[AdComputerRecord]:
+        host, default_base = self._windows_host_and_base(params)
+        bases = ou_dns or ([default_base] if default_base else [])
+        out: list[AdComputerRecord] = []
+        attrs = [
+            "objectGUID",
+            "objectSid",
+            "cn",
+            "sAMAccountName",
+            "dNSHostName",
+            "distinguishedName",
+            "operatingSystem",
+            "userAccountControl",
+        ]
+        for base in bases:
+            if len(out) >= limit:
+                break
+            rows = self._ado_search(
+                host,
+                base,
+                "(&(objectCategory=computer)(objectClass=computer))",
+                attrs,
+                scope="subtree",
+                limit=max(1, limit - len(out)),
+                timeout=params.timeout_seconds,
+            )
+            for row in rows:
+                cn = str(_ado_scalar(row.get("cn")) or "")
+                sam = str(_ado_scalar(row.get("sAMAccountName")) or "")
+                out.append(
+                    _computer_from_attrs(
+                        object_guid=_guid_to_str(_ado_scalar(row.get("objectGUID"))),
+                        object_sid=_sid_to_str(_ado_scalar(row.get("objectSid"))),
+                        computer_name=cn or sam,
+                        dns_hostname=str(_ado_scalar(row.get("dNSHostName")) or ""),
+                        distinguished_name=str(_ado_scalar(row.get("distinguishedName")) or ""),
+                        operating_system=str(_ado_scalar(row.get("operatingSystem")) or ""),
+                        uac=_ado_scalar(row.get("userAccountControl")),
+                    )
+                )
+        return out[:limit]
+
+    def _search_computers_ldaps(
+        self, params: LdapConnectParams, *, ou_dns: list[str], limit: int
+    ) -> list[AdComputerRecord]:
+        ldap3, conn = self._connect_ldaps(params)
+        out: list[AdComputerRecord] = []
+        bases = ou_dns or ([params.base_dn] if params.base_dn else [])
+        for base in bases:
+            if len(out) >= limit:
+                break
+            conn.search(
+                search_base=base,
+                search_filter="(&(objectCategory=computer)(objectClass=computer))",
+                search_scope=ldap3.SUBTREE,
+                attributes=[
+                    "objectGUID",
+                    "objectSid",
+                    "cn",
+                    "sAMAccountName",
+                    "dNSHostName",
+                    "distinguishedName",
+                    "operatingSystem",
+                    "userAccountControl",
+                ],
+                size_limit=max(1, limit - len(out)),
+            )
+            for entry in conn.entries:
+                cn = str(getattr(entry, "cn", "") or "")
+                sam = str(getattr(entry, "sAMAccountName", "") or "")
+                out.append(
+                    _computer_from_attrs(
+                        object_guid=_guid_to_str(entry.objectGUID.value if hasattr(entry, "objectGUID") else ""),
+                        object_sid=_sid_to_str(entry.objectSid.value if hasattr(entry, "objectSid") else ""),
+                        computer_name=cn or sam,
+                        dns_hostname=str(getattr(entry, "dNSHostName", "") or ""),
+                        distinguished_name=str(getattr(entry, "distinguishedName", "") or ""),
+                        operating_system=str(getattr(entry, "operatingSystem", "") or ""),
+                        uac=entry.userAccountControl.value if hasattr(entry, "userAccountControl") else 0,
                     )
                 )
         conn.unbind()

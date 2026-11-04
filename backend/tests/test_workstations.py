@@ -1,0 +1,224 @@
+"""AD workstation inventory, DNS/ICMP probes, employee association."""
+
+from __future__ import annotations
+
+from qka_api.services import active_directory as ad
+from qka_api.services.network_probe import DnsResult, PingResult
+from tests.conftest import ALLOWED_USER, GOOGLE_ONLY_USER, auth_cookies
+from tests.fake_ldap import FakeLdapGateway
+
+
+class FakeProbe:
+    def __init__(self) -> None:
+        self.dns_map: dict[str, DnsResult] = {}
+        self.ping_map: dict[str, PingResult] = {}
+        self.default_dns = DnsResult(True, "10.0.0.50", "Resolved")
+        self.default_ping = PingResult(True, "ICMP echo reply received.")
+
+    def resolve_dns(self, hostname: str) -> DnsResult:
+        key = (hostname or "").lower()
+        return self.dns_map.get(key, self.default_dns)
+
+    def icmp_ping(self, host: str, *, timeout_ms: int = 2000) -> PingResult:
+        del timeout_ms
+        return self.ping_map.get(host, self.default_ping)
+
+
+def _admin(client):
+    login = client.post("/api/v1/auth/login", json={"username": "super", "password": "123"})
+    assert login.status_code == 200, login.text
+    csrf = client.cookies.get("qka_next_csrf")
+    return {"X-CSRF-Token": csrf} if csrf else {}
+
+
+def _install(client) -> tuple[FakeLdapGateway, FakeProbe]:
+    gateway = FakeLdapGateway()
+    probe = FakeProbe()
+    client.app.state.ldap_gateway = gateway
+    client.app.state.network_probe = probe
+    ad._TEST_RATE.clear()
+    return gateway, probe
+
+
+def _ensure_ad_connection(client, headers) -> str:
+    saved = client.post(
+        "/api/v1/admin/active-directory/connections",
+        headers=headers,
+        json={
+            "connectionName": "QEHC AD",
+            "domainDnsName": "qehc.edu.sa",
+            "domainController": "DC1.qehc.edu.sa",
+            "authMode": "windows_integrated",
+            "protocol": "windows_integrated",
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    return saved.json()["id"]
+
+
+def test_non_admin_cannot_manage_workstations(client):
+    _install(client)
+    response = client.get(
+        "/api/v1/admin/workstations",
+        cookies=auth_cookies(ALLOWED_USER),
+    )
+    assert response.status_code == 403
+
+
+def test_sync_excludes_servers_and_preserves_missing(client):
+    gateway, _probe = _install(client)
+    headers = _admin(client)
+    conn_id = _ensure_ad_connection(client, headers)
+
+    sync = client.post(
+        "/api/v1/admin/workstations/sync",
+        headers=headers,
+        json={"connectionId": conn_id, "includeServers": False},
+    )
+    assert sync.status_code == 200, sync.text
+    body = sync.json()
+    assert body["discovered"] == 3
+    assert body["created"] == 3
+    assert body["present"] == 3
+
+    listed = client.get("/api/v1/admin/workstations", headers=headers)
+    assert listed.status_code == 200
+    names = {i["computerName"] for i in listed.json()["items"]}
+    assert "PILOT-PC" in names
+    assert "QEHC-DC01" not in names
+    assert listed.json()["summary"]["totalPresent"] == 3
+
+    # Remove one workstation from directory and resync — mark missing, do not delete.
+    gateway.computers = [c for c in gateway.computers if c.computer_name != "FINANCE-01"]
+    again = client.post(
+        "/api/v1/admin/workstations/sync",
+        headers=headers,
+        json={"connectionId": conn_id},
+    )
+    assert again.status_code == 200
+    assert again.json()["missingMarked"] == 1
+    assert again.json()["present"] == 2
+
+    with_missing = client.get(
+        "/api/v1/admin/workstations?includeMissing=true&search=FINANCE",
+        headers=headers,
+    )
+    assert with_missing.status_code == 200
+    finance = [i for i in with_missing.json()["items"] if i["computerName"] == "FINANCE-01"]
+    assert finance
+    assert finance[0]["isPresent"] is False
+
+
+def test_dns_failure_and_icmp_no_reply(client):
+    _gateway, probe = _install(client)
+    headers = _admin(client)
+    conn_id = _ensure_ad_connection(client, headers)
+    client.post(
+        "/api/v1/admin/workstations/sync",
+        headers=headers,
+        json={"connectionId": conn_id},
+    )
+    items = client.get("/api/v1/admin/workstations", headers=headers).json()["items"]
+    pilot = next(i for i in items if i["computerName"] == "PILOT-PC")
+    finance = next(i for i in items if i["computerName"] == "FINANCE-01")
+
+    probe.dns_map["pilot-pc.qehc.edu.sa"] = DnsResult(False, "", "DNS resolution failed: nxdomain")
+    dns_fail = client.post(
+        f"/api/v1/admin/workstations/{pilot['id']}/ping",
+        headers=headers,
+        json={"timeoutMs": 500},
+    )
+    assert dns_fail.status_code == 200, dns_fail.text
+    assert dns_fail.json()["reachabilityStatus"] == "dns_failed"
+    assert dns_fail.json()["ipAddress"] == ""
+
+    probe.dns_map["finance-01.qehc.edu.sa"] = DnsResult(True, "10.0.0.61", "Resolved")
+    probe.ping_map["10.0.0.61"] = PingResult(
+        False,
+        "No ICMP reply. This may mean the host is offline, firewalled, or ICMP is blocked.",
+    )
+    no_reply = client.post(
+        f"/api/v1/admin/workstations/{finance['id']}/ping",
+        headers=headers,
+        json={},
+    )
+    assert no_reply.status_code == 200
+    assert no_reply.json()["reachabilityStatus"] == "no_reply"
+    assert no_reply.json()["ipAddress"] == "10.0.0.61"
+    assert "powered off" in (no_reply.json().get("reachabilityNote") or "").lower()
+
+
+def test_bulk_ping_only_selected(client):
+    _gateway, probe = _install(client)
+    headers = _admin(client)
+    conn_id = _ensure_ad_connection(client, headers)
+    client.post(
+        "/api/v1/admin/workstations/sync",
+        headers=headers,
+        json={"connectionId": conn_id},
+    )
+    items = client.get("/api/v1/admin/workstations", headers=headers).json()["items"]
+    ids = [i["id"] for i in items[:2]]
+    probe.default_ping = PingResult(True, "ICMP echo reply received.")
+
+    bulk = client.post(
+        "/api/v1/admin/workstations/ping-bulk",
+        headers=headers,
+        json={"workstationIds": ids, "timeoutMs": 800, "concurrency": 2},
+    )
+    assert bulk.status_code == 200, bulk.text
+    assert bulk.json()["processed"] == 2
+    assert all(r["reachabilityStatus"] == "reachable" for r in bulk.json()["results"])
+    assert "powered off" in bulk.json()["note"].lower()
+
+    # Refuse arbitrary / non-inventory IDs (no unrestricted scans).
+    bad = client.post(
+        "/api/v1/admin/workstations/ping-bulk",
+        headers=headers,
+        json={"workstationIds": ["00000000-0000-0000-0000-000000000099"]},
+    )
+    assert bad.status_code == 400
+
+
+def test_employee_association_requires_ad_user(client):
+    _install(client)
+    headers = _admin(client)
+    conn_id = _ensure_ad_connection(client, headers)
+    client.post(
+        "/api/v1/admin/workstations/sync",
+        headers=headers,
+        json={"connectionId": conn_id},
+    )
+    pilot = next(
+        i
+        for i in client.get("/api/v1/admin/workstations", headers=headers).json()["items"]
+        if i["computerName"] == "PILOT-PC"
+    )
+    assert pilot["agentStatus"] == "not_registered"
+    assert pilot["agentStatusLabel"] == "Not Registered / Unknown"
+    assert pilot["deployAgent"]["enabled"] is False
+
+    denied = client.put(
+        f"/api/v1/admin/workstations/{pilot['id']}/employee",
+        headers=headers,
+        json={"qkaUserId": str(GOOGLE_ONLY_USER)},
+    )
+    assert denied.status_code == 400
+    assert "AD-linked" in denied.json()["detail"]
+
+    ok = client.put(
+        f"/api/v1/admin/workstations/{pilot['id']}/employee",
+        headers=headers,
+        json={"qkaUserId": str(ALLOWED_USER)},
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["assignedEmployeeId"] == str(ALLOWED_USER)
+    assert ok.json()["assignedEmployeeName"]
+
+    cleared = client.put(
+        f"/api/v1/admin/workstations/{pilot['id']}/employee",
+        headers=headers,
+        json={"qkaUserId": None},
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["assignedEmployeeId"] is None

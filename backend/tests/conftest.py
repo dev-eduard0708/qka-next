@@ -326,6 +326,35 @@ def seed_db():
                 """
             )
         )
+        session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS qka_next_ad_workstation (
+                    id UUID PRIMARY KEY,
+                    connection_id UUID NOT NULL,
+                    object_guid VARCHAR(64) NOT NULL,
+                    object_sid VARCHAR(256) NOT NULL DEFAULT '',
+                    computer_name VARCHAR(256) NOT NULL DEFAULT '',
+                    dns_hostname VARCHAR(512) NOT NULL DEFAULT '',
+                    distinguished_name VARCHAR(2048) NOT NULL DEFAULT '',
+                    ou_path VARCHAR(2048) NOT NULL DEFAULT '',
+                    operating_system VARCHAR(512) NOT NULL DEFAULT '',
+                    account_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    is_present BOOLEAN NOT NULL DEFAULT TRUE,
+                    is_server_or_dc BOOLEAN NOT NULL DEFAULT FALSE,
+                    assigned_qka_user_id UUID NULL,
+                    desktop_device_id UUID NULL,
+                    resolved_ip VARCHAR(64) NOT NULL DEFAULT '',
+                    reachability_status INTEGER NOT NULL DEFAULT 0,
+                    reachability_detail VARCHAR(1024) NOT NULL DEFAULT '',
+                    last_checked_at TIMESTAMPTZ NULL,
+                    last_seen_at TIMESTAMPTZ NULL,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+        )
         session.execute(text("ALTER TABLE qka_next_ad_directory_user ADD COLUMN IF NOT EXISTS qka_eligible BOOLEAN NOT NULL DEFAULT FALSE"))
         session.execute(text("ALTER TABLE qka_next_ad_directory_user ADD COLUMN IF NOT EXISTS qka_archived BOOLEAN NOT NULL DEFAULT FALSE"))
         session.execute(text("ALTER TABLE qka_next_ad_directory_user ADD COLUMN IF NOT EXISTS department_override VARCHAR(512) NOT NULL DEFAULT ''"))
@@ -672,6 +701,7 @@ def seed_db():
         session.execute(text("DELETE FROM qka_next_desktop_device_folder"))
         session.execute(text("DELETE FROM qka_next_desktop_device"))
         session.execute(text("DELETE FROM qka_next_desktop_enrollment_code"))
+        session.execute(text("DELETE FROM qka_next_ad_workstation"))
         session.execute(text("DELETE FROM qka_user"))
         session.add_all(
             [
