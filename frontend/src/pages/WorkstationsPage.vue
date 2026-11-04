@@ -115,8 +115,8 @@
       selection="multiple"
       v-model:selected="selectedRows"
       v-model:pagination="pagination"
-      :rows-number="loadFailed ? 0 : total"
       :rows-per-page-options="[25, 50, 100, 200]"
+      binary-state-sort
       :no-data-label="loadFailed ? t('workstations.noDataBecauseError') : t('workstations.noData')"
       @request="onRequest"
     >
@@ -297,7 +297,13 @@ const syncBaseDn = ref("");
 const syncParentDn = ref("");
 const syncOuItems = ref<Array<{ name: string; distinguishedName: string; selected: boolean }>>([]);
 const selectedOuMap = ref<Record<string, { name: string; distinguishedName: string }>>({});
-const pagination = ref({ page: 1, rowsPerPage: 25, sortBy: "computerName", descending: false });
+const pagination = ref({
+  page: 1,
+  rowsPerPage: 25,
+  rowsNumber: 0,
+  sortBy: "computerName",
+  descending: false,
+});
 const selectedSyncOuCount = computed(() => Object.keys(selectedOuMap.value).length);
 const canOuGoUp = computed(() => {
   const parent = (syncParentDn.value || "").toLowerCase();
@@ -396,7 +402,16 @@ function formatApiFailure(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback;
 }
 
-async function reload() {
+async function reload(opts?: {
+  page?: number;
+  rowsPerPage?: number;
+  sortBy?: string;
+  descending?: boolean;
+}) {
+  const pageNum = opts?.page ?? pagination.value.page;
+  const rowsPerPage = opts?.rowsPerPage ?? pagination.value.rowsPerPage;
+  const sortBy = opts?.sortBy ?? pagination.value.sortBy ?? "computerName";
+  const descending = opts?.descending ?? pagination.value.descending;
   loading.value = true;
   error.value = "";
   try {
@@ -406,10 +421,10 @@ async function reload() {
       reachability: reachability.value || undefined,
       accountStatus: accountStatus.value || undefined,
       scopeOnly: scopeOnly.value,
-      sort: pagination.value.sortBy || "computerName",
-      sortDir: pagination.value.descending ? "desc" : "asc",
-      page: pagination.value.page,
-      pageSize: pagination.value.rowsPerPage,
+      sort: sortBy || "computerName",
+      sortDir: descending ? "desc" : "asc",
+      page: pageNum,
+      pageSize: rowsPerPage,
     });
     loadFailed.value = false;
     rows.value = page.items;
@@ -417,6 +432,12 @@ async function reload() {
     summary.value = page.summary;
     ous.value = page.ous;
     activeSyncOus.value = page.activeSyncOus || [];
+    // Mutate in place so Quasar keeps server-side pagination controls working.
+    pagination.value.rowsNumber = page.total;
+    pagination.value.page = page.page;
+    pagination.value.rowsPerPage = page.pageSize;
+    pagination.value.sortBy = sortBy || "computerName";
+    pagination.value.descending = descending;
     const keep = new Set(selectedRows.value.map((r) => r.id));
     selectedRows.value = rows.value.filter((r) => keep.has(r.id));
   } catch (err) {
@@ -425,6 +446,7 @@ async function reload() {
     selectedRows.value = [];
     total.value = 0;
     ous.value = [];
+    pagination.value.rowsNumber = 0;
     summary.value = { totalPresent: 0, assigned: 0, reachable: 0, noReply: 0, dnsFailed: 0, unchecked: 0 };
     error.value = formatApiFailure(err, t("workstations.loadError"));
   } finally {
@@ -625,18 +647,24 @@ async function saveAssign() {
   }
 }
 
-function onRequest(props: { pagination: typeof pagination.value }) {
-  pagination.value = props.pagination;
-  void reload();
+async function onRequest(req: {
+  pagination: { page: number; rowsPerPage: number; sortBy?: string | null; descending?: boolean };
+}) {
+  const { page, rowsPerPage, sortBy, descending } = req.pagination;
+  await reload({
+    page,
+    rowsPerPage: rowsPerPage || 25,
+    sortBy: sortBy || "computerName",
+    descending: !!descending,
+  });
 }
 
 function onScopeToggle() {
-  pagination.value.page = 1;
-  void reload();
+  void reload({ page: 1 });
 }
 
 watch([ou, reachability, accountStatus], () => {
-  pagination.value.page = 1;
+  void reload({ page: 1 });
 });
 
 onMounted(async () => {
