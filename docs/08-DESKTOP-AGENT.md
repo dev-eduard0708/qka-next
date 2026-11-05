@@ -24,9 +24,9 @@ See **`docs/10-PILOT-PC-INSTALL.md`** for the one-PC procedure.
 2. Build MSI: `scripts/desktop-agent/build-msi.ps1` (WiX 3.14; local binaries under `C:\QehcAI\Temp\wix314` are supported)
    - Silent: `msiexec /i QKA-Agent.msi /qn QKASERVERURL=https://qka.internal…`
 3. Or script install: `Install-QkaAgent.ps1 -ServerBaseUrl https://qka.internal…`
-4. Issue enrollment code in QKA UI for an AD-linked employee.
-5. Place code on the PC via env `QKA_AGENT_ENROLLMENT_CODE` or `ProgramData\QKA\DesktopAgent\agent.config.json`.
-6. Agent enrolls, heartbeats, and indexes **approved folders only** after read-only verification.
+4. Issue a **device registration** code in QKA UI (no employee required). Place code on the PC via env `QKA_AGENT_ENROLLMENT_CODE` or `ProgramData\QKA\DesktopAgent\agent.config.json` — never embed in MSI/SYSVOL.
+5. Agent enrolls and heartbeats as **Employee: Unassigned · Indexing: Disabled**.
+6. Super Admin assigns an AD-linked employee, then browses/approves folders. Indexing does **not** start automatically.
 7. Built artifact (build host): `agent\dist\QKA-Agent.msi` (version `0.1.0.0`, **unsigned**).
 
 ## Security
@@ -41,41 +41,46 @@ See **`docs/10-PILOT-PC-INSTALL.md`** for the one-PC procedure.
 
 Connected agents fulfill Super Admin browse requests over outbound HTTPS polling:
 
-1. Admin selects employee → registered device → **Browse Folders**.
+1. Admin selects a **registered** device with an assigned AD employee → **Browse Folders**.
 2. Server queues `pendingFolderBrowse` on policy; agent resolves the employee profile via AD SID → ProfileList (not `C:\Users\<username>`).
 3. Known folders (Desktop / Documents / Downloads) are resolved on the agent; tree expands under that profile only.
 4. Directory names only — no file contents. Junction/symlink escapes and system paths are rejected.
-5. Super Admin saves approved folders; indexing still requires separate read-only verification (no ACL auto-grants, no LocalSystem write).
+5. Super Admin saves approved folders; indexing still requires separate Start + read-only verification (no ACL auto-grants, no LocalSystem write).
 
 **Access design:** Prefer a restricted domain service account with explicit read/list NTFS on target profiles. LocalService/LocalSystem often cannot read employee Documents — do not “fix” by broadening ACLs automatically.
 
 ## Managed deploy (Workstations UI)
 
-1. Super Admin assigns an AD-linked employee to the workstation.
-2. Deploy requires: trusted internal HTTPS (`QKA_AGENT_PUBLIC_BASE_URL`), MSI present, RSAT GPMC available to the delegated engine, confirmation phrase `DEPLOY SELECTED`.
+1. Employee assignment is **optional** at deploy time (Install → Register → Assign).
+2. Deploy requires: trusted internal HTTPS (`QKA_AGENT_PUBLIC_BASE_URL`), MSI present, RSAT GPMC + linked/filtered pilot GPO, **secure per-computer** machineEnrollmentToken provisioning (HKLM via computer-targeted GPO — not shared MSI/SYSVOL secrets), confirmation phrase `DEPLOY SELECTED`.
 3. Jobs persist in Postgres (`requested` → `approved` → `scheduled` → `waiting_for_computer` / `installing` → `installed_agent_registered` | `failed` | `cancelled`).
 4. Evidence of install is **agent registration + heartbeat**, never ping or GPO link alone.
-5. Machine enrollment tokens are bound to AD computer SID/GUID + assigned employee; hostname/MAC/IP/email alone are rejected.
+5. Machine enrollment tokens are bound to AD computer SID + HMAC `machineProof`; SID/GUID claims alone are rejected. This is **not** Kerberos machine auth until that is implemented.
 
 ## HTTPS / DNS / GPO readiness (ops)
 
 | Item | Status (QEC-AI-MCP) |
 | --- | --- |
-| DNS `qka-agent.qehc.edu.sa` | A → `192.168.120.35` (created) |
-| Trusted TLS for that host | **BLOCKED** — no cert in `LocalMachine\My` / WebHosting; no domain CA listed |
-| `QKA_AGENT_PUBLIC_BASE_URL` | Leave unset until HTTPS validates |
+| DNS `qka-agent.qehc.edu.sa` | Internal A → `192.168.120.35` |
+| Public DNS (LE DNS-01) | **NXDOMAIN** on 8.8.8.8 — public ACME not usable without split-horizon |
+| Trusted TLS for that host | **BLOCKED** — `LocalMachine\My` / WebHosting empty; no domain CA auto-install |
+| IIS | W3SVC running; binding config needs elevation; **no** dedicated `qka-agent` HTTPS site yet |
+| `QKA_AGENT_PUBLIC_BASE_URL` | Leave unset until HTTPS validates with client trust |
 | AD group `QKA-Agent-Pilot-Computers` | Exists (`OU=Service Users`); **0 members** |
-| GPO `QKA-Desktop-Agent-Deployment.` | Exists (GUID `{73E8998A-…}`); **not linked**; SYSVOL empty (version 0) |
-| GPMC / `Get-GPO` on this host | **Missing** — install RSAT GPMC elevated |
+| GPO `QKA-Desktop-Agent-Deployment` | GUID `{73E8998A-A3B3-435F-9219-419C331BA2D4}`; **not linked** |
+| GPMC on this host | **Missing** — configure Software Installation from an authorized AD management host |
 
-### Certificate issuance (required before HTTPS)
+### Certificate plan (required before HTTPS)
 
-1. Issue an organization-approved certificate with SAN `qka-agent.qehc.edu.sa` (internal PKI / approved CA — do not use a self-signed production cert).
-2. Import into `LocalMachine\My` with private key.
-3. Create a **dedicated** IIS site/binding for `qka-agent.qehc.edu.sa:443` only — do not replace MCP/OAuth bindings.
-4. Reverse-proxy `/api/v1/agent/desktop/*` → `http://127.0.0.1:5265`.
-5. Validate `https://qka-agent.qehc.edu.sa` from a domain workstation with normal trust (no TLS bypass).
-6. Only then set `QKA_AGENT_PUBLIC_BASE_URL=https://qka-agent.qehc.edu.sa`.
+**Prefer organization-approved trusted cert** (internal PKI / approved CA) with SAN `qka-agent.qehc.edu.sa`. Do not auto-install AD CS. Do not disable TLS verification. Do not expose FastAPI publicly.
+
+**Public LE DNS-01 evaluation:** Rejected for now — name does not exist in public DNS; service must stay internal-only. Revisit only with approved split-horizon + DNS-01 automation that never publishes the API.
+
+1. Ops issues/import cert into `LocalMachine\My` with private key (SAN + chain trusted by domain clients).
+2. Create a **dedicated** IIS site/binding for `qka-agent.qehc.edu.sa:443` only — do not replace MCP/OAuth bindings.
+3. Reverse-proxy `/api/v1/agent/desktop/*` → local FastAPI (e.g. `http://127.0.0.1:5265`).
+4. Validate from a domain workstation with normal trust (no `-SkipCertificateCheck`).
+5. Only then set `QKA_AGENT_PUBLIC_BASE_URL=https://qka-agent.qehc.edu.sa`.
 
 ### GPO / pilot scope (required before deploy)
 

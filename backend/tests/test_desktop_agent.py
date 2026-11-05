@@ -29,6 +29,111 @@ def test_enrollment_requires_ad_linked_user(client):
     assert "AD-linked" in denied.json()["detail"]
 
 
+def test_install_register_assign_before_indexing(client):
+    """Install → Register Device → Assign User → Approve Folders → Start Indexing."""
+    headers = _admin(client)
+    issued = client.post(
+        "/api/v1/admin/desktop-devices/enrollment-codes",
+        headers=headers,
+        json={"label": "device-only"},
+    )
+    assert issued.status_code == 200, issued.text
+    body = issued.json()
+    assert body["qkaUserId"] is None
+    assert body["registrationMode"] == "device_registration"
+    code = body["enrollmentCode"]
+
+    enrolled = client.post(
+        "/api/v1/agent/desktop/enroll",
+        json={
+            "enrollmentCode": code,
+            "computerName": "UNASSIGNED-PC",
+            "deviceFingerprint": "unassigned-pc-fp-1",
+            "domainJoinedName": "QEHC",
+            "agentVersion": "0.1.0",
+        },
+    )
+    assert enrolled.status_code == 200, enrolled.text
+    assert enrolled.json()["employeeAssigned"] is False
+    assert enrolled.json()["qkaUserId"] is None
+    assert enrolled.json()["indexingEnabled"] is False
+    device_id = enrolled.json()["deviceId"]
+    device_key = enrolled.json()["deviceKey"]
+    auth = {"X-QKA-Device-Id": device_id, "X-QKA-Device-Key": device_key}
+
+    hb = client.post(
+        "/api/v1/agent/desktop/heartbeat",
+        headers=auth,
+        json={"health": "ok", "agentVersion": "0.1.0"},
+    )
+    assert hb.status_code == 200
+
+    policy = client.get("/api/v1/agent/desktop/policy", headers=auth)
+    assert policy.status_code == 200
+    assert policy.json()["employeeAssigned"] is False
+    assert policy.json()["command"] == "pause"
+    assert policy.json()["indexingEnabled"] is False
+    assert policy.json()["approvedFolders"] == []
+    assert policy.json()["pendingFolderBrowse"] == []
+
+    listed = client.get("/api/v1/admin/desktop-devices", headers=headers)
+    row = next(i for i in listed.json()["items"] if i["id"] == device_id)
+    assert row["employeeAssigned"] is False
+    assert row["employeeName"] == "Unassigned"
+    assert row["indexingState"] == "disabled"
+    assert row["folderBrowseAvailable"] is False
+
+    # Folders / start blocked while unassigned
+    folders_denied = client.put(
+        f"/api/v1/admin/desktop-devices/{device_id}/folders",
+        headers=headers,
+        json={"folders": [{"path": r"C:\Users\eduard\Documents"}]},
+    )
+    assert folders_denied.status_code == 400
+    start_denied = client.post(
+        f"/api/v1/admin/desktop-devices/{device_id}/command",
+        headers=headers,
+        json={"command": "start"},
+    )
+    assert start_denied.status_code == 400
+    browse_denied = client.post(
+        f"/api/v1/admin/desktop-devices/{device_id}/folder-browse",
+        headers=headers,
+        json={"parentPath": ""},
+    )
+    assert browse_denied.status_code == 400
+
+    assigned = client.post(
+        f"/api/v1/admin/desktop-devices/{device_id}/assign-employee",
+        headers=headers,
+        json={"qkaUserId": str(ALLOWED_USER)},
+    )
+    assert assigned.status_code == 200, assigned.text
+    assert assigned.json()["employeeAssigned"] is True
+    assert assigned.json()["qkaUserId"] == str(ALLOWED_USER)
+    assert assigned.json()["employeeAdSid"]
+
+    policy2 = client.get("/api/v1/agent/desktop/policy", headers=auth)
+    assert policy2.json()["employeeAssigned"] is True
+    # Still no folders — indexing not auto-started
+    assert policy2.json()["indexingEnabled"] is False
+
+    folders = client.put(
+        f"/api/v1/admin/desktop-devices/{device_id}/folders",
+        headers=headers,
+        json={"folders": [{"path": r"C:\QKA-Pilot-Docs", "includeSubfolders": True}]},
+    )
+    assert folders.status_code == 200, folders.text
+
+    started = client.post(
+        f"/api/v1/admin/desktop-devices/{device_id}/command",
+        headers=headers,
+        json={"command": "start"},
+    )
+    assert started.status_code == 200
+    assert started.json()["indexingState"] == "running"
+
+
 def test_enroll_heartbeat_policy_progress_and_revoke(client):
     headers = _admin(client)
     # Ensure ALLOWED_USER has AD linked identity (seed includes it).
@@ -49,7 +154,9 @@ def test_enroll_heartbeat_policy_progress_and_revoke(client):
     assert issued.status_code == 200, issued.text
     code = issued.json()["enrollmentCode"]
     assert code
-    assert "embed" in issued.json()["installHint"].lower() or "MSI" in issued.json()["installHint"]
+    hint = issued.json()["installHint"].lower()
+    assert "device registration" in hint or "embed" in hint or "msi" in hint
+    assert issued.json().get("registrationMode") == "employee_bound_fallback"
 
     enrolled = client.post(
         "/api/v1/agent/desktop/enroll",

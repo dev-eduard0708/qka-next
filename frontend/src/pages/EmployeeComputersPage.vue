@@ -21,14 +21,15 @@
     <div class="row q-col-gutter-md q-mb-md items-center">
       <div class="col-12 col-md-5">
         <q-select
-          v-model="selectedUserId"
-          :options="employeeOptions"
+          v-model="filterUserId"
+          :options="employeeFilterOptions"
           emit-value
           map-options
+          clearable
           outlined
           dense
-          :label="t('desktop.selectEmployee')"
-          @update:model-value="onEmployeeChange"
+          :label="t('desktop.filterEmployee')"
+          @update:model-value="onFilterChange"
         />
       </div>
       <div class="col-12 col-md-7 row q-gutter-sm items-center">
@@ -42,7 +43,15 @@
         >
           <q-tooltip v-if="!canBrowseFolders">{{ browseBlockedReason }}</q-tooltip>
         </q-btn>
-        <q-btn color="primary" unelevated :disable="!selectedUserId" :loading="busy" :label="t('desktop.issueEnrollment')" @click="issueEnrollment" />
+        <q-btn
+          color="primary"
+          unelevated
+          :loading="busy"
+          :label="t('desktop.issueDeviceEnrollment')"
+          @click="issueDeviceEnrollment"
+        >
+          <q-tooltip>{{ t("desktop.issueDeviceEnrollmentHint") }}</q-tooltip>
+        </q-btn>
       </div>
     </div>
 
@@ -86,7 +95,41 @@
       <q-card-section v-if="selectedDevice">
         <div class="text-caption text-grey-7 q-mb-sm">
           {{ selectedDevice.domainJoinedName || selectedDevice.computerName }}
-          · {{ selectedDevice.employeeName }}
+          ·
+          <span :class="selectedDevice.employeeAssigned === false ? 'text-warning text-weight-medium' : ''">
+            {{ selectedDevice.employeeAssigned === false ? t("desktop.employeeUnassigned") : selectedDevice.employeeName }}
+          </span>
+        </div>
+
+        <div class="row q-col-gutter-sm items-center q-mb-md">
+          <div class="col-12 col-md-6">
+            <q-select
+              v-model="assignUserId"
+              :options="employeeOptions"
+              emit-value
+              map-options
+              clearable
+              outlined
+              dense
+              :label="t('desktop.assignEmployee')"
+            />
+          </div>
+          <div class="col-auto">
+            <q-btn
+              color="primary"
+              unelevated
+              :loading="busy"
+              :disable="!assignUserId && selectedDevice.employeeAssigned !== false"
+              :label="t('desktop.saveAssignment')"
+              @click="saveAssignment"
+            />
+          </div>
+          <div class="col-auto" v-if="selectedDevice.employeeAssigned">
+            <q-btn flat color="warning" :loading="busy" :label="t('desktop.clearAssignment')" @click="clearAssignment" />
+          </div>
+        </div>
+        <div v-if="selectedDevice.employeeAssigned === false" class="text-caption text-warning q-mb-md">
+          {{ t("desktop.unassignedHint") }}
         </div>
 
         <div class="text-subtitle2 q-mb-xs">{{ t("desktop.currentApproved") }}</div>
@@ -151,9 +194,25 @@
         </div>
 
         <div class="row q-gutter-sm">
-          <q-btn dense color="primary" unelevated :loading="busy" :label="t('desktop.start')" @click="command('start')" />
+          <q-btn
+            dense
+            color="primary"
+            unelevated
+            :loading="busy"
+            :disable="selectedDevice.employeeAssigned === false"
+            :label="t('desktop.start')"
+            @click="command('start')"
+          />
           <q-btn dense outline color="primary" :loading="busy" :label="t('desktop.pause')" @click="command('pause')" />
-          <q-btn dense outline color="primary" :loading="busy" :label="t('desktop.resume')" @click="command('resume')" />
+          <q-btn
+            dense
+            outline
+            color="primary"
+            :loading="busy"
+            :disable="selectedDevice.employeeAssigned === false"
+            :label="t('desktop.resume')"
+            @click="command('resume')"
+          />
           <q-btn dense outline color="negative" :loading="busy" :label="t('desktop.revoke')" @click="revoke" />
         </div>
 
@@ -272,7 +331,8 @@ const error = ref("");
 const browseError = ref("");
 const devices = ref<DesktopDevice[]>([]);
 const employees = ref<DirectoryUser[]>([]);
-const selectedUserId = ref<string | null>(null);
+const filterUserId = ref<string | null>(null);
+const assignUserId = ref<string | null>(null);
 const selectedRows = ref<DesktopDevice[]>([]);
 const enrollmentCode = ref("");
 const enrollmentExpires = ref("");
@@ -306,10 +366,21 @@ const employeeOptions = computed(() =>
     .map((e) => ({ label: `${e.displayName} (${e.primaryEmail || e.qkaUserId})`, value: e.qkaUserId as string })),
 );
 
+const employeeFilterOptions = computed(() => [
+  { label: t("desktop.filterAllDevices"), value: "" },
+  { label: t("desktop.filterUnassigned"), value: "__unassigned__" },
+  ...employeeOptions.value,
+]);
+
 const selectedDevice = computed(() => selectedRows.value[0] || null);
 
 const canBrowseFolders = computed(
-  () => Boolean(selectedDevice.value?.folderBrowseAvailable && selectedDevice.value?.online),
+  () =>
+    Boolean(
+      selectedDevice.value?.folderBrowseAvailable &&
+        selectedDevice.value?.online &&
+        selectedDevice.value?.employeeAssigned !== false,
+    ),
 );
 
 const browseBlockedReason = computed(() => {
@@ -319,6 +390,7 @@ const browseBlockedReason = computed(() => {
 
 const indexBadgeColor = computed(() => {
   const state = selectedDevice.value?.indexingState;
+  if (selectedDevice.value?.employeeAssigned === false || state === "disabled") return "grey-7";
   if (state === "running") return "positive";
   if (state === "paused") return "warning";
   if (state === "error") return "negative";
@@ -326,6 +398,7 @@ const indexBadgeColor = computed(() => {
 });
 
 const indexBadgeLabel = computed(() => {
+  if (selectedDevice.value?.employeeAssigned === false) return t("desktop.index.disabled");
   const state = selectedDevice.value?.indexingState || "idle";
   return t(`desktop.index.${state}`);
 });
@@ -480,15 +553,22 @@ async function reload() {
   loading.value = true;
   error.value = "";
   try {
+    const filter = filterUserId.value;
+    const qkaFilter = filter && filter !== "__unassigned__" && filter !== "" ? filter : undefined;
     const [devicePage, userPage] = await Promise.all([
-      api.desktopDevices(selectedUserId.value || undefined),
+      api.desktopDevices(qkaFilter),
       api.listDirectoryUsers({ pageSize: 200 }),
     ]);
-    devices.value = devicePage.items;
+    let items = devicePage.items;
+    if (filter === "__unassigned__") {
+      items = items.filter((d) => d.employeeAssigned === false || !d.qkaUserId);
+    }
+    devices.value = items;
     employees.value = userPage.items;
     if (selectedDevice.value) {
       const keep = devices.value.find((d) => d.id === selectedDevice.value?.id);
       selectedRows.value = keep ? [keep] : [];
+      assignUserId.value = keep?.qkaUserId || null;
     }
   } catch (err) {
     error.value = err instanceof Error ? err.message : t("desktop.loadError");
@@ -497,21 +577,49 @@ async function reload() {
   }
 }
 
-function onEmployeeChange() {
+function onFilterChange() {
   selectedRows.value = [];
   void reload();
 }
 
-async function issueEnrollment() {
-  if (!selectedUserId.value) return;
+async function issueDeviceEnrollment() {
   busy.value = true;
   error.value = "";
   try {
-    const created = await api.createDesktopEnrollmentCode({ qkaUserId: selectedUserId.value });
+    const created = await api.createDesktopEnrollmentCode({ label: "device-registration" });
     enrollmentCode.value = created.enrollmentCode;
     enrollmentExpires.value = created.expiresAt;
   } catch (err) {
     error.value = err instanceof Error ? err.message : t("desktop.enrollError");
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function saveAssignment() {
+  if (!selectedDevice.value || !assignUserId.value) return;
+  busy.value = true;
+  error.value = "";
+  try {
+    await api.assignDesktopDeviceEmployee(selectedDevice.value.id, assignUserId.value);
+    await reload();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : t("desktop.assignError");
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function clearAssignment() {
+  if (!selectedDevice.value) return;
+  busy.value = true;
+  error.value = "";
+  try {
+    await api.assignDesktopDeviceEmployee(selectedDevice.value.id, null);
+    assignUserId.value = null;
+    await reload();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : t("desktop.assignError");
   } finally {
     busy.value = false;
   }
@@ -545,7 +653,7 @@ async function revoke() {
 }
 
 watch(selectedRows, () => {
-  // Selection drives browse availability; no manual path field.
+  assignUserId.value = selectedDevice.value?.qkaUserId || null;
 });
 
 onMounted(async () => {

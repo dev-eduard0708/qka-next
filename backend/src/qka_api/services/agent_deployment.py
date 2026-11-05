@@ -152,7 +152,7 @@ def job_dto(job: AgentDeploymentJob, ws: AdWorkstation | None = None) -> dict:
         "id": str(job.id),
         "workstationId": str(job.workstation_id),
         "computerName": ws.computer_name if ws else "",
-        "assignedQkaUserId": str(job.assigned_qka_user_id),
+        "assignedQkaUserId": str(job.assigned_qka_user_id) if job.assigned_qka_user_id else None,
         "status": _status_label(job.status),
         "statusCode": job.status,
         "attemptCount": job.attempt_count,
@@ -210,8 +210,7 @@ def request_deployments(
         ws = session.get(AdWorkstation, wid)
         if ws is None or not ws.is_present:
             raise LookupError(f"Workstation {wid} was not found or is not present.")
-        if not ws.assigned_qka_user_id:
-            raise ValueError(f"{ws.computer_name}: assign an AD-linked employee before deploy.")
+        # Employee assignment is optional at deploy/install time (assign after registration).
         if not (ws.object_sid or "").strip():
             raise ValueError(f"{ws.computer_name}: AD objectSid is required for machine-identity enrollment.")
 
@@ -228,7 +227,7 @@ def request_deployments(
         job = AgentDeploymentJob(
             id=uuid.uuid4(),
             workstation_id=ws.id,
-            assigned_qka_user_id=ws.assigned_qka_user_id,
+            assigned_qka_user_id=ws.assigned_qka_user_id,  # may be null
             requested_by_user_id=actor.id,
             approved_by_user_id=actor.id,
             status=DEPLOY_SCHEDULED,
@@ -257,7 +256,7 @@ def request_deployments(
                 id=uuid.uuid4(),
                 job_id=job.id,
                 workstation_id=ws.id,
-                qka_user_id=ws.assigned_qka_user_id,
+                qka_user_id=ws.assigned_qka_user_id,  # optional until post-install assign
                 ad_computer_sid=sid,
                 ad_computer_guid=guid,
                 token_hash=_hash(plain_token),

@@ -17,6 +17,8 @@ from pathlib import Path
 DEFAULT_MSI_PATH = Path(r"C:\QehcAI\QKA-Next\agent\dist\QKA-Agent.msi")
 DEFAULT_TARGET_GROUP = "QKA-Agent-Pilot-Computers"
 DEFAULT_GPO_NAME = "QKA-Desktop-Agent-Deployment"
+# Existing domain GPO — never recreate; look up by GUID first.
+DEFAULT_GPO_GUID = "{73E8998A-A3B3-435F-9219-419C331BA2D4}"
 
 
 @dataclass(frozen=True)
@@ -86,9 +88,15 @@ try {{
     $result.groupExists = $true
     $result.groupMembers = @(Get-ADGroupMember -Identity $g -ErrorAction SilentlyContinue).Count
   }}
-  $gpo = Get-ADObject -LDAPFilter '(&(objectClass=groupPolicyContainer)(displayName={gpo_name}*))' `
-    -SearchBase 'CN=Policies,CN=System,DC=qehc,DC=edu,DC=sa' `
-    -Properties displayName -ErrorAction SilentlyContinue | Select-Object -First 1
+  $gpo = $null
+  try {{
+    $gpo = Get-ADObject -Identity 'CN={DEFAULT_GPO_GUID},CN=Policies,CN=System,DC=qehc,DC=edu,DC=sa' `
+      -Properties displayName -ErrorAction Stop
+  }} catch {{
+    $gpo = Get-ADObject -LDAPFilter '(&(objectClass=groupPolicyContainer)(displayName={gpo_name}*))' `
+      -SearchBase 'CN=Policies,CN=System,DC=qehc,DC=edu,DC=sa' `
+      -Properties displayName -ErrorAction SilentlyContinue | Select-Object -First 1
+  }}
   if ($gpo) {{
     $result.gpoExists = $true
     $result.gpoDisplayName = [string]$gpo.displayName

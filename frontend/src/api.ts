@@ -94,7 +94,8 @@ export type SourceEmployee = DirectoryUser;
 
 export type DesktopDevice = {
   id: string;
-  qkaUserId: string;
+  qkaUserId: string | null;
+  employeeAssigned?: boolean;
   employeeName: string;
   computerName: string;
   domainJoinedName: string;
@@ -104,6 +105,7 @@ export type DesktopDevice = {
   online: boolean;
   agentStatus: string;
   indexingState: string;
+  indexingEnabled?: boolean;
   readOnlyVerified: boolean;
   readOnlyDetail: string;
   lastError: string;
@@ -681,17 +683,23 @@ export const api = {
     const q = qkaUserId ? `?qkaUserId=${encodeURIComponent(qkaUserId)}` : "";
     return request<{ items: DesktopDevice[] }>(`/api/v1/admin/desktop-devices${q}`);
   },
-  createDesktopEnrollmentCode: (body: { qkaUserId: string; label?: string }) =>
+  createDesktopEnrollmentCode: (body: { qkaUserId?: string | null; label?: string } = {}) =>
     request<{
       id: string;
       enrollmentCode: string;
       expiresAt: string;
-      qkaUserId: string;
+      qkaUserId: string | null;
+      registrationMode?: string;
       serverBaseUrl: string;
       installHint: string;
     }>("/api/v1/admin/desktop-devices/enrollment-codes", {
       method: "POST",
       body: JSON.stringify(body),
+    }),
+  assignDesktopDeviceEmployee: (deviceId: string, qkaUserId: string | null) =>
+    request<DesktopDevice>(`/api/v1/admin/desktop-devices/${deviceId}/assign-employee`, {
+      method: "POST",
+      body: JSON.stringify({ qkaUserId }),
     }),
   setDesktopDeviceFolders: (deviceId: string, folders: Array<{ path: string; includeSubfolders?: boolean }>) =>
     request<{ folders: DesktopDevice["folders"] }>(`/api/v1/admin/desktop-devices/${deviceId}/folders`, {

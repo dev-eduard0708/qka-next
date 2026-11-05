@@ -114,15 +114,22 @@ def create_enrollment_code(
     settings: Settings,
     *,
     actor_id: uuid.UUID,
-    qka_user_id: uuid.UUID,
+    qka_user_id: uuid.UUID | None = None,
     label: str = "",
 ) -> dict:
-    require_ad_linked_user(session, qka_user_id)
+    """Issue a one-time code. Prefer device-only (qka_user_id=None): install → register → assign.
+
+    Employee-bound codes remain a manual fallback when explicitly requested.
+    """
+    bound_user_id: uuid.UUID | None = None
+    if qka_user_id is not None:
+        require_ad_linked_user(session, qka_user_id)
+        bound_user_id = qka_user_id
     hours = max(1, int(settings.agent_enrollment_hours or 24))
     plain = secrets.token_urlsafe(24)
     row = DesktopEnrollmentCode(
         id=uuid.uuid4(),
-        qka_user_id=qka_user_id,
+        qka_user_id=bound_user_id,
         code_hash=_hash_secret(plain),
         label=(label or "").strip()[:256],
         expires_at=_now() + timedelta(hours=hours),
@@ -133,15 +140,20 @@ def create_enrollment_code(
     session.add(row)
     session.flush()
     base = settings.agent_public_base
+    mode = "device_registration" if bound_user_id is None else "employee_bound_fallback"
     return {
         "id": str(row.id),
         "enrollmentCode": plain,
         "expiresAt": row.expires_at.isoformat(),
-        "qkaUserId": str(qka_user_id),
+        "qkaUserId": str(bound_user_id) if bound_user_id else None,
+        "registrationMode": mode,
         "serverBaseUrl": base,
         "installHint": (
-            "Install QKA-Agent.msi silently, then set server URL + enrollment code "
-            "via registry or first-run config. Do not embed the code in the MSI."
+            "Install QKA-Agent.msi silently, then set server URL + this one-time code "
+            "(env/config only — never embed in the MSI). Device registers unassigned; "
+            "assign an employee in QKA before folder browse/indexing."
+            if bound_user_id is None
+            else "Legacy employee-bound code. Prefer device registration codes for install-before-assign."
         ),
     }
 
@@ -176,10 +188,11 @@ def enroll_device(
     if not fp:
         raise ValueError("Device fingerprint is required.")
 
-    qka_user_id: uuid.UUID
+    qka_user_id: uuid.UUID | None = None
     workstation_id: uuid.UUID | None = None
     machine_row = None
     code_row = None
+    enrollment_mode = "enrollment_code"
 
     if machine_token:
         if not sid:
@@ -196,13 +209,15 @@ def enroll_device(
             ad_computer_guid=guid,
             machine_proof=machine_proof,
         )
-        if not ws.assigned_qka_user_id or ws.assigned_qka_user_id != machine_row.qka_user_id:
-            raise PermissionError("Workstation employee assignment does not match enrollment token.")
-        require_ad_linked_user(session, machine_row.qka_user_id)
-        qka_user_id = machine_row.qka_user_id
+        # Employee may be unassigned at install time.
+        if machine_row.qka_user_id:
+            if ws.assigned_qka_user_id and ws.assigned_qka_user_id != machine_row.qka_user_id:
+                raise PermissionError("Workstation employee assignment does not match enrollment token.")
+            require_ad_linked_user(session, machine_row.qka_user_id)
+            qka_user_id = machine_row.qka_user_id
         workstation_id = ws.id
+        enrollment_mode = "machine_identity"
     elif code:
-        # Manual fallback — still requires Super Admin–issued one-time code.
         code_row = session.execute(
             select(DesktopEnrollmentCode).where(DesktopEnrollmentCode.code_hash == _hash_secret(code))
         ).scalar_one_or_none()
@@ -212,8 +227,12 @@ def enroll_device(
             raise PermissionError("Enrollment code was already used.")
         if code_row.expires_at < _now():
             raise PermissionError("Enrollment code has expired.")
-        require_ad_linked_user(session, code_row.qka_user_id)
-        qka_user_id = code_row.qka_user_id
+        if code_row.qka_user_id is not None:
+            require_ad_linked_user(session, code_row.qka_user_id)
+            qka_user_id = code_row.qka_user_id
+            enrollment_mode = "enrollment_code"
+        else:
+            enrollment_mode = "device_registration"
     else:
         raise ValueError("Enrollment code or machine enrollment token is required.")
 
@@ -237,7 +256,11 @@ def enroll_device(
     device_key = secrets.token_urlsafe(32)
     now = _now()
     if existing is not None:
-        if existing.qka_user_id != qka_user_id:
+        if (
+            existing.qka_user_id is not None
+            and qka_user_id is not None
+            and existing.qka_user_id != qka_user_id
+        ):
             raise PermissionError("This computer is already enrolled to another employee.")
         existing.device_key_hash = _hash_secret(device_key)
         existing.computer_name = (computer_name or "").strip()[:256]
@@ -247,6 +270,9 @@ def enroll_device(
         existing.ad_computer_guid = guid[:64] if guid else existing.ad_computer_guid
         if workstation_id:
             existing.workstation_id = workstation_id
+        # Do not overwrite an existing assignment with null during re-enroll.
+        if qka_user_id is not None and existing.qka_user_id is None:
+            existing.qka_user_id = qka_user_id
         existing.status = DEVICE_ACTIVE
         existing.enrolled_at = now
         existing.updated_at = now
@@ -288,12 +314,19 @@ def enroll_device(
     return {
         "deviceId": str(device.id),
         "deviceKey": device_key,
-        "qkaUserId": str(device.qka_user_id),
+        "qkaUserId": str(device.qka_user_id) if device.qka_user_id else None,
+        "employeeAssigned": bool(device.qka_user_id),
+        "indexingEnabled": False,
         "serverBaseUrl": settings.agent_public_base,
         "supportedExtensions": list(AGENT_SUPPORTED_EXTS),
         "defaultExcludes": list(DEFAULT_EXCLUDES),
         "contentUploadEnabled": False,
-        "enrollmentMode": "machine_identity" if machine_row is not None else "enrollment_code",
+        "enrollmentMode": enrollment_mode,
+        "note": (
+            "Device registered. Assign an AD-linked employee in QKA before folder approval/indexing."
+            if device.qka_user_id is None
+            else ""
+        ),
     }
 
 
@@ -333,7 +366,9 @@ def heartbeat(
     return {"ok": True, "serverTime": _now().isoformat(), "status": _status_label(device.status)}
 
 
-def _employee_ad_sid(session: Session, qka_user_id: uuid.UUID) -> str:
+def _employee_ad_sid(session: Session, qka_user_id: uuid.UUID | None) -> str:
+    if qka_user_id is None:
+        return ""
     ad = session.execute(
         select(ExternalIdentity).where(
             ExternalIdentity.qka_user_id == qka_user_id,
@@ -345,28 +380,37 @@ def _employee_ad_sid(session: Session, qka_user_id: uuid.UUID) -> str:
 
 
 def get_policy(session: Session, device: DesktopDevice) -> dict:
-    folders = session.execute(
-        select(DesktopDeviceFolder).where(
-            DesktopDeviceFolder.device_id == device.id,
-            DesktopDeviceFolder.enabled.is_(True),
-        )
-    ).scalars().all()
-    command = "run"
+    assigned = device.qka_user_id is not None
+    folders = []
+    if assigned:
+        folders = session.execute(
+            select(DesktopDeviceFolder).where(
+                DesktopDeviceFolder.device_id == device.id,
+                DesktopDeviceFolder.enabled.is_(True),
+            )
+        ).scalars().all()
+    # Unassigned devices must not index.
+    command = "pause" if not assigned else "run"
     if device.status == DEVICE_PAUSED or device.indexing_state == INDEX_PAUSED:
         command = "pause"
     elif device.status == DEVICE_REVOKED:
         command = "stop"
     now = _now()
-    pending_browse = session.execute(
-        select(DesktopFolderBrowse).where(
-            DesktopFolderBrowse.device_id == device.id,
-            DesktopFolderBrowse.status == FOLDER_BROWSE_PENDING,
-            DesktopFolderBrowse.expires_at > now,
-        )
-    ).scalars().all()
+    pending_browse = []
+    if assigned:
+        pending_browse = session.execute(
+            select(DesktopFolderBrowse).where(
+                DesktopFolderBrowse.device_id == device.id,
+                DesktopFolderBrowse.status == FOLDER_BROWSE_PENDING,
+                DesktopFolderBrowse.expires_at > now,
+            )
+        ).scalars().all()
+    employee_sid = _employee_ad_sid(session, device.qka_user_id) if assigned else ""
     return {
         "deviceId": str(device.id),
         "command": command,
+        "employeeAssigned": assigned,
+        "indexingEnabled": bool(assigned and folders),
         "approvedFolders": [
             {
                 "id": str(f.id),
@@ -374,7 +418,9 @@ def get_policy(session: Session, device: DesktopDevice) -> dict:
                 "includeSubfolders": bool(f.include_subfolders),
             }
             for f in folders
-        ],
+        ]
+        if assigned
+        else [],
         "pendingFolderBrowse": [
             {
                 "id": str(b.id),
@@ -385,7 +431,7 @@ def get_policy(session: Session, device: DesktopDevice) -> dict:
             }
             for b in pending_browse
         ],
-        "employeeAdSid": _employee_ad_sid(session, device.qka_user_id),
+        "employeeAdSid": employee_sid,
         "supportedExtensions": list(AGENT_SUPPORTED_EXTS),
         "defaultExcludes": list(DEFAULT_EXCLUDES),
         "contentUploadEnabled": False,
@@ -394,7 +440,53 @@ def get_policy(session: Session, device: DesktopDevice) -> dict:
         "requireReadOnlyVerified": True,
         "scannerMustNotBeSystemAdmin": True,
         "forbidSourceAclChanges": True,
+        "note": (
+            ""
+            if assigned
+            else "Employee unassigned — heartbeat OK; indexing and folder browse disabled until Super Admin assigns an AD employee."
+        ),
     }
+
+
+def assign_device_employee(
+    session: Session,
+    *,
+    device_id: uuid.UUID,
+    qka_user_id: uuid.UUID | None,
+) -> dict:
+    """Super Admin assigns (or clears) an AD-linked employee after device registration."""
+    device = session.get(DesktopDevice, device_id)
+    if device is None or device.status == DEVICE_REVOKED:
+        raise LookupError("Device was not found.")
+    if qka_user_id is None:
+        device.qka_user_id = None
+        # Clear approved folders — they are employee-profile specific.
+        for row in session.execute(
+            select(DesktopDeviceFolder).where(DesktopDeviceFolder.device_id == device_id)
+        ).scalars().all():
+            session.delete(row)
+        device.indexing_state = INDEX_IDLE
+        device.read_only_verified = False
+        device.read_only_detail = "Employee unassigned — indexing disabled."
+        device.updated_at = _now()
+        session.flush()
+        return device_dto(session, device)
+
+    require_ad_linked_user(session, qka_user_id)
+    sid = _employee_ad_sid(session, qka_user_id)
+    if not sid:
+        raise ValueError("Assigned employee has no linked AD SID.")
+    device.qka_user_id = qka_user_id
+    device.updated_at = _now()
+    if device.workstation_id:
+        from qka_shared.models import AdWorkstation
+
+        ws = session.get(AdWorkstation, device.workstation_id)
+        if ws is not None:
+            ws.assigned_qka_user_id = qka_user_id
+            ws.updated_at = _now()
+    session.flush()
+    return device_dto(session, device)
 
 
 def request_folder_browse(
@@ -407,6 +499,10 @@ def request_folder_browse(
     device = session.get(DesktopDevice, device_id)
     if device is None or device.status == DEVICE_REVOKED:
         raise LookupError("Device was not found.")
+    if device.qka_user_id is None:
+        raise ValueError(
+            "Assign an AD-linked employee to this device before browsing folders."
+        )
     if not _online(device):
         raise ValueError(
             "Agent is offline or not heartbeating. Folder browsing requires a connected Desktop Agent "
@@ -581,6 +677,8 @@ def set_folders(session: Session, device_id: uuid.UUID, paths: list[dict]) -> li
     device = session.get(DesktopDevice, device_id)
     if device is None or device.status == DEVICE_REVOKED:
         raise LookupError("Device was not found.")
+    if device.qka_user_id is None:
+        raise ValueError("Assign an AD-linked employee before approving folders.")
     existing = session.execute(
         select(DesktopDeviceFolder).where(DesktopDeviceFolder.device_id == device_id)
     ).scalars().all()
@@ -623,6 +721,17 @@ def set_indexing_command(session: Session, device_id: uuid.UUID, command: str) -
     if device is None or device.status == DEVICE_REVOKED:
         raise LookupError("Device was not found.")
     cmd = (command or "").strip().lower()
+    if cmd in {"start", "resume"} and device.qka_user_id is None:
+        raise ValueError("Assign an AD-linked employee before starting indexing.")
+    if cmd in {"start", "resume"}:
+        folders = session.execute(
+            select(DesktopDeviceFolder).where(
+                DesktopDeviceFolder.device_id == device_id,
+                DesktopDeviceFolder.enabled.is_(True),
+            )
+        ).scalars().first()
+        if folders is None:
+            raise ValueError("Approve at least one folder before starting indexing.")
     if cmd == "start":
         device.status = DEVICE_ACTIVE
         device.indexing_state = INDEX_RUNNING
@@ -662,7 +771,7 @@ def list_devices(session: Session, *, qka_user_id: uuid.UUID | None = None) -> l
 
 
 def device_dto(session: Session, device: DesktopDevice) -> dict:
-    user = session.get(QkaUser, device.qka_user_id)
+    user = session.get(QkaUser, device.qka_user_id) if device.qka_user_id else None
     folders = session.execute(
         select(DesktopDeviceFolder).where(DesktopDeviceFolder.device_id == device.id)
     ).scalars().all()
@@ -673,18 +782,31 @@ def device_dto(session: Session, device: DesktopDevice) -> dict:
     total = max(0, int(device.files_total))
     indexed = max(0, int(device.files_indexed))
     pct = int(round((indexed / total) * 100)) if total else 0
+    assigned = device.qka_user_id is not None
+    online = _online(device) and device.status != DEVICE_REVOKED
+    browse_ok = bool(online and assigned)
+    browse_reason = ""
+    if not online:
+        browse_reason = "Agent offline or not installed — folder browsing requires a connected Desktop Agent."
+    elif not assigned:
+        browse_reason = "Assign an AD-linked employee before browsing folders."
+    indexing_label = _index_label(device.indexing_state)
+    if not assigned:
+        indexing_label = "disabled"
     return {
         "id": str(device.id),
-        "qkaUserId": str(device.qka_user_id),
-        "employeeName": user.display_name if user else "",
+        "qkaUserId": str(device.qka_user_id) if device.qka_user_id else None,
+        "employeeAssigned": assigned,
+        "employeeName": user.display_name if user else "Unassigned",
         "computerName": device.computer_name,
         "domainJoinedName": device.domain_joined_name,
         "deviceFingerprint": device.device_fingerprint,
         "agentVersion": device.agent_version,
         "status": _status_label(device.status),
-        "online": _online(device),
-        "agentStatus": "connected" if _online(device) and device.status != DEVICE_REVOKED else "offline",
-        "indexingState": _index_label(device.indexing_state),
+        "online": online,
+        "agentStatus": "connected" if online else "offline",
+        "indexingState": indexing_label,
+        "indexingEnabled": bool(assigned and folders),
         "readOnlyVerified": bool(device.read_only_verified),
         "readOnlyDetail": device.read_only_detail,
         "lastError": device.last_error,
@@ -708,12 +830,8 @@ def device_dto(session: Session, device: DesktopDevice) -> dict:
             for f in folders
         ],
         "employeeAdSid": _employee_ad_sid(session, device.qka_user_id),
-        "folderBrowseAvailable": bool(_online(device) and device.status != DEVICE_REVOKED),
-        "folderBrowseBlockedReason": (
-            ""
-            if _online(device) and device.status != DEVICE_REVOKED
-            else "Agent offline or not installed — folder browsing requires a connected Desktop Agent."
-        ),
+        "folderBrowseAvailable": browse_ok,
+        "folderBrowseBlockedReason": browse_reason,
         "gpoDeployment": {
             "supported": True,
             "status": "installer_ready",

@@ -840,12 +840,16 @@ class AdWorkstation(Base):
 
 
 class DesktopEnrollmentCode(Base):
-    """One-time enrollment code bound to a QKA user. Never embedded in the MSI."""
+    """One-time registration/enrollment code. Never embedded in the MSI.
+
+    qka_user_id may be null for device-only registration (install → register → assign later).
+    When set, the code is the legacy employee-bound manual fallback.
+    """
 
     __tablename__ = "qka_next_desktop_enrollment_code"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
-    qka_user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    qka_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), index=True, nullable=True)
     code_hash: Mapped[str] = mapped_column(String(128), unique=True)
     label: Mapped[str] = mapped_column(String(256), default="")
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -858,7 +862,8 @@ class DesktopDevice(Base):
     __tablename__ = "qka_next_desktop_device"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
-    qka_user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    # Nullable until Super Admin assigns an AD-linked employee after device registration.
+    qka_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), index=True, nullable=True)
     device_key_hash: Mapped[str] = mapped_column(String(128), unique=True)
     computer_name: Mapped[str] = mapped_column(String(256), default="")
     device_fingerprint: Mapped[str] = mapped_column(String(256), default="")
@@ -908,7 +913,8 @@ class AgentDeploymentJob(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
     workstation_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
-    assigned_qka_user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    # Optional — install/register may precede employee assignment.
+    assigned_qka_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), index=True, nullable=True)
     requested_by_user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
     approved_by_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     status: Mapped[int] = mapped_column(Integer, default=DEPLOY_REQUESTED, index=True)
@@ -931,9 +937,9 @@ class AgentDeploymentJob(Base):
 class MachineEnrollmentToken(Base):
     """One-time machine-bound enrollment token for managed deployment.
 
-    Bound to AD computer SID/GUID + assigned employee + deployment job.
-    Never embedded in the MSI. Manual enrollment codes remain a separate fallback.
-    Requires machineProof = HMAC-SHA256(token, sid|guid) so a stolen SID claim alone fails.
+    Bound to AD computer SID/GUID + deployment job. Employee assignment is optional
+    at install time (assign after registration). Never embedded in the MSI.
+    Requires machineProof = HMAC-SHA256(token, sid) — not Kerberos by itself.
     """
 
     __tablename__ = "qka_next_machine_enrollment_token"
@@ -941,7 +947,7 @@ class MachineEnrollmentToken(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
     job_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
     workstation_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
-    qka_user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    qka_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), index=True, nullable=True)
     ad_computer_sid: Mapped[str] = mapped_column(String(256), index=True)
     ad_computer_guid: Mapped[str] = mapped_column(String(64), default="", index=True)
     token_hash: Mapped[str] = mapped_column(String(128), unique=True)

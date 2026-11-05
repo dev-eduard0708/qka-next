@@ -314,13 +314,16 @@ def seed_db():
         session.execute(text("ALTER TABLE qka_next_desktop_device ADD COLUMN IF NOT EXISTS ad_computer_sid VARCHAR(256) NOT NULL DEFAULT ''"))
         session.execute(text("ALTER TABLE qka_next_desktop_device ADD COLUMN IF NOT EXISTS ad_computer_guid VARCHAR(64) NOT NULL DEFAULT ''"))
         session.execute(text("ALTER TABLE qka_next_desktop_device ADD COLUMN IF NOT EXISTS workstation_id UUID NULL"))
+        # Install → register → assign: employee optional until Super Admin assignment.
+        session.execute(text("ALTER TABLE qka_next_desktop_device ALTER COLUMN qka_user_id DROP NOT NULL"))
+        session.execute(text("ALTER TABLE qka_next_desktop_enrollment_code ALTER COLUMN qka_user_id DROP NOT NULL"))
         session.execute(
             text(
                 """
                 CREATE TABLE IF NOT EXISTS qka_next_agent_deployment_job (
                     id UUID PRIMARY KEY,
                     workstation_id UUID NOT NULL,
-                    assigned_qka_user_id UUID NOT NULL,
+                    assigned_qka_user_id UUID NULL,
                     requested_by_user_id UUID NOT NULL,
                     approved_by_user_id UUID NULL,
                     status INTEGER NOT NULL DEFAULT 0,
@@ -349,7 +352,7 @@ def seed_db():
                     id UUID PRIMARY KEY,
                     job_id UUID NOT NULL,
                     workstation_id UUID NOT NULL,
-                    qka_user_id UUID NOT NULL,
+                    qka_user_id UUID NULL,
                     ad_computer_sid VARCHAR(256) NOT NULL,
                     ad_computer_guid VARCHAR(64) NOT NULL DEFAULT '',
                     token_hash VARCHAR(128) NOT NULL UNIQUE,
@@ -367,6 +370,8 @@ def seed_db():
                 "ADD COLUMN IF NOT EXISTS proof_hash VARCHAR(128) NOT NULL DEFAULT ''"
             )
         )
+        session.execute(text("ALTER TABLE qka_next_agent_deployment_job ALTER COLUMN assigned_qka_user_id DROP NOT NULL"))
+        session.execute(text("ALTER TABLE qka_next_machine_enrollment_token ALTER COLUMN qka_user_id DROP NOT NULL"))
         session.execute(
             text(
                 """

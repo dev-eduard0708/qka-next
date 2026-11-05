@@ -218,6 +218,79 @@ def test_selected_and_bulk_deploy_jobs_when_ready(client, tmp_path):
         assert bulk.json()["gpoManifest"]["computers"] == ["FINANCE-01"]
 
 
+def test_deploy_without_employee_then_enroll_unassigned(client, tmp_path):
+    """Deploy/install must not require employee assignment; device registers unassigned."""
+    _install(client)
+    headers = _admin(client)
+    items = _sync_workstations(client, headers)
+    pilot = next(i for i in items if i["computerName"] == "PILOT-PC")
+    # Intentionally leave workstation employee unassigned.
+
+    msi = tmp_path / "QKA-Agent.msi"
+    msi.write_bytes(b"MZ")
+    ready = gpo_engine.GpoEngineStatus(
+        available=True,
+        reason="ok",
+        target_group="QKA-Agent-Pilot-Computers",
+        msi_path=str(msi),
+        msi_present=True,
+        gpmc_present=True,
+    )
+    settings = Settings(agent_public_base_url="https://agent.qehc.internal")
+    with (
+        patch.object(gpo_engine, "probe_gpo_engine", return_value=ready),
+        patch.object(deploy_svc, "deployment_prerequisites") as prereq_fn,
+    ):
+        prereq_fn.return_value = {
+            **deploy_svc.deployment_prerequisites(settings),
+            "deployEnabled": True,
+            "httpsConfigured": True,
+            "httpsEndpoint": "https://agent.qehc.internal",
+            "blockers": [],
+            "gpoEngineAvailable": True,
+            "msiPresent": True,
+            "maxBulk": 50,
+        }
+        created = client.post(
+            "/api/v1/admin/workstations/deploy",
+            headers=headers,
+            json={
+                "workstationIds": [pilot["id"]],
+                "confirmation": deploy_svc.CONFIRM_PHRASE,
+                "approve": True,
+            },
+        )
+        assert created.status_code == 200, created.text
+        job = created.json()["jobs"][0]
+        assert job["assignedQkaUserId"] is None
+        token = job["machineEnrollmentToken"]
+        sid = pilot["objectSid"]
+
+    proof = deploy_svc.machine_proof_digest(token=token, computer_sid=sid, computer_guid="")
+    enrolled = client.post(
+        "/api/v1/agent/desktop/enroll",
+        json={
+            "machineEnrollmentToken": token,
+            "adComputerSid": sid,
+            "sidSource": "local_machine",
+            "machineProof": proof,
+            "computerName": "PILOT-PC",
+            "deviceFingerprint": "machine-enroll-unassigned-fp",
+            "domainJoinedName": "QEHC",
+            "agentVersion": "0.1.0",
+        },
+    )
+    assert enrolled.status_code == 200, enrolled.text
+    assert enrolled.json()["employeeAssigned"] is False
+    assert enrolled.json()["qkaUserId"] is None
+    device_id = enrolled.json()["deviceId"]
+    device_key = enrolled.json()["deviceKey"]
+    auth = {"X-QKA-Device-Id": device_id, "X-QKA-Device-Key": device_key}
+    policy = client.get("/api/v1/agent/desktop/policy", headers=auth)
+    assert policy.json()["command"] == "pause"
+    assert policy.json()["employeeAssigned"] is False
+
+
 def test_machine_identity_enroll_and_job_registered(client, tmp_path):
     _install(client)
     headers = _admin(client)

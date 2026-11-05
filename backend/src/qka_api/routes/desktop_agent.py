@@ -65,8 +65,14 @@ class ErrorBody(BaseModel):
 
 
 class CreateEnrollmentBody(BaseModel):
-    qkaUserId: uuid.UUID
+    """Device-registration codes omit qkaUserId (install → register → assign)."""
+
+    qkaUserId: uuid.UUID | None = None
     label: str = ""
+
+
+class AssignEmployeeBody(BaseModel):
+    qkaUserId: uuid.UUID | None = None
 
 
 class FoldersBody(BaseModel):
@@ -242,6 +248,27 @@ def create_code(
             label=body.label,
         )
     except (ValueError, LookupError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@admin_router.post("/{device_id}/assign-employee")
+def assign_employee(
+    device_id: uuid.UUID,
+    body: AssignEmployeeBody,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+):
+    _require_super_admin(request, settings, session, mutating=True)
+    try:
+        return svc.assign_device_employee(
+            session,
+            device_id=device_id,
+            qka_user_id=body.qkaUserId,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 

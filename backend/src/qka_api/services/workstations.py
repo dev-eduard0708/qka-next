@@ -170,9 +170,9 @@ def _match_desktop_device(session: Session, ws: AdWorkstation) -> DesktopDevice 
 
 def _deploy_agent_fields(settings: Settings, ws: AdWorkstation, device: DesktopDevice | None, job_dto: dict | None) -> dict[str, Any]:
     prereq = deploy_svc.deployment_prerequisites(settings)
-    assigned = bool(ws.assigned_qka_user_id)
     has_sid = bool((ws.object_sid or "").strip())
-    can_select = bool(ws.is_present and ws.account_enabled and assigned and has_sid)
+    # Employee assignment is post-install; deploy selection needs SID + presence only.
+    can_select = bool(ws.is_present and ws.account_enabled and has_sid)
     enabled = bool(prereq["deployEnabled"] and can_select and device is None)
     status = "ready" if enabled else "blocked"
     if device is not None:
@@ -180,9 +180,7 @@ def _deploy_agent_fields(settings: Settings, ws: AdWorkstation, device: DesktopD
     elif job_dto is not None:
         status = job_dto.get("status") or "requested"
     note = ""
-    if not assigned:
-        note = "Assign an AD-linked employee before deploy."
-    elif not has_sid:
+    if not has_sid:
         note = "AD objectSid is required for machine-identity enrollment."
     elif device is not None:
         note = "Agent already registered for this workstation."
