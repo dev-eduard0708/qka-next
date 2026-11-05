@@ -306,6 +306,20 @@ def put_ou_scope(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
+@router.get("/connections/{connection_id}/departments")
+def get_departments(
+    connection_id: uuid.UUID,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+) -> dict:
+    _require_super_admin(request, settings, session, mutating=False)
+    try:
+        return svc.list_departments(session, connection_id)
+    except svc.AdValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+
 @router.get("/connections/{connection_id}/users")
 def get_users(
     connection_id: uuid.UUID,

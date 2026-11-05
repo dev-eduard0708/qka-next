@@ -482,6 +482,52 @@ def _ad_only_user_dto(
     }
 
 
+def _eligible_ad_pending_dto(row: AdDirectoryUser) -> dict:
+    """Eligible AD inventory row not yet enrolled into a QkaUser (Access enroll queue)."""
+    dept = (row.department or "").strip()
+    mail = (row.mail or "").strip() or None
+    return {
+        "allowlistId": None,
+        "qkaUserId": None,
+        "adDirectoryUserId": str(row.id),
+        "objectGuid": row.object_guid,
+        "objectSid": row.object_sid or None,
+        "displayName": row.display_name or row.sam_account_name,
+        "googleProfileName": None,
+        "primaryEmail": mail or "",
+        "contactEmail": mail,
+        "domainUsername": row.sam_account_name,
+        "department": dept,
+        "identitySource": "ad",
+        "linkedIdentities": "pending",
+        "identityBadges": ["ad"],
+        "googleSub": None,
+        "googleLinked": False,
+        "adLinked": False,
+        "googlePending": False,
+        "pendingGoogleLink": None,
+        "identityConflict": False,
+        "identityConflictReason": None,
+        "adBrowserLoginImplemented": False,
+        "identityStatus": "eligible",
+        "accountStatus": "eligible_pending_enroll",
+        "chatgptMembership": "unknown",
+        "chatgptMembershipSource": "unknown",
+        "chatgptMembershipVerifiedAt": None,
+        "chatgptMemberName": None,
+        "localChatEnabled": False,
+        "mcpEnabled": False,
+        "allowlisted": False,
+        "allowlistEnabled": True,
+        "canGrant": False,
+        "canEnroll": True,
+        "adIdentities": [],
+        "superAdmin": False,
+        "createdAt": row.created_at.isoformat() if row.created_at else None,
+        "updatedAt": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
 def _ad_users_by_contact_email(session: Session) -> dict[str, QkaUser]:
     """Map normalized contact email → AD-linked QkaUser (never merges by name alone)."""
     rows = session.execute(
@@ -614,6 +660,41 @@ def list_users(
         chat = chat_by_user.get(user.id) or get_or_create_chat_access_for_user(session, user.id)
         items.append(_ad_only_user_dto(user, chat, pending_google=pending_by_user.get(user.id)))
         seen_user_ids.add(user.id)
+
+    # Eligible AD inventory users not yet enrolled — visible in Access so Super Admin can enroll.
+    seen_guids: set[str] = {
+        (item.get("objectGuid") or "").strip().lower()
+        for item in items
+        if item.get("objectGuid")
+    }
+    linked_sids = {
+        (ident.stable_external_id or "").strip()
+        for user in ad_users
+        for ident in user.identities
+        if ident.provider == PROVIDER_AD and ident.link_status == LINKED
+    }
+    eligible_rows = session.execute(
+        select(AdDirectoryUser).where(
+            AdDirectoryUser.qka_eligible.is_(True),
+            AdDirectoryUser.is_present.is_(True),
+            AdDirectoryUser.account_enabled.is_(True),
+            AdDirectoryUser.qka_archived.is_(False),
+        )
+    ).scalars().all()
+    for row in eligible_rows:
+        guid = (row.object_guid or "").strip().lower()
+        sid = (row.object_sid or "").strip()
+        if guid and guid in seen_guids:
+            continue
+        if sid and sid in linked_sids:
+            continue
+        if row.linked_qka_user_id and row.linked_qka_user_id in seen_user_ids:
+            continue
+        if row.mapping_status == 2 and row.linked_qka_user_id:
+            continue
+        items.append(_eligible_ad_pending_dto(row))
+        if guid:
+            seen_guids.add(guid)
 
     q = (search or "").strip().lower()
     if q:

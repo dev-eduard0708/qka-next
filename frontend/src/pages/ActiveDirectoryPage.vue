@@ -169,13 +169,22 @@
               />
             </div>
             <div class="col-6 col-md-2">
-              <q-input
+              <q-select
                 v-model="userDepartment"
                 outlined
                 dense
                 clearable
+                emit-value
+                map-options
+                use-input
+                fill-input
+                hide-selected
+                input-debounce="0"
+                :options="filteredDepartmentOptions"
+                :loading="departmentsLoading"
                 :label="t('ad.filterDepartment')"
-                @keydown.enter.prevent="reloadUsers"
+                @filter="filterDepartmentOptions"
+                @update:model-value="reloadUsers"
                 @clear="reloadUsers"
               />
             </div>
@@ -421,7 +430,10 @@ const lastTestOk = ref(false);
 const users = ref<any[]>([]);
 const usersLoading = ref(false);
 const userSearch = ref("");
-const userDepartment = ref("");
+const userDepartment = ref<string | null>(null);
+const departmentOptions = ref<Array<{ label: string; value: string }>>([]);
+const filteredDepartmentOptions = ref<Array<{ label: string; value: string }>>([]);
+const departmentsLoading = ref(false);
 const filterAccountStatus = ref<string | null>(null);
 const filterEligibility = ref<string | null>(null);
 const filterLinkStatus = ref<number | null>(null);
@@ -665,7 +677,7 @@ async function refresh() {
   applyConnection(rows[0] || null);
   overview.value = await api.adOverview(connectionId.value || undefined);
   if (connectionId.value) {
-    await Promise.all([loadUsers(), loadGroups(), loadHistory(), loadAudit(), loadSelectedOus()]);
+    await Promise.all([loadDepartments(), loadUsers(), loadGroups(), loadHistory(), loadAudit(), loadSelectedOus()]);
   }
 }
 
@@ -742,6 +754,34 @@ async function enableConnection() {
   if (!connectionId.value) return;
   connection.value = await api.adEnableConnection(connectionId.value);
   editing.value = true;
+}
+
+async function loadDepartments() {
+  if (!connectionId.value) {
+    departmentOptions.value = [];
+    filteredDepartmentOptions.value = [];
+    return;
+  }
+  departmentsLoading.value = true;
+  try {
+    const body = await api.adDepartments(connectionId.value);
+    departmentOptions.value = body.items.map((i) => ({ label: i.label, value: i.value }));
+    filteredDepartmentOptions.value = departmentOptions.value;
+  } catch {
+    departmentOptions.value = [];
+    filteredDepartmentOptions.value = [];
+  } finally {
+    departmentsLoading.value = false;
+  }
+}
+
+function filterDepartmentOptions(val: string, update: (fn: () => void) => void) {
+  update(() => {
+    const needle = (val || "").trim().toLowerCase();
+    filteredDepartmentOptions.value = needle
+      ? departmentOptions.value.filter((o) => o.label.toLowerCase().includes(needle))
+      : departmentOptions.value;
+  });
 }
 
 async function loadUsers(opts?: {
@@ -977,7 +1017,10 @@ async function loadAudit() {
 }
 
 watch(tab, (value) => {
-  if (value === "users") void loadUsers();
+  if (value === "users") {
+    void loadDepartments();
+    void loadUsers();
+  }
   if (value === "groups") {
     void loadGroups();
     void loadOus();

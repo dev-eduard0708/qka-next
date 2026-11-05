@@ -91,17 +91,29 @@
                 <template #body-cell-actions="props">
                   <q-td :props="props">
                     <div class="row no-wrap q-gutter-xs">
-                      <q-btn flat dense size="sm" color="primary" no-caps :label="t('access.edit')" @click="openEditUser(props.row)" />
                       <q-btn
+                        v-if="props.row.canEnroll && props.row.objectGuid"
                         flat
                         dense
                         size="sm"
-                        :color="props.row.accountStatus === 'disabled' ? 'positive' : 'negative'"
+                        color="primary"
                         no-caps
-                        :loading="busyUserId === (props.row.allowlistId || props.row.qkaUserId)"
-                        :label="props.row.accountStatus === 'disabled' ? t('access.enable') : t('access.disable')"
-                        @click="toggleUserEnabled(props.row)"
+                        :label="t('access.enrollEligible')"
+                        @click="openEnrollEligible(props.row)"
                       />
+                      <template v-else>
+                        <q-btn flat dense size="sm" color="primary" no-caps :label="t('access.edit')" @click="openEditUser(props.row)" />
+                        <q-btn
+                          flat
+                          dense
+                          size="sm"
+                          :color="props.row.accountStatus === 'disabled' ? 'positive' : 'negative'"
+                          no-caps
+                          :loading="busyUserId === (props.row.allowlistId || props.row.qkaUserId)"
+                          :label="props.row.accountStatus === 'disabled' ? t('access.enable') : t('access.disable')"
+                          @click="toggleUserEnabled(props.row)"
+                        />
+                      </template>
                     </div>
                   </q-td>
                 </template>
@@ -712,6 +724,7 @@ const accountFilterOptions = computed(() => [
   { label: t("access.accountActive"), value: "active" },
   { label: t("access.accountAwaitingGoogle"), value: "awaiting_google_login" },
   { label: t("access.accountAwaitingAdmin"), value: "awaiting_admin_approval" },
+  { label: t("access.accountEligiblePending"), value: "eligible_pending_enroll" },
   { label: t("access.accountDisabled"), value: "disabled" },
 ]);
 const identityFilterOptions = computed(() => [
@@ -852,6 +865,7 @@ function identityStatusLabel(status: SourceEmployee["identityStatus"]) {
   if (status === "linked") return t("access.statusActiveQka");
   if (status === "pending") return t("access.statusPending");
   if (status === "ad_enrolled") return t("access.statusAdEnrolled");
+  if (status === "eligible") return t("access.accountEligiblePending");
   return t("access.statusDisabled");
 }
 function identityBadgesFor(row: DirectoryUser): Array<"ad" | "google" | "google_pending"> {
@@ -949,11 +963,17 @@ function accountStatusLabel(status: DirectoryUser["accountStatus"]) {
   if (status === "active") return t("access.accountActive");
   if (status === "awaiting_google_login" || status === "pending") return t("access.accountAwaitingGoogle");
   if (status === "awaiting_admin_approval") return t("access.accountAwaitingAdmin");
+  if (status === "eligible_pending_enroll") return t("access.accountEligiblePending");
   return t("access.accountDisabled");
 }
 function accountBadgeColor(status: DirectoryUser["accountStatus"]) {
   if (status === "active") return "positive";
-  if (status === "awaiting_google_login" || status === "pending" || status === "awaiting_admin_approval") {
+  if (
+    status === "awaiting_google_login" ||
+    status === "pending" ||
+    status === "awaiting_admin_approval" ||
+    status === "eligible_pending_enroll"
+  ) {
     return "warning";
   }
   return "negative";
@@ -1035,6 +1055,10 @@ async function openAddUser() {
 }
 
 async function openEditUser(row: DirectoryUser) {
+  if (row.canEnroll && row.objectGuid) {
+    await openEnrollEligible(row);
+    return;
+  }
   editingUser.value = row;
   alreadyLinkedPrompt.value = false;
   pendingLinkedQkaUserId.value = null;
@@ -1051,6 +1075,41 @@ async function openEditUser(row: DirectoryUser) {
     mcpEnabled: row.mcpEnabled,
   };
   selectedAdUser.value = null;
+  adDepartmentRaw.value = row.department || "";
+  userDialog.value = true;
+}
+
+async function openEnrollEligible(row: DirectoryUser) {
+  if (!row.objectGuid) return;
+  editingUser.value = null;
+  alreadyLinkedPrompt.value = false;
+  pendingLinkedQkaUserId.value = null;
+  await loadDepartments();
+  const matched = matchDepartmentOption(row.department) || "";
+  const option = {
+    label: `${row.displayName} · ${row.domainUsername || row.objectGuid}`,
+    value: row.objectGuid,
+    objectGuid: row.objectGuid,
+    displayName: row.displayName,
+    samAccountName: row.domainUsername || "",
+    department: row.department || "",
+    departmentBlank: !(row.department || "").trim(),
+    mail: row.contactEmail || row.primaryEmail || null,
+    alreadyLinked: false,
+    linkedQkaUserId: null as string | null,
+  };
+  adPickerOptions.value = [option];
+  selectedAdUser.value = row.objectGuid;
+  userForm.value = {
+    displayName: row.displayName,
+    email: row.contactEmail || row.primaryEmail || "",
+    domainUsername: row.domainUsername || "",
+    department: matched,
+    objectGuid: row.objectGuid,
+    linkExistingQkaUserId: null,
+    localChatEnabled: false,
+    mcpEnabled: false,
+  };
   adDepartmentRaw.value = row.department || "";
   userDialog.value = true;
 }

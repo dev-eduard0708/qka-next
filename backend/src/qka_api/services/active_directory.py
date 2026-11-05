@@ -1169,8 +1169,8 @@ def list_users(
         filters.append(AdDirectoryUser.qka_eligible.is_(False))
     dept = (department or "").strip()
     if dept:
-        # Partial match: "admin" finds "Admin Support".
-        filters.append(AdDirectoryUser.department.ilike(f"%{dept}%"))
+        # Dropdown supplies the catalog value; match case-insensitively (exact label).
+        filters.append(func.lower(AdDirectoryUser.department) == dept.lower())
     base = select(AdDirectoryUser).where(*filters)
     total = session.scalar(select(func.count()).select_from(base.subquery())) or 0
     order_primary, order_tie = _user_sort_exprs(sort_by, sort_desc)
@@ -1187,6 +1187,26 @@ def list_users(
         "sortBy": sort_by or "displayName",
         "sortDesc": bool(sort_desc),
         "archived": bool(archived),
+    }
+
+
+def list_departments(session: Session, connection_id: uuid.UUID) -> dict:
+    """Distinct AD department values for the Users filter dropdown."""
+    get_connection(session, connection_id)
+    rows = session.execute(
+        select(AdDirectoryUser.department)
+        .where(
+            AdDirectoryUser.connection_id == connection_id,
+            AdDirectoryUser.department.is_not(None),
+            AdDirectoryUser.department != "",
+        )
+        .distinct()
+        .order_by(AdDirectoryUser.department)
+    ).all()
+    names = sorted({(value or "").strip() for (value,) in rows if (value or "").strip()}, key=str.lower)
+    return {
+        "items": [{"value": name, "label": name} for name in names],
+        "total": len(names),
     }
 
 

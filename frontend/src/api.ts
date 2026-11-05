@@ -54,8 +54,18 @@ export type DirectoryUser = {
   identityConflict?: boolean;
   identityConflictReason?: string | null;
   adBrowserLoginImplemented?: boolean;
-  identityStatus: "linked" | "pending" | "disabled" | "ad_enrolled";
-  accountStatus: "active" | "disabled" | "pending" | "awaiting_google_login" | "awaiting_admin_approval";
+  identityStatus: "linked" | "pending" | "disabled" | "ad_enrolled" | "eligible";
+  accountStatus:
+    | "active"
+    | "disabled"
+    | "pending"
+    | "awaiting_google_login"
+    | "awaiting_admin_approval"
+    | "eligible_pending_enroll";
+  canEnroll?: boolean;
+  objectGuid?: string | null;
+  objectSid?: string | null;
+  adDirectoryUserId?: string | null;
   chatgptMembership: "verified_member" | "verified_nonmember" | "unknown";
   chatgptMembershipSource?: string;
   chatgptMembershipVerifiedAt?: string | null;
@@ -916,6 +926,10 @@ export const api = {
     request<{ items: Array<{ id: string; name: string; distinguishedName: string; selected: boolean }> }>(
       `/api/v1/admin/active-directory/connections/${connectionId}/ou-scope`,
       { method: "PUT", body: JSON.stringify({ items }) },
+    ),
+  adDepartments: (connectionId: string) =>
+    request<{ items: Array<{ value: string; label: string }>; total: number }>(
+      `/api/v1/admin/active-directory/connections/${connectionId}/departments`,
     ),
   adUsers: (
     connectionId: string,
