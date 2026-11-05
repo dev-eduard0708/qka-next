@@ -74,7 +74,7 @@ Connected agents fulfill Super Admin browse requests over outbound HTTPS polling
 
 **Prefer organization-approved trusted cert** (internal PKI / approved CA) with SAN `qka-agent.qehc.edu.sa`. Do not auto-install AD CS. Do not disable TLS verification. Do not expose FastAPI publicly.
 
-**Public LE DNS-01 evaluation:** Rejected for now — name does not exist in public DNS; service must stay internal-only. Revisit only with approved split-horizon + DNS-01 automation that never publishes the API.
+**Public LE DNS-01 evaluation:** Public A for `qka-agent` is NXDOMAIN (good — keep internal-only). Authoritative public NS for `qehc.edu.sa` is **ns1/ns2.justhost.com**, so DNS-01 **is possible** if ops can create TXT `_acme-challenge.qka-agent.qehc.edu.sa` in JustHost/Bluehost **without** publishing a public A. Prefer that or an org PFX over self-signed. Admin scripts: `scripts/iis-agent-https/`.
 
 1. Ops issues/import cert into `LocalMachine\My` with private key (SAN + chain trusted by domain clients).
 2. Create a **dedicated** IIS site/binding for `qka-agent.qehc.edu.sa:443` only — do not replace MCP/OAuth bindings.

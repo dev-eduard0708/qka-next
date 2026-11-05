@@ -14,38 +14,41 @@
 
 ## Server URL (required)
 
-Employee / pilot PCs must use a **reachable internal HTTPS** QKA base URL.
+Pilot PC must use **reachable internal HTTPS**:
 
-- Set server `QKA_AGENT_PUBLIC_BASE_URL` (example: `https://qka.internal.qehc.edu.sa`)
+- Hostname: `https://qka-agent.qehc.edu.sa` (internal A → `192.168.120.35`)
+- Set server `QKA_AGENT_PUBLIC_BASE_URL` **only after** HTTPS + client trust validate (see `scripts/iis-agent-https/README.md`)
 - Do **not** use `http://127.0.0.1:5265` or `localhost` on the pilot PC
-- TLS certificate must be trusted by the pilot PC (corporate CA or public CA)
+- Do **not** bypass TLS verification on the agent
 
-## Silent install (approved test PC only)
+## Silent install (approved test PC only — no GPO required for first pilot)
 
 ```bat
-msiexec /i "\\share\path\QKA-Agent.msi" /qn QKASERVERURL=https://qka.internal.qehc.edu.sa
+msiexec /i "C:\path\QKA-Agent.msi" /qn QKASERVERURL=https://qka-agent.qehc.edu.sa
 ```
 
 Silent uninstall:
 
 ```bat
-msiexec /x "\\share\path\QKA-Agent.msi" /qn
+msiexec /x "C:\path\QKA-Agent.msi" /qn
 ```
 
 The MSI does **not** embed enrollment codes, employee passwords, or device keys.
-`QKASERVERURL` is only the public HTTPS base for the agent API.
+`QKASERVERURL` is only the HTTPS base for the agent API.
 
 ## After install (registration)
 
-1. In QKA: **Sources → Employee Computers → Workstations**
-2. Confirm the pilot computer appears (from AD sync).
-3. Explicitly **Assign** the AD-linked employee (never inferred from computer name).
-4. Open **Agent devices** tab → **Issue enrollment code** for that employee.
-5. On the pilot PC, place the one-time code in either:
-   - Environment: `QKA_AGENT_ENROLLMENT_CODE=<code>`
-   - Or `%ProgramData%\QKA\DesktopAgent\agent.config.json` → `"enrollmentCode"`
-6. Restart service `QkaDesktopAgent` (or reboot).
-7. Verify in UI: last heartbeat, agent version, Connected status.
+Flow: **Install → Register Device → Assign User → Approve Folders → Start Indexing**
+
+1. In QKA: **Sources → Employee Computers → Agent devices**
+2. **Issue device registration code** (no employee required).
+3. On the pilot PC, place the one-time code in either:
+   - Environment: `QKA_AGENT_ENROLLMENT_CODE=<code>` (session/machine env — never logged)
+   - Or `%ProgramData%\QKA\DesktopAgent\agent.config.json` → `"enrollmentCode"` (delete after enroll)
+4. Restart service `QkaDesktopAgent` (or reboot).
+5. Verify in UI: **Connected · Employee: Unassigned · Indexing: Disabled**
+6. Super Admin **Assign** an AD-linked employee, then browse/approve a **disposable** pilot folder only.
+7. Start indexing only after read-only verification on that disposable folder.
 
 ## Approved folders + read-only NTFS
 
