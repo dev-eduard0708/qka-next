@@ -167,6 +167,8 @@ def list_directory_users(
     accountStatus: str | None = None,
     identityStatus: str | None = None,
     chatgptMembership: str | None = None,
+    sortBy: str = Query(default="displayName"),
+    sortDesc: bool = Query(default=False),
     page: int = Query(default=1, ge=1),
     pageSize: int = Query(default=25, ge=1, le=200),
     settings: Settings = Depends(get_settings_dep),
@@ -179,6 +181,8 @@ def list_directory_users(
         account_status=accountStatus,
         identity_status=identityStatus,
         chatgpt_membership=chatgptMembership,
+        sort_by=sortBy,
+        sort_desc=sortDesc,
         page=page,
         page_size=pageSize,
     )

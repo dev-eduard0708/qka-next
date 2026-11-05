@@ -40,7 +40,8 @@
                 flat
                 bordered
                 dense
-                :row-key="(row: DirectoryUser) => row.allowlistId || row.qkaUserId || row.primaryEmail"
+                binary-state-sort
+                :row-key="(row: DirectoryUser) => row.allowlistId || row.qkaUserId || row.objectGuid || row.primaryEmail"
                 :rows="userRows"
                 :columns="userColumns"
                 :loading="usersLoading"
@@ -621,7 +622,13 @@ const userSearch = ref("");
 const filterAccount = ref<string | null>(null);
 const filterIdentity = ref<string | null>(null);
 const filterMembership = ref<string | null>(null);
-const userPagination = ref({ page: 1, rowsPerPage: 25, rowsNumber: 0 });
+const userPagination = ref({
+  page: 1,
+  rowsPerPage: 25,
+  rowsNumber: 0,
+  sortBy: "displayName",
+  descending: false,
+});
 const userDialog = ref(false);
 const editingUser = ref<DirectoryUser | null>(null);
 const savingUser = ref(false);
@@ -740,14 +747,14 @@ const membershipFilterOptions = computed(() => [
 ]);
 
 const userColumns: QTableProps["columns"] = [
-  { name: "displayName", label: "Full Name", field: "displayName", align: "left" },
-  { name: "domainUsername", label: "Domain Username", field: "domainUsername", align: "left" },
-  { name: "primaryEmail", label: "Email", field: "primaryEmail", align: "left" },
-  { name: "department", label: "Department", field: "department", align: "left" },
-  { name: "linkedIdentities", label: "Linked Identities", field: "linkedIdentities", align: "left" },
-  { name: "localChatEnabled", label: "Local AI Chat", field: "localChatEnabled", align: "left" },
-  { name: "mcpEnabled", label: "MCP Access", field: "mcpEnabled", align: "left" },
-  { name: "accountStatus", label: "Account Status", field: "accountStatus", align: "left" },
+  { name: "displayName", label: "Full Name", field: "displayName", align: "left", sortable: true },
+  { name: "domainUsername", label: "Domain Username", field: "domainUsername", align: "left", sortable: true },
+  { name: "primaryEmail", label: "Email", field: "primaryEmail", align: "left", sortable: true },
+  { name: "department", label: "Department", field: "department", align: "left", sortable: true },
+  { name: "linkedIdentities", label: "Linked Identities", field: "linkedIdentities", align: "left", sortable: true },
+  { name: "localChatEnabled", label: "Local AI Chat", field: "localChatEnabled", align: "left", sortable: true },
+  { name: "mcpEnabled", label: "MCP Access", field: "mcpEnabled", align: "left", sortable: true },
+  { name: "accountStatus", label: "Account Status", field: "accountStatus", align: "left", sortable: true },
   { name: "actions", label: "Actions", field: "actions", align: "right" },
 ];
 
@@ -987,11 +994,20 @@ function formatWhen(value: string | null) {
   }
 }
 
-async function loadUsers() {
+async function loadUsers(opts?: {
+  page?: number;
+  rowsPerPage?: number;
+  sortBy?: string;
+  descending?: boolean;
+}) {
   if (!session.user?.superAdmin) {
     userRows.value = [];
     return;
   }
+  const pageNum = opts?.page ?? userPagination.value.page;
+  const rowsPerPage = opts?.rowsPerPage ?? userPagination.value.rowsPerPage;
+  const sortBy = opts?.sortBy ?? userPagination.value.sortBy ?? "displayName";
+  const descending = opts?.descending ?? userPagination.value.descending;
   usersLoading.value = true;
   try {
     const page = await api.listDirectoryUsers({
@@ -999,16 +1015,18 @@ async function loadUsers() {
       accountStatus: filterAccount.value || undefined,
       identityStatus: filterIdentity.value || undefined,
       chatgptMembership: filterMembership.value || undefined,
-      page: userPagination.value.page,
-      pageSize: userPagination.value.rowsPerPage,
+      sortBy: sortBy || "displayName",
+      sortDesc: !!descending,
+      page: pageNum,
+      pageSize: rowsPerPage,
     });
     userRows.value = page.items;
-    userPagination.value = {
-      ...userPagination.value,
-      rowsNumber: page.total,
-      page: page.page,
-      rowsPerPage: page.pageSize,
-    };
+    // Mutate in place so Quasar keeps server-side sort/pagination working.
+    userPagination.value.rowsNumber = page.total;
+    userPagination.value.page = page.page;
+    userPagination.value.rowsPerPage = page.pageSize;
+    userPagination.value.sortBy = sortBy || "displayName";
+    userPagination.value.descending = !!descending;
     membershipNote.value = page.membershipSync?.note || t("access.membershipManualNote");
     usersError.value = "";
   } catch (err) {
@@ -1019,14 +1037,19 @@ async function loadUsers() {
 }
 
 function reloadUsers() {
-  userPagination.value.page = 1;
-  void loadUsers();
+  void loadUsers({ page: 1 });
 }
 
-async function onUsersRequest(req: { pagination: { page: number; rowsPerPage: number } }) {
-  userPagination.value.page = req.pagination.page;
-  userPagination.value.rowsPerPage = req.pagination.rowsPerPage;
-  await loadUsers();
+async function onUsersRequest(req: {
+  pagination: { page: number; rowsPerPage: number; sortBy?: string | null; descending?: boolean };
+}) {
+  const { page, rowsPerPage, sortBy, descending } = req.pagination;
+  await loadUsers({
+    page,
+    rowsPerPage: rowsPerPage || 25,
+    sortBy: sortBy || "displayName",
+    descending: !!descending,
+  });
 }
 
 function resetUserForm() {

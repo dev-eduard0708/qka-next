@@ -578,6 +578,22 @@ def membership_sync_info() -> dict:
     }
 
 
+_DIRECTORY_SORT_FIELDS = {
+    "displayName": lambda i: ((i.get("displayName") or "").lower(), (i.get("primaryEmail") or "").lower()),
+    "domainUsername": lambda i: ((i.get("domainUsername") or "").lower(), (i.get("displayName") or "").lower()),
+    "primaryEmail": lambda i: ((i.get("primaryEmail") or "").lower(), (i.get("displayName") or "").lower()),
+    "department": lambda i: ((i.get("department") or "").lower(), (i.get("displayName") or "").lower()),
+    "linkedIdentities": lambda i: (
+        (i.get("linkedIdentities") or "").lower(),
+        ",".join(i.get("identityBadges") or []),
+        (i.get("displayName") or "").lower(),
+    ),
+    "localChatEnabled": lambda i: (0 if i.get("localChatEnabled") else 1, (i.get("displayName") or "").lower()),
+    "mcpEnabled": lambda i: (0 if i.get("mcpEnabled") else 1, (i.get("displayName") or "").lower()),
+    "accountStatus": lambda i: ((i.get("accountStatus") or "").lower(), (i.get("displayName") or "").lower()),
+}
+
+
 def list_users(
     session: Session,
     *,
@@ -585,6 +601,8 @@ def list_users(
     account_status: str | None = None,
     identity_status: str | None = None,
     chatgpt_membership: str | None = None,
+    sort_by: str = "displayName",
+    sort_desc: bool = False,
     page: int = 1,
     page_size: int = 25,
 ) -> dict:
@@ -722,7 +740,8 @@ def list_users(
     if chatgpt_membership:
         items = [item for item in items if item["chatgptMembership"] == chatgpt_membership.strip().lower()]
 
-    items.sort(key=lambda i: ((i.get("displayName") or "").lower(), i.get("primaryEmail") or ""))
+    sort_key = _DIRECTORY_SORT_FIELDS.get((sort_by or "").strip()) or _DIRECTORY_SORT_FIELDS["displayName"]
+    items.sort(key=sort_key, reverse=bool(sort_desc))
     total = len(items)
     page = max(1, page)
     page_size = max(1, min(page_size, 200))
@@ -732,6 +751,8 @@ def list_users(
         "total": total,
         "page": page,
         "pageSize": page_size,
+        "sortBy": (sort_by or "displayName").strip() or "displayName",
+        "sortDesc": bool(sort_desc),
         "membershipSync": membership_sync_info(),
         "adOnlyLoginImplemented": False,
     }

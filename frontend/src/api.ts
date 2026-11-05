@@ -462,6 +462,8 @@ export const api = {
     accountStatus?: string;
     identityStatus?: string;
     chatgptMembership?: string;
+    sortBy?: string;
+    sortDesc?: boolean;
     page?: number;
     pageSize?: number;
   }) => {
@@ -470,6 +472,8 @@ export const api = {
     if (params?.accountStatus) q.set("accountStatus", params.accountStatus);
     if (params?.identityStatus) q.set("identityStatus", params.identityStatus);
     if (params?.chatgptMembership) q.set("chatgptMembership", params.chatgptMembership);
+    if (params?.sortBy) q.set("sortBy", params.sortBy);
+    if (params?.sortDesc != null) q.set("sortDesc", params.sortDesc ? "true" : "false");
     if (params?.page) q.set("page", String(params.page));
     if (params?.pageSize) q.set("pageSize", String(params.pageSize));
     const suffix = q.toString() ? `?${q.toString()}` : "";
