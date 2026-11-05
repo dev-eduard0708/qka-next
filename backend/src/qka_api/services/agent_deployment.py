@@ -70,40 +70,78 @@ def _status_label(status: int) -> str:
 def deployment_prerequisites(settings: Settings) -> dict:
     base = (settings.agent_public_base_url or "").strip()
     parsed = urlparse(base)
-    https_ok = parsed.scheme == "https" and bool(parsed.netloc) and "localhost" not in parsed.netloc.lower() and "127.0.0.1" not in parsed.netloc
+    https_ok = (
+        parsed.scheme == "https"
+        and bool(parsed.netloc)
+        and "localhost" not in parsed.netloc.lower()
+        and "127.0.0.1" not in parsed.netloc
+    )
     gpo = gpo_engine.probe_gpo_engine()
+    # HMAC machineProof is implemented, but is only safe when the one-time token was
+    # provisioned solely to the target computer (GPO/HKLM). API plaintext return to an
+    # admin is not machine-bound delivery. Kerberos machine auth is NOT implemented.
+    machine_proof_ready = False
+    machine_proof = {
+        "hmacImplemented": True,
+        "tokenEmbeddedInMsi": False,
+        "kerberosMachineAuth": False,
+        "securePerComputerProvisioning": False,
+        "replayProtection": "one_time_token_consume",
+        "revocation": "desktop_device_revoke_rotates_device_key",
+        "status": "blocked",
+        "detail": (
+            "machineProof=HMAC-SHA256(token, computerSid) rejects SID-only spoofing without the token, "
+            "but the token must be delivered only to the intended PC (computer-targeted GPO registry "
+            "under HKLM). Do not claim Kerberos machine authentication. Do not log or embed the token."
+        ),
+    }
     blockers: list[str] = []
     if not https_ok:
         blockers.append(
             "Internal HTTPS agent endpoint is not configured "
-            "(set QKA_AGENT_PUBLIC_BASE_URL to a trusted https:// hostname — not localhost)."
+            "(set QKA_AGENT_PUBLIC_BASE_URL only after https://qka-agent.qehc.edu.sa validates with a trusted cert)."
         )
     if not gpo.msi_present:
         blockers.append(f"MSI missing at {gpo.msi_path}.")
     if not gpo.available:
         blockers.append(gpo.reason)
-    # TLS trust cannot be asserted from this process without an org cert + probe target.
-    tls_trust = "unknown"
-    if not https_ok:
-        tls_trust = "blocked"
+    if not machine_proof_ready:
+        blockers.append(
+            "Secure per-computer machineEnrollmentToken provisioning is not complete "
+            "(HMAC proof alone is not Kerberos; deliver token via GPO/HKLM to the pilot PC only)."
+        )
+    tls_trust = "blocked" if not https_ok else "unknown"
     return {
-        "deployEnabled": False if blockers else bool(https_ok and gpo.available),
+        "deployEnabled": False if blockers else bool(https_ok and gpo.available and machine_proof_ready),
         "httpsConfigured": https_ok,
         "httpsEndpoint": base if https_ok else "",
+        "httpsPreferredHost": "qka-agent.qehc.edu.sa",
         "tlsTrust": tls_trust,
         "msiPresent": gpo.msi_present,
         "msiPath": gpo.msi_path,
         "gpoEngineAvailable": gpo.available,
         "gpoReason": gpo.reason,
         "gpoTargetGroup": gpo.target_group,
-        "machineIdentityEnrollmentReady": True,
+        "gpoAd": {
+            "groupExists": gpo.ad_group_exists,
+            "groupMemberCount": gpo.ad_group_member_count,
+            "gpoExists": gpo.ad_gpo_exists,
+            "gpoDisplayName": gpo.ad_gpo_display_name,
+            "gpoGuid": gpo.ad_gpo_guid,
+            "gpoLinked": gpo.ad_gpo_linked,
+            "gpoLinkTargets": list(gpo.ad_gpo_link_targets),
+            "gpmcPresent": gpo.gpmc_present,
+        },
+        "machineIdentityEnrollmentReady": machine_proof_ready,
+        "machineProofSecurity": machine_proof,
         "manualEnrollmentCodeFallback": True,
         "blockers": blockers,
         "confirmationPhrase": CONFIRM_PHRASE,
         "maxBulk": 50,
         "realPcDeployAllowed": False,
         "note": (
-            "Deploy Agent stays disabled until HTTPS and the delegated GPO engine are ready. "
+            "Deploy Agent stays disabled until trusted HTTPS, GPMC + linked/filtered pilot GPO, "
+            "pilot computer group membership, and secure per-computer token provisioning are ready. "
             "Ping/GPO assignment alone never counts as installation success."
         ),
     }

@@ -57,9 +57,34 @@ Connected agents fulfill Super Admin browse requests over outbound HTTPS polling
 4. Evidence of install is **agent registration + heartbeat**, never ping or GPO link alone.
 5. Machine enrollment tokens are bound to AD computer SID/GUID + assigned employee; hostname/MAC/IP/email alone are rejected.
 
-## HTTPS (current host)
+## HTTPS / DNS / GPO readiness (ops)
 
-Internal HTTPS for agent traffic is **BLOCKED** until Domain Ops installs an organization-approved server certificate and reverse-proxies `/api/v1/agent/desktop/*` to FastAPI `:5265` without changing the MCP OAuth issuer or existing IIS sites.
+| Item | Status (QEC-AI-MCP) |
+| --- | --- |
+| DNS `qka-agent.qehc.edu.sa` | A → `192.168.120.35` (created) |
+| Trusted TLS for that host | **BLOCKED** — no cert in `LocalMachine\My` / WebHosting; no domain CA listed |
+| `QKA_AGENT_PUBLIC_BASE_URL` | Leave unset until HTTPS validates |
+| AD group `QKA-Agent-Pilot-Computers` | Exists (`OU=Service Users`); **0 members** |
+| GPO `QKA-Desktop-Agent-Deployment.` | Exists (GUID `{73E8998A-…}`); **not linked**; SYSVOL empty (version 0) |
+| GPMC / `Get-GPO` on this host | **Missing** — install RSAT GPMC elevated |
+
+### Certificate issuance (required before HTTPS)
+
+1. Issue an organization-approved certificate with SAN `qka-agent.qehc.edu.sa` (internal PKI / approved CA — do not use a self-signed production cert).
+2. Import into `LocalMachine\My` with private key.
+3. Create a **dedicated** IIS site/binding for `qka-agent.qehc.edu.sa:443` only — do not replace MCP/OAuth bindings.
+4. Reverse-proxy `/api/v1/agent/desktop/*` → `http://127.0.0.1:5265`.
+5. Validate `https://qka-agent.qehc.edu.sa` from a domain workstation with normal trust (no TLS bypass).
+6. Only then set `QKA_AGENT_PUBLIC_BASE_URL=https://qka-agent.qehc.edu.sa`.
+
+### GPO / pilot scope (required before deploy)
+
+1. Install GPMC on the management host (elevated).
+2. Rename GPO if needed (current display name ends with a trailing `.`).
+3. Link GPO to a **narrow** OU; security-filter to `QKA-Agent-Pilot-Computers` only (remove Authenticated Users).
+4. Add **one** approved pilot computer account to the group.
+5. Publish silent MSI + computer-targeted HKLM `machineEnrollmentToken` (never embed in MSI; never log plaintext).
+6. `machineProof` HMAC is **not** Kerberos machine auth — keep Deploy blocked until per-computer token provisioning is real.
 
 ## GPO
 
