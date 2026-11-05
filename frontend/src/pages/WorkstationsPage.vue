@@ -362,7 +362,7 @@ const accountOptions = [
 ];
 const employeeOptions = computed(() =>
   employees.value
-    .filter((e) => e.qkaUserId && (e.linkedIdentities || "").includes("ad"))
+    .filter((e) => e.qkaUserId && (e.adLinked || e.linkedIdentities === "ad" || e.linkedIdentities === "both"))
     .map((e) => ({ label: `${e.displayName} (${e.primaryEmail || e.qkaUserId})`, value: e.qkaUserId as string })),
 );
 const summaryCards = computed(() => [

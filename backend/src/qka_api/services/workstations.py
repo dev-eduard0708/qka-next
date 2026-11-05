@@ -636,13 +636,16 @@ def associate_employee(
         raise LookupError("Workstation not found.")
     if qka_user_id is not None:
         user = session.get(QkaUser, qka_user_id)
-        if user is None or not user.login_enabled:
+        # AD-enrolled employees are often login_enabled=False until Google/SSO is linked.
+        # Workstation ownership only needs an active QkaUser with a linked AD identity.
+        if user is None or user.status != 0 or user.is_super_admin:
             raise WorkstationValidationError("Assigned employee must be an existing active QKA user.")
         # Prefer AD-linked users but do not invent ownership from computer name.
         ad_link = session.execute(
             select(ExternalIdentity).where(
                 ExternalIdentity.qka_user_id == qka_user_id,
                 ExternalIdentity.provider == 0,
+                ExternalIdentity.link_status == 2,
             )
         ).scalar_one_or_none()
         if ad_link is None:

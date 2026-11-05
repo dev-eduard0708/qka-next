@@ -308,6 +308,23 @@ def test_employee_association_requires_ad_user(client):
     assert denied.status_code == 400
     assert "AD-linked" in denied.json()["detail"]
 
+    # AD-enrolled employees often have login_enabled=False until Google/SSO; assignment must still work.
+    from qka_api.db import create_session_factory
+    from qka_shared.config import get_settings
+    from qka_shared.models import QkaUser
+
+    get_settings.cache_clear()
+    engine, factory = create_session_factory(get_settings())
+    try:
+        with factory() as session:
+            user = session.get(QkaUser, ALLOWED_USER)
+            assert user is not None
+            user.login_enabled = False
+            session.commit()
+    finally:
+        engine.dispose()
+        get_settings.cache_clear()
+
     ok = client.put(
         f"/api/v1/admin/workstations/{pilot['id']}/employee",
         headers=headers,
