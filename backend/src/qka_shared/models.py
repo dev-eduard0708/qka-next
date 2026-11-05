@@ -862,6 +862,10 @@ class DesktopDevice(Base):
     device_key_hash: Mapped[str] = mapped_column(String(128), unique=True)
     computer_name: Mapped[str] = mapped_column(String(256), default="")
     device_fingerprint: Mapped[str] = mapped_column(String(256), default="")
+    # AD computer identity (preferred over hostname/MAC fingerprint).
+    ad_computer_sid: Mapped[str] = mapped_column(String(256), default="", index=True)
+    ad_computer_guid: Mapped[str] = mapped_column(String(64), default="", index=True)
+    workstation_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True, index=True)
     domain_joined_name: Mapped[str] = mapped_column(String(256), default="")
     agent_version: Mapped[str] = mapped_column(String(64), default="")
     status: Mapped[int] = mapped_column(Integer, default=DEVICE_PENDING)
@@ -880,6 +884,69 @@ class DesktopDevice(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+# Agent deployment job statuses (honest evidence only — ping/GPO assignment ≠ installed).
+DEPLOY_REQUESTED = 0
+DEPLOY_APPROVED = 1
+DEPLOY_SCHEDULED = 2
+DEPLOY_WAITING_COMPUTER = 3
+DEPLOY_INSTALLING = 4
+DEPLOY_INSTALLED_REGISTERED = 5
+DEPLOY_FAILED = 6
+DEPLOY_CANCELLED = 7
+
+
+class AgentDeploymentJob(Base):
+    """Super Admin–approved workstation agent deployment request.
+
+    Never silently targets an entire OU. Installation evidence requires agent
+    registration/heartbeat — not ICMP or GPO link alone.
+    """
+
+    __tablename__ = "qka_next_agent_deployment_job"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    workstation_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    assigned_qka_user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    requested_by_user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    approved_by_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    status: Mapped[int] = mapped_column(Integer, default=DEPLOY_REQUESTED, index=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str] = mapped_column(String(2000), default="")
+    msi_version: Mapped[str] = mapped_column(String(64), default="")
+    engine: Mapped[str] = mapped_column(String(64), default="blocked")  # gpo | blocked
+    enrollment_mode: Mapped[str] = mapped_column(String(64), default="machine_identity")
+    gpo_target_group: Mapped[str] = mapped_column(String(512), default="")
+    desktop_device_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True, index=True)
+    confirmation_phrase: Mapped[str] = mapped_column(String(128), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    installed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class MachineEnrollmentToken(Base):
+    """One-time machine-bound enrollment token for managed deployment.
+
+    Bound to AD computer SID/GUID + assigned employee + deployment job.
+    Never embedded in the MSI. Manual enrollment codes remain a separate fallback.
+    """
+
+    __tablename__ = "qka_next_machine_enrollment_token"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    job_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    workstation_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    qka_user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    ad_computer_sid: Mapped[str] = mapped_column(String(256), index=True)
+    ad_computer_guid: Mapped[str] = mapped_column(String(64), default="", index=True)
+    token_hash: Mapped[str] = mapped_column(String(128), unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class DesktopDeviceFolder(Base):

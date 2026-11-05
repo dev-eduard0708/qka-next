@@ -148,7 +148,56 @@ export type Workstation = {
   indexingStatus: string;
   online: boolean;
   desktopDeviceId: string | null;
-  deployAgent: { enabled: boolean; status: string; note: string };
+  objectSid?: string;
+  objectGuid?: string;
+  deployAgent: {
+    enabled: boolean;
+    status: string;
+    note: string;
+    prerequisites?: {
+      httpsConfigured: boolean;
+      gpoEngineAvailable: boolean;
+      msiPresent: boolean;
+      tlsTrust: string;
+      machineIdentityEnrollmentReady: boolean;
+    };
+  };
+  deploymentJob?: {
+    id: string;
+    status: string;
+    statusCode: number;
+    attemptCount: number;
+    lastError: string;
+    msiVersion: string;
+    engine: string;
+    enrollmentMode: string;
+    desktopDeviceId: string | null;
+    createdAt: string | null;
+    updatedAt: string | null;
+    approvedAt: string | null;
+    scheduledAt: string | null;
+    installedAt: string | null;
+    cancelledAt: string | null;
+  } | null;
+};
+
+export type DeployPrerequisites = {
+  deployEnabled: boolean;
+  httpsConfigured: boolean;
+  httpsEndpoint: string;
+  tlsTrust: string;
+  msiPresent: boolean;
+  msiPath: string;
+  gpoEngineAvailable: boolean;
+  gpoReason: string;
+  gpoTargetGroup: string;
+  machineIdentityEnrollmentReady: boolean;
+  manualEnrollmentCodeFallback: boolean;
+  blockers: string[];
+  confirmationPhrase: string;
+  maxBulk: number;
+  realPcDeployAllowed: boolean;
+  note: string;
 };
 
 export type WorkstationsPage = {
@@ -747,6 +796,43 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ qkaUserId }),
     }),
+  workstationDeployPrerequisites: () =>
+    request<DeployPrerequisites>("/api/v1/admin/workstations/deploy/prerequisites"),
+  deployWorkstationAgents: (body: {
+    workstationIds: string[];
+    confirmation: string;
+    approve?: boolean;
+  }) =>
+    request<{
+      ok: boolean;
+      deployEnabled: boolean;
+      prerequisites: DeployPrerequisites;
+      jobs: Array<{
+        id: string;
+        workstationId: string;
+        computerName: string;
+        status: string;
+        lastError: string;
+        machineEnrollmentToken?: string | null;
+      }>;
+      tokensIssued: number;
+      gpoManifest: Record<string, unknown> | null;
+      realPcDeployExecuted: boolean;
+      note: string;
+    }>("/api/v1/admin/workstations/deploy", {
+      method: "POST",
+      body: JSON.stringify({ approve: true, ...body }),
+    }),
+  cancelWorkstationDeploy: (jobId: string) =>
+    request<{ id: string; status: string }>(`/api/v1/admin/workstations/deploy/${jobId}/cancel`, {
+      method: "POST",
+      body: "{}",
+    }),
+  retryWorkstationDeploy: (jobId: string) =>
+    request<{ id: string; status: string; attemptCount: number }>(
+      `/api/v1/admin/workstations/deploy/${jobId}/retry`,
+      { method: "POST", body: "{}" },
+    ),
   sourceFolderTree: (approvedShareId: string, rootPrefix?: string | null) => {
     const q = new URLSearchParams({ approvedShareId });
     // "" / omitted → entire share; otherwise scoped prefix

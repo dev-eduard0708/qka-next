@@ -10,7 +10,7 @@
 
 - Agent: `/api/v1/agent/desktop/enroll|heartbeat|policy|progress|errors`
 - Admin: `/api/v1/admin/desktop-devices…`
-- Auth: per-device key after one-time enrollment code (never in MSI)
+- Auth: per-device key after machine-identity enrollment (managed deploy) or one-time enrollment code fallback (never embedded in MSI)
 
 ## UI
 
@@ -37,6 +37,18 @@ See **`docs/10-PILOT-PC-INSTALL.md`** for the one-PC procedure.
 - Default excludes: AppData, browsers, Windows, Program Files, credentials stores.
 - Code signing: production blocker until an approved certificate is configured.
 
+## Managed deploy (Workstations UI)
+
+1. Super Admin assigns an AD-linked employee to the workstation.
+2. Deploy requires: trusted internal HTTPS (`QKA_AGENT_PUBLIC_BASE_URL`), MSI present, RSAT GPMC available to the delegated engine, confirmation phrase `DEPLOY SELECTED`.
+3. Jobs persist in Postgres (`requested` → `approved` → `scheduled` → `waiting_for_computer` / `installing` → `installed_agent_registered` | `failed` | `cancelled`).
+4. Evidence of install is **agent registration + heartbeat**, never ping or GPO link alone.
+5. Machine enrollment tokens are bound to AD computer SID/GUID + assigned employee; hostname/MAC/IP/email alone are rejected.
+
+## HTTPS (current host)
+
+Internal HTTPS for agent traffic is **BLOCKED** until Domain Ops installs an organization-approved server certificate and reverse-proxies `/api/v1/agent/desktop/*` to FastAPI `:5265` without changing the MCP OAuth issuer or existing IIS sites.
+
 ## GPO
 
-MSI/WiX source is prepared for AD Software Installation. Pushing GPO from the QKA UI is a **separate** integration — the UI reports honest `installer_ready` status and does not fake deployment success.
+MSI/WiX source is prepared for AD Software Installation targeting computer group `QKA-Agent-Pilot-Computers` only (never an entire OU). Live GPO apply remains a Domain Ops / delegated RSAT step — QKA does not expose unrestricted PowerShell remoting.

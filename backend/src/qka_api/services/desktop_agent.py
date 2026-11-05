@@ -145,44 +145,95 @@ def enroll_device(
     session: Session,
     settings: Settings,
     *,
-    enrollment_code: str,
+    enrollment_code: str = "",
+    machine_enrollment_token: str = "",
+    ad_computer_sid: str = "",
+    ad_computer_guid: str = "",
     computer_name: str,
     device_fingerprint: str,
     domain_joined_name: str = "",
     agent_version: str = "",
 ) -> dict:
+    """Enroll via machine-bound token (managed deploy) or one-time enrollment code (manual fallback).
+
+    Hostname/MAC/IP/email alone are never accepted as proof of device identity for
+    the managed path — AD computer SID (and GUID when present) must match inventory.
+    """
+    from qka_api.services import agent_deployment as deploy_svc
+
     code = (enrollment_code or "").strip()
-    if not code:
-        raise ValueError("Enrollment code is required.")
+    machine_token = (machine_enrollment_token or "").strip()
+    sid = (ad_computer_sid or "").strip()
+    guid = (ad_computer_guid or "").strip()
     fp = (device_fingerprint or "").strip()
     if not fp:
         raise ValueError("Device fingerprint is required.")
-    row = session.execute(
-        select(DesktopEnrollmentCode).where(DesktopEnrollmentCode.code_hash == _hash_secret(code))
-    ).scalar_one_or_none()
-    if row is None:
-        raise PermissionError("Enrollment code is invalid.")
-    if row.consumed_at is not None:
-        raise PermissionError("Enrollment code was already used.")
-    if row.expires_at < _now():
-        raise PermissionError("Enrollment code has expired.")
-    require_ad_linked_user(session, row.qka_user_id)
 
-    existing = session.execute(
-        select(DesktopDevice).where(
-            DesktopDevice.device_fingerprint == fp,
-            DesktopDevice.status != DEVICE_REVOKED,
+    qka_user_id: uuid.UUID
+    workstation_id: uuid.UUID | None = None
+    machine_row = None
+    code_row = None
+
+    if machine_token:
+        if not sid:
+            raise ValueError("AD computer SID is required for machine-identity enrollment.")
+        machine_row, ws = deploy_svc.consume_machine_enrollment_token(
+            session,
+            token=machine_token,
+            ad_computer_sid=sid,
+            ad_computer_guid=guid,
         )
-    ).scalar_one_or_none()
+        if not ws.assigned_qka_user_id or ws.assigned_qka_user_id != machine_row.qka_user_id:
+            raise PermissionError("Workstation employee assignment does not match enrollment token.")
+        require_ad_linked_user(session, machine_row.qka_user_id)
+        qka_user_id = machine_row.qka_user_id
+        workstation_id = ws.id
+    elif code:
+        # Manual fallback — still requires Super Admin–issued one-time code.
+        code_row = session.execute(
+            select(DesktopEnrollmentCode).where(DesktopEnrollmentCode.code_hash == _hash_secret(code))
+        ).scalar_one_or_none()
+        if code_row is None:
+            raise PermissionError("Enrollment code is invalid.")
+        if code_row.consumed_at is not None:
+            raise PermissionError("Enrollment code was already used.")
+        if code_row.expires_at < _now():
+            raise PermissionError("Enrollment code has expired.")
+        require_ad_linked_user(session, code_row.qka_user_id)
+        qka_user_id = code_row.qka_user_id
+    else:
+        raise ValueError("Enrollment code or machine enrollment token is required.")
+
+    # Prefer SID uniqueness for managed enroll; fingerprint for manual fallback.
+    existing = None
+    if sid:
+        existing = session.execute(
+            select(DesktopDevice).where(
+                DesktopDevice.ad_computer_sid == sid,
+                DesktopDevice.status != DEVICE_REVOKED,
+            )
+        ).scalar_one_or_none()
+    if existing is None:
+        existing = session.execute(
+            select(DesktopDevice).where(
+                DesktopDevice.device_fingerprint == fp,
+                DesktopDevice.status != DEVICE_REVOKED,
+            )
+        ).scalar_one_or_none()
+
     device_key = secrets.token_urlsafe(32)
     now = _now()
     if existing is not None:
-        if existing.qka_user_id != row.qka_user_id:
+        if existing.qka_user_id != qka_user_id:
             raise PermissionError("This computer is already enrolled to another employee.")
         existing.device_key_hash = _hash_secret(device_key)
         existing.computer_name = (computer_name or "").strip()[:256]
         existing.domain_joined_name = (domain_joined_name or "").strip()[:256]
         existing.agent_version = (agent_version or "").strip()[:64]
+        existing.ad_computer_sid = sid[:256] if sid else existing.ad_computer_sid
+        existing.ad_computer_guid = guid[:64] if guid else existing.ad_computer_guid
+        if workstation_id:
+            existing.workstation_id = workstation_id
         existing.status = DEVICE_ACTIVE
         existing.enrolled_at = now
         existing.updated_at = now
@@ -191,10 +242,13 @@ def enroll_device(
     else:
         device = DesktopDevice(
             id=uuid.uuid4(),
-            qka_user_id=row.qka_user_id,
+            qka_user_id=qka_user_id,
             device_key_hash=_hash_secret(device_key),
             computer_name=(computer_name or "").strip()[:256],
             device_fingerprint=fp[:256],
+            ad_computer_sid=sid[:256],
+            ad_computer_guid=guid[:64],
+            workstation_id=workstation_id,
             domain_joined_name=(domain_joined_name or "").strip()[:256],
             agent_version=(agent_version or "").strip()[:64],
             status=DEVICE_ACTIVE,
@@ -205,7 +259,18 @@ def enroll_device(
             last_heartbeat_at=now,
         )
         session.add(device)
-    row.consumed_at = now
+
+    if machine_row is not None:
+        machine_row.consumed_at = now
+        if workstation_id:
+            deploy_svc.mark_job_registered(session, workstation_id=workstation_id, device=device)
+            from qka_shared.models import AdWorkstation
+
+            ws_row = session.get(AdWorkstation, workstation_id)
+            if ws_row is not None:
+                ws_row.desktop_device_id = device.id
+    if code_row is not None:
+        code_row.consumed_at = now
     session.flush()
     return {
         "deviceId": str(device.id),
@@ -215,6 +280,7 @@ def enroll_device(
         "supportedExtensions": list(AGENT_SUPPORTED_EXTS),
         "defaultExcludes": list(DEFAULT_EXCLUDES),
         "contentUploadEnabled": False,
+        "enrollmentMode": "machine_identity" if machine_row is not None else "enrollment_code",
     }
 
 

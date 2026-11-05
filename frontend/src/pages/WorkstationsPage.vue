@@ -19,6 +19,16 @@
 
     <q-banner v-if="error" class="bg-negative text-white q-mb-md">{{ error }}</q-banner>
     <q-banner v-if="syncNote" class="bg-grey-2 q-mb-md">{{ syncNote }}</q-banner>
+    <q-banner v-if="deployPrereqBanner" class="bg-warning text-dark q-mb-md">
+      <div class="text-subtitle2">{{ t("workstations.deployPrereqTitle") }}</div>
+      <ul class="q-my-sm q-pl-md">
+        <li v-for="(b, i) in deployPrereqs?.blockers || []" :key="i">{{ b }}</li>
+      </ul>
+      <div class="text-caption">{{ deployPrereqs?.note }}</div>
+    </q-banner>
+    <q-banner v-else-if="deployPrereqs?.deployEnabled" class="bg-green-1 q-mb-md">
+      {{ t("workstations.deployReadyNote", { endpoint: deployPrereqs.httpsEndpoint, group: deployPrereqs.gpoTargetGroup }) }}
+    </q-banner>
     <q-banner v-if="scopeBanner" class="bg-blue-1 q-mb-md">
       <div class="row items-center">
         <div class="col">{{ scopeBanner }}</div>
@@ -89,7 +99,16 @@
         />
       </div>
       <div class="col-auto">
-        <q-btn color="primary" outline disable :label="t('workstations.deployAgent')" />
+        <q-btn
+          color="primary"
+          outline
+          :disable="!canDeploySelected"
+          :loading="deploying"
+          :label="t('workstations.deployAgent')"
+          @click="openDeploy"
+        >
+          <q-tooltip v-if="!canDeploySelected">{{ deployDisabledReason }}</q-tooltip>
+        </q-btn>
       </div>
     </div>
 
@@ -135,10 +154,47 @@
           <q-chip dense square outline :color="agentColor(props.row.agentStatus)" :label="props.value" />
         </q-td>
       </template>
+      <template #body-cell-deployStatus="props">
+        <q-td :props="props">
+          <div>{{ props.value }}</div>
+          <div v-if="props.row.deploymentJob?.lastError" class="text-caption text-negative">
+            {{ props.row.deploymentJob.lastError }}
+          </div>
+          <div v-else-if="props.row.deployAgent?.note && !props.row.deployAgent.enabled" class="text-caption text-grey-7">
+            {{ props.row.deployAgent.note }}
+          </div>
+        </q-td>
+      </template>
       <template #body-cell-actions="props">
         <q-td :props="props">
           <q-btn dense flat color="primary" :label="t('workstations.ping')" :loading="probingId === props.row.id" @click="pingOne(props.row)" />
           <q-btn dense flat color="primary" :label="t('workstations.assign')" @click="openAssign(props.row)" />
+          <q-btn
+            v-if="canRetryJob(props.row)"
+            dense
+            flat
+            color="primary"
+            :label="t('workstations.retryDeploy')"
+            :loading="jobBusyId === props.row.deploymentJob?.id"
+            @click="retryDeploy(props.row)"
+          />
+          <q-btn
+            v-if="canCancelJob(props.row)"
+            dense
+            flat
+            color="negative"
+            :label="t('workstations.cancelDeploy')"
+            :loading="jobBusyId === props.row.deploymentJob?.id"
+            @click="cancelDeploy(props.row)"
+          />
+          <q-btn
+            v-if="props.row.desktopDeviceId"
+            dense
+            flat
+            color="primary"
+            :label="t('workstations.openAgent')"
+            :to="{ name: 'employee-computers', query: { deviceId: props.row.desktopDeviceId } }"
+          />
         </q-td>
       </template>
     </q-table>
@@ -254,13 +310,46 @@
         </q-card-actions>
       </q-card>
     </q-dialog>
+
+    <q-dialog v-model="deployOpen" persistent>
+      <q-card style="min-width: 480px; max-width: 640px">
+        <q-card-section class="text-h6">{{ t("workstations.deployTitle") }}</q-card-section>
+        <q-card-section>
+          <div class="text-body2 q-mb-sm">{{ t("workstations.deployConfirmHint", { n: selectedRows.length }) }}</div>
+          <ul class="q-pl-md">
+            <li v-for="row in selectedRows" :key="row.id">
+              {{ row.computerName }}
+              <span class="text-grey-7">— {{ row.assignedEmployeeName || t("workstations.unassigned") }}</span>
+            </li>
+          </ul>
+          <div class="text-caption text-warning q-mb-md">{{ t("workstations.deployScopeWarning") }}</div>
+          <q-input
+            v-model="deployConfirmation"
+            dense
+            outlined
+            :label="t('workstations.deployConfirmLabel', { phrase: deployPrereqs?.confirmationPhrase || 'DEPLOY SELECTED' })"
+          />
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat :label="t('workstations.cancel')" v-close-popup />
+          <q-btn
+            color="primary"
+            unelevated
+            :loading="deploying"
+            :disable="deployConfirmation.trim() !== (deployPrereqs?.confirmationPhrase || '')"
+            :label="t('workstations.deployConfirm')"
+            @click="confirmDeploy"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
   </q-page>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { api, ApiError, type DirectoryUser, type Workstation } from "@/api";
+import { api, ApiError, type DeployPrerequisites, type DirectoryUser, type Workstation } from "@/api";
 
 const { t } = useI18n();
 const section = ref("workstations");
@@ -269,12 +358,17 @@ const syncing = ref(false);
 const probing = ref(false);
 const probingId = ref<string | null>(null);
 const busy = ref(false);
+const deploying = ref(false);
+const jobBusyId = ref<string | null>(null);
 const error = ref("");
 const loadFailed = ref(false);
 const syncNote = ref("");
 const probeProgress = ref("");
 const rows = ref<Workstation[]>([]);
 const selectedRows = ref<Workstation[]>([]);
+const deployPrereqs = ref<DeployPrerequisites | null>(null);
+const deployOpen = ref(false);
+const deployConfirmation = ref("");
 const total = ref(0);
 const summary = ref({ totalPresent: 0, assigned: 0, reachable: 0, noReply: 0, dnsFailed: 0, unchecked: 0 });
 const ous = ref<string[]>([]);
@@ -332,6 +426,12 @@ const columns = [
     sortable: true,
   },
   { name: "agentStatusLabel", label: t("workstations.colAgent"), field: "agentStatusLabel", align: "left" as const },
+  {
+    name: "deployStatus",
+    label: t("workstations.colDeployStatus"),
+    field: (r: Workstation) => r.deploymentJob?.status || r.deployAgent?.status || "—",
+    align: "left" as const,
+  },
   { name: "agentVersion", label: t("workstations.colAgentVersion"), field: (r: Workstation) => r.agentVersion || "—", align: "left" as const },
   {
     name: "lastHeartbeatAt",
@@ -378,6 +478,35 @@ const scopeBanner = computed(() => {
   const names = activeSyncOus.value.map((o) => o.name).join(", ");
   return t("workstations.scopeBanner", { ous: names });
 });
+const deployPrereqBanner = computed(
+  () => Boolean(deployPrereqs.value && !deployPrereqs.value.deployEnabled && deployPrereqs.value.blockers?.length),
+);
+const canDeploySelected = computed(() => {
+  if (!deployPrereqs.value?.deployEnabled) return false;
+  if (!selectedRows.value.length) return false;
+  if (selectedRows.value.length > (deployPrereqs.value.maxBulk || 50)) return false;
+  return selectedRows.value.every((r) => r.deployAgent?.enabled);
+});
+const deployDisabledReason = computed(() => {
+  if (!deployPrereqs.value?.deployEnabled) {
+    return (deployPrereqs.value?.blockers || []).join(" ") || t("workstations.deployNote");
+  }
+  if (!selectedRows.value.length) return t("workstations.deploySelectHint");
+  const blocked = selectedRows.value.filter((r) => !r.deployAgent?.enabled);
+  if (blocked.length) {
+    return blocked.map((r) => `${r.computerName}: ${r.deployAgent?.note || ""}`).join(" ");
+  }
+  return "";
+});
+
+function canRetryJob(row: Workstation) {
+  const st = row.deploymentJob?.status;
+  return st === "failed" || st === "waiting_for_computer" || st === "cancelled";
+}
+function canCancelJob(row: Workstation) {
+  const st = row.deploymentJob?.status;
+  return st === "requested" || st === "approved" || st === "scheduled" || st === "waiting_for_computer" || st === "installing";
+}
 
 function reachColor(status: string) {
   if (status === "reachable") return "positive";
@@ -647,6 +776,75 @@ async function saveAssign() {
   }
 }
 
+async function loadDeployPrereqs() {
+  try {
+    deployPrereqs.value = await api.workstationDeployPrerequisites();
+  } catch {
+    deployPrereqs.value = null;
+  }
+}
+
+function openDeploy() {
+  if (!canDeploySelected.value) return;
+  deployConfirmation.value = "";
+  deployOpen.value = true;
+}
+
+async function confirmDeploy() {
+  if (!canDeploySelected.value || !deployPrereqs.value) return;
+  deploying.value = true;
+  error.value = "";
+  try {
+    const result = await api.deployWorkstationAgents({
+      workstationIds: selectedRows.value.map((r) => r.id),
+      confirmation: deployConfirmation.value,
+      approve: true,
+    });
+    deployOpen.value = false;
+    syncNote.value = result.note;
+    if (result.realPcDeployExecuted) {
+      syncNote.value = `${result.note} (live install executed)`;
+    }
+    await reload();
+    await loadDeployPrereqs();
+  } catch (err) {
+    error.value = formatApiFailure(err, t("workstations.deployError"));
+  } finally {
+    deploying.value = false;
+  }
+}
+
+async function cancelDeploy(row: Workstation) {
+  const jobId = row.deploymentJob?.id;
+  if (!jobId) return;
+  jobBusyId.value = jobId;
+  error.value = "";
+  try {
+    await api.cancelWorkstationDeploy(jobId);
+    await reload();
+  } catch (err) {
+    error.value = formatApiFailure(err, t("workstations.deployError"));
+  } finally {
+    jobBusyId.value = null;
+  }
+}
+
+async function retryDeploy(row: Workstation) {
+  const jobId = row.deploymentJob?.id;
+  if (!jobId) return;
+  jobBusyId.value = jobId;
+  error.value = "";
+  try {
+    await api.retryWorkstationDeploy(jobId);
+    await reload();
+    await loadDeployPrereqs();
+  } catch (err) {
+    error.value = formatApiFailure(err, t("workstations.deployError"));
+  } finally {
+    jobBusyId.value = null;
+  }
+}
+
 async function onRequest(req: {
   pagination: { page: number; rowsPerPage: number; sortBy?: string | null; descending?: boolean };
 }) {
@@ -674,6 +872,6 @@ onMounted(async () => {
   } catch {
     employees.value = [];
   }
-  await reload();
+  await Promise.all([reload(), loadDeployPrereqs()]);
 });
 </script>

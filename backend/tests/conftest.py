@@ -311,6 +311,55 @@ def seed_db():
                 """
             )
         )
+        session.execute(text("ALTER TABLE qka_next_desktop_device ADD COLUMN IF NOT EXISTS ad_computer_sid VARCHAR(256) NOT NULL DEFAULT ''"))
+        session.execute(text("ALTER TABLE qka_next_desktop_device ADD COLUMN IF NOT EXISTS ad_computer_guid VARCHAR(64) NOT NULL DEFAULT ''"))
+        session.execute(text("ALTER TABLE qka_next_desktop_device ADD COLUMN IF NOT EXISTS workstation_id UUID NULL"))
+        session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS qka_next_agent_deployment_job (
+                    id UUID PRIMARY KEY,
+                    workstation_id UUID NOT NULL,
+                    assigned_qka_user_id UUID NOT NULL,
+                    requested_by_user_id UUID NOT NULL,
+                    approved_by_user_id UUID NULL,
+                    status INTEGER NOT NULL DEFAULT 0,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    last_error VARCHAR(2000) NOT NULL DEFAULT '',
+                    msi_version VARCHAR(64) NOT NULL DEFAULT '',
+                    engine VARCHAR(64) NOT NULL DEFAULT 'blocked',
+                    enrollment_mode VARCHAR(64) NOT NULL DEFAULT 'machine_identity',
+                    gpo_target_group VARCHAR(512) NOT NULL DEFAULT '',
+                    desktop_device_id UUID NULL,
+                    confirmation_phrase VARCHAR(128) NOT NULL DEFAULT '',
+                    created_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL,
+                    approved_at TIMESTAMPTZ NULL,
+                    scheduled_at TIMESTAMPTZ NULL,
+                    installed_at TIMESTAMPTZ NULL,
+                    cancelled_at TIMESTAMPTZ NULL
+                )
+                """
+            )
+        )
+        session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS qka_next_machine_enrollment_token (
+                    id UUID PRIMARY KEY,
+                    job_id UUID NOT NULL,
+                    workstation_id UUID NOT NULL,
+                    qka_user_id UUID NOT NULL,
+                    ad_computer_sid VARCHAR(256) NOT NULL,
+                    ad_computer_guid VARCHAR(64) NOT NULL DEFAULT '',
+                    token_hash VARCHAR(128) NOT NULL UNIQUE,
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    consumed_at TIMESTAMPTZ NULL,
+                    created_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+        )
         session.execute(
             text(
                 """
@@ -735,6 +784,8 @@ def seed_db():
         session.execute(text("DELETE FROM allowed_email"))
         session.execute(text("DELETE FROM google_workspace_account"))
         session.execute(text("DELETE FROM external_identity"))
+        session.execute(text("DELETE FROM qka_next_machine_enrollment_token"))
+        session.execute(text("DELETE FROM qka_next_agent_deployment_job"))
         session.execute(text("DELETE FROM qka_next_desktop_device_folder"))
         session.execute(text("DELETE FROM qka_next_desktop_device"))
         session.execute(text("DELETE FROM qka_next_desktop_enrollment_code"))

@@ -19,7 +19,10 @@ admin_router = APIRouter(prefix="/api/v1/admin/desktop-devices", tags=["desktop-
 
 
 class EnrollBody(BaseModel):
-    enrollmentCode: str
+    enrollmentCode: str = ""
+    machineEnrollmentToken: str = ""
+    adComputerSid: str = ""
+    adComputerGuid: str = ""
     computerName: str = ""
     deviceFingerprint: str
     domainJoinedName: str = ""
@@ -107,6 +110,9 @@ def enroll(
             session,
             settings,
             enrollment_code=body.enrollmentCode,
+            machine_enrollment_token=body.machineEnrollmentToken,
+            ad_computer_sid=body.adComputerSid,
+            ad_computer_guid=body.adComputerGuid,
             computer_name=body.computerName,
             device_fingerprint=body.deviceFingerprint,
             domain_joined_name=body.domainJoinedName,

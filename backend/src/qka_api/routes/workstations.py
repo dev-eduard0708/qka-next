@@ -45,6 +45,12 @@ class BulkPingBody(BaseModel):
     concurrency: int = Field(default=8, ge=1, le=8)
 
 
+class DeployBody(BaseModel):
+    workstationIds: list[uuid.UUID] = Field(default_factory=list)
+    confirmation: str = ""
+    approve: bool = True
+
+
 def _require_super_admin(request: Request, settings: Settings, session: Session, *, mutating: bool):
     if mutating:
         require_csrf(request)
@@ -85,6 +91,7 @@ def list_workstations(
     _require_super_admin(request, settings, session, mutating=False)
     return svc.list_workstations(
         session,
+        settings=settings,
         search=search,
         ou=ou,
         account_status=accountStatus,
@@ -193,6 +200,86 @@ def ping_bulk(
         return result
     except svc.WorkstationValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/deploy/prerequisites")
+def deploy_prerequisites(
+    request: Request,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings_dep),
+):
+    _require_super_admin(request, settings, session, mutating=False)
+    from qka_api.services import agent_deployment as deploy_svc
+
+    return deploy_svc.deployment_prerequisites(settings)
+
+
+@router.post("/deploy")
+def request_deploy(
+    body: DeployBody,
+    request: Request,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings_dep),
+):
+    """Create approved deployment jobs for selected workstations only (never entire OU)."""
+    from qka_api.services import agent_deployment as deploy_svc
+
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    try:
+        result = deploy_svc.request_deployments(
+            session,
+            settings,
+            actor=actor,
+            workstation_ids=body.workstationIds,
+            confirmation=body.confirmation,
+            approve=body.approve,
+        )
+        session.commit()
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/deploy/{job_id}/cancel")
+def cancel_deploy(
+    job_id: uuid.UUID,
+    request: Request,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings_dep),
+):
+    from qka_api.services import agent_deployment as deploy_svc
+
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    try:
+        result = deploy_svc.cancel_job(session, actor=actor, job_id=job_id)
+        session.commit()
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/deploy/{job_id}/retry")
+def retry_deploy(
+    job_id: uuid.UUID,
+    request: Request,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings_dep),
+):
+    from qka_api.services import agent_deployment as deploy_svc
+
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    try:
+        result = deploy_svc.retry_job(session, settings, actor=actor, job_id=job_id)
+        session.commit()
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/{workstation_id}/ping")

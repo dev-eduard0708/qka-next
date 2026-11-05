@@ -12,7 +12,9 @@ from sqlalchemy.orm import Session
 
 from qka_api.ldap_client import LdapGateway
 from qka_api.services import active_directory as ad_svc
+from qka_api.services import agent_deployment as deploy_svc
 from qka_api.services.network_probe import NetworkProbe, default_network_probe
+from qka_shared.config import Settings, get_settings
 from qka_shared.models import (
     REACH_DNS_FAILED,
     REACH_NO_REPLY,
@@ -166,7 +168,44 @@ def _match_desktop_device(session: Session, ws: AdWorkstation) -> DesktopDevice 
     return None
 
 
-def workstation_dto(session: Session, ws: AdWorkstation) -> dict[str, Any]:
+def _deploy_agent_fields(settings: Settings, ws: AdWorkstation, device: DesktopDevice | None, job_dto: dict | None) -> dict[str, Any]:
+    prereq = deploy_svc.deployment_prerequisites(settings)
+    assigned = bool(ws.assigned_qka_user_id)
+    has_sid = bool((ws.object_sid or "").strip())
+    can_select = bool(ws.is_present and ws.account_enabled and assigned and has_sid)
+    enabled = bool(prereq["deployEnabled"] and can_select and device is None)
+    status = "ready" if enabled else "blocked"
+    if device is not None:
+        status = "agent_registered"
+    elif job_dto is not None:
+        status = job_dto.get("status") or "requested"
+    note = ""
+    if not assigned:
+        note = "Assign an AD-linked employee before deploy."
+    elif not has_sid:
+        note = "AD objectSid is required for machine-identity enrollment."
+    elif device is not None:
+        note = "Agent already registered for this workstation."
+    elif prereq["blockers"]:
+        note = "; ".join(prereq["blockers"])
+    else:
+        note = prereq.get("note") or ""
+    return {
+        "enabled": enabled,
+        "status": status,
+        "note": note,
+        "prerequisites": {
+            "httpsConfigured": prereq["httpsConfigured"],
+            "gpoEngineAvailable": prereq["gpoEngineAvailable"],
+            "msiPresent": prereq["msiPresent"],
+            "tlsTrust": prereq["tlsTrust"],
+            "machineIdentityEnrollmentReady": prereq["machineIdentityEnrollmentReady"],
+        },
+    }
+
+
+def workstation_dto(session: Session, ws: AdWorkstation, settings: Settings | None = None) -> dict[str, Any]:
+    settings = settings or get_settings()
     employee_name = ""
     employee_email = ""
     if ws.assigned_qka_user_id:
@@ -174,10 +213,16 @@ def workstation_dto(session: Session, ws: AdWorkstation) -> dict[str, Any]:
         if user:
             employee_name = user.display_name or ""
             employee_email = user.contact_email or ""
-    device = _match_desktop_device(session, ws)
+    device = None
+    if ws.desktop_device_id:
+        device = session.get(DesktopDevice, ws.desktop_device_id)
+    if device is None:
+        device = _match_desktop_device(session, ws)
     if device and ws.desktop_device_id != device.id:
         ws.desktop_device_id = device.id
     agent = _agent_fields(device)
+    job = deploy_svc.latest_job_for_workstation(session, ws.id)
+    job_payload = deploy_svc.job_dto(job, ws) if job is not None else None
     return {
         "id": str(ws.id),
         "connectionId": str(ws.connection_id),
@@ -209,11 +254,10 @@ def workstation_dto(session: Session, ws: AdWorkstation) -> dict[str, Any]:
         "indexingStatus": agent["indexingStatus"],
         "online": agent["online"],
         "desktopDeviceId": agent["desktopDeviceId"],
-        "deployAgent": {
-            "enabled": False,
-            "status": "not_implemented",
-            "note": "Deploy Agent stays disabled until the real GPO/deployment mechanism is implemented.",
-        },
+        "objectGuid": ws.object_guid,
+        "objectSid": ws.object_sid,
+        "deployAgent": _deploy_agent_fields(settings, ws, device, job_payload),
+        "deploymentJob": job_payload,
     }
 
 
@@ -505,6 +549,7 @@ def _saved_sync_ou_dns(session: Session, connection_id: uuid.UUID | None = None)
 def list_workstations(
     session: Session,
     *,
+    settings: Settings | None = None,
     search: str = "",
     ou: str = "",
     account_status: str = "",
@@ -519,6 +564,7 @@ def list_workstations(
     page: int = 1,
     page_size: int = 25,
 ) -> dict[str, Any]:
+    settings = settings or get_settings()
     page = max(1, int(page))
     page_size = max(1, min(int(page_size), 200))
     q = select(AdWorkstation)
@@ -565,7 +611,7 @@ def list_workstations(
     if agent_status:
         filtered: list[AdWorkstation] = []
         for ws in rows:
-            dto = workstation_dto(session, ws)
+            dto = workstation_dto(session, ws, settings)
             if agent_status == "not_registered" and dto["agentStatus"] == "not_registered":
                 filtered.append(ws)
             elif agent_status == "connected" and dto["agentStatus"] == "connected":
@@ -598,7 +644,7 @@ def list_workstations(
     total = len(rows)
     start = (page - 1) * page_size
     page_rows = rows[start : start + page_size]
-    items = [workstation_dto(session, ws) for ws in page_rows]
+    items = [workstation_dto(session, ws, settings) for ws in page_rows]
 
     # Summary + OU filter options match the same scoped row set shown in the table.
     summary = {
