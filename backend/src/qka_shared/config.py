@@ -103,6 +103,10 @@ class Settings(BaseSettings):
     agent_public_base_url: str = ""
     agent_enrollment_hours: int = 24
     agent_min_version: str = "0.1.0"
+    # Computer-readable MSI UNC for GPO Software Installation / startup (no secrets in share).
+    agent_msi_unc: str = ""
+    # hkml_out_of_band = per-PC token via Provision-MachineEnrollmentToken.ps1 (never SYSVOL/MSI).
+    agent_token_provisioning: str = ""
 
     @property
     def cors_origin_list(self) -> list[str]:

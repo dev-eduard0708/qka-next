@@ -76,23 +76,27 @@ def deployment_prerequisites(settings: Settings) -> dict:
         and "localhost" not in parsed.netloc.lower()
         and "127.0.0.1" not in parsed.netloc
     )
-    gpo = gpo_engine.probe_gpo_engine()
-    # HMAC machineProof is implemented, but is only safe when the one-time token was
-    # provisioned solely to the target computer (GPO/HKLM). API plaintext return to an
-    # admin is not machine-bound delivery. Kerberos machine auth is NOT implemented.
-    machine_proof_ready = False
+    msi_unc = (getattr(settings, "agent_msi_unc", None) or "").strip()
+    gpo = gpo_engine.probe_gpo_engine(msi_unc=msi_unc)
+    # Secure mode: one-time token delivered by Provision-MachineEnrollmentToken.ps1 → HKLM
+    # (never MSI / GPO Preferences / SYSVOL). HMAC proof ≠ Kerberos.
+    provisioning_mode = (getattr(settings, "agent_token_provisioning", None) or "").strip().lower()
+    hkml_mode = provisioning_mode in {"hkml_out_of_band", "hkml", "registry_out_of_band"}
+    machine_proof_ready = bool(hkml_mode and gpo.msi_unc_reachable and gpo.ad_gpo_linked)
     machine_proof = {
         "hmacImplemented": True,
         "tokenEmbeddedInMsi": False,
         "kerberosMachineAuth": False,
-        "securePerComputerProvisioning": False,
+        "securePerComputerProvisioning": machine_proof_ready,
+        "provisioningMode": provisioning_mode or "unset",
+        "provisioningScript": "scripts/gpo-agent-deploy/Provision-MachineEnrollmentToken.ps1",
         "replayProtection": "one_time_token_consume",
         "revocation": "desktop_device_revoke_rotates_device_key",
-        "status": "blocked",
+        "status": "ready" if machine_proof_ready else "blocked",
         "detail": (
-            "machineProof=HMAC-SHA256(token, computerSid) rejects SID-only spoofing without the token, "
-            "but the token must be delivered only to the intended PC (computer-targeted GPO registry "
-            "under HKLM). Do not claim Kerberos machine authentication. Do not log or embed the token."
+            "machineProof=HMAC-SHA256(token, computerSid). Deliver the one-time token only via "
+            "Provision-MachineEnrollmentToken.ps1 to HKLM on the selected PC. Never put tokens in "
+            "MSI, GPO Preferences, or SYSVOL. Not Kerberos machine authentication."
         ),
     }
     blockers: list[str] = []
@@ -104,21 +108,37 @@ def deployment_prerequisites(settings: Settings) -> dict:
     if not gpo.msi_present:
         blockers.append(f"MSI missing at {gpo.msi_path}.")
     if not gpo.available:
-        blockers.append(gpo.reason)
-    if not machine_proof_ready:
+        # Surface hard GPO/UNC/membership blockers only (skip success text / NOTE: lines).
+        for part in (gpo.reason or "").split(". "):
+            text = part.strip().rstrip(".")
+            if not text or text.startswith("NOTE:"):
+                continue
+            line = text if text.endswith(".") else text + "."
+            if line not in blockers:
+                blockers.append(line)
+    if not hkml_mode:
         blockers.append(
-            "Secure per-computer machineEnrollmentToken provisioning is not complete "
-            "(HMAC proof alone is not Kerberos; deliver token via GPO/HKLM to the pilot PC only)."
+            "Set QKA_AGENT_TOKEN_PROVISIONING=hkml_out_of_band and use "
+            "Provision-MachineEnrollmentToken.ps1 for per-PC HKLM delivery (no SYSVOL secrets)."
         )
-    tls_trust = "blocked" if not https_ok else "unknown"
+    elif not machine_proof_ready:
+        blockers.append(
+            "Secure per-computer token provisioning is not ready "
+            "(need reachable MSI UNC + linked pilot GPO + hkml_out_of_band mode)."
+        )
+    # tlsTrust: server-side HTTPS health already validated in ops; clients still need CER trust.
+    tls_trust = "server_ok_pilot_cer_required" if https_ok else "blocked"
+    deploy_enabled = bool(https_ok and gpo.available and machine_proof_ready and not blockers)
     return {
-        "deployEnabled": False if blockers else bool(https_ok and gpo.available and machine_proof_ready),
+        "deployEnabled": deploy_enabled,
         "httpsConfigured": https_ok,
         "httpsEndpoint": base if https_ok else "",
         "httpsPreferredHost": "qka-agent.qehc.edu.sa",
         "tlsTrust": tls_trust,
         "msiPresent": gpo.msi_present,
         "msiPath": gpo.msi_path,
+        "msiUnc": gpo.msi_unc,
+        "msiUncReachable": gpo.msi_unc_reachable,
         "gpoEngineAvailable": gpo.available,
         "gpoReason": gpo.reason,
         "gpoTargetGroup": gpo.target_group,
@@ -138,11 +158,11 @@ def deployment_prerequisites(settings: Settings) -> dict:
         "blockers": blockers,
         "confirmationPhrase": CONFIRM_PHRASE,
         "maxBulk": 50,
-        "realPcDeployAllowed": False,
+        "realPcDeployAllowed": deploy_enabled,
         "note": (
-            "Deploy Agent stays disabled until trusted HTTPS, GPMC + linked/filtered pilot GPO, "
-            "pilot computer group membership, and secure per-computer token provisioning are ready. "
-            "Ping/GPO assignment alone never counts as installation success."
+            "Deploy Agent enables only for selected computers after HTTPS, MSI UNC, linked "
+            "pilot-scoped GPO, pilot group membership, and hkml_out_of_band token mode are ready. "
+            "Confirmation phrase required. Install success = agent registration + heartbeat."
         ),
     }
 
@@ -202,7 +222,7 @@ def request_deployments(
     if len(ids) > int(prereq["maxBulk"]):
         raise ValueError(f"Select at most {prereq['maxBulk']} workstations per batch.")
 
-    gpo = gpo_engine.probe_gpo_engine()
+    gpo = gpo_engine.probe_gpo_engine(msi_unc=(getattr(settings, "agent_msi_unc", None) or "").strip())
     jobs: list[dict] = []
     tokens_issued = 0
     computer_names: list[str] = []
@@ -278,6 +298,7 @@ def request_deployments(
         server_base_url=prereq["httpsEndpoint"],
         msi_path=gpo.msi_path,
         target_group=gpo.target_group,
+        msi_unc=gpo.msi_unc,
     )
 
     return {
@@ -287,11 +308,20 @@ def request_deployments(
         "jobs": jobs,
         "tokensIssued": tokens_issued,
         "gpoManifest": manifest,
+        "tokenProvisioning": {
+            "mode": "hkml_out_of_band",
+            "script": "scripts/gpo-agent-deploy/Provision-MachineEnrollmentToken.ps1",
+            "instruction": (
+                "For each job, run Provision-MachineEnrollmentToken.ps1 -Token <machineEnrollmentToken> "
+                "-IConfirmProvisionToThisComputer on that pilot PC (or Invoke-Command with your admin rights). "
+                "Do not paste tokens into GPO/SYSVOL/MSI. Do not log the token."
+            ),
+        },
         "realPcDeployExecuted": False,
         "note": (
-            "Jobs scheduled for selected computers only. Domain Ops applies the dedicated "
-            "GPO to the approved computer group; agent registration/heartbeat proves install. "
-            "QKA does not execute unrestricted remote PowerShell."
+            "Jobs scheduled for selected computers only. GPO installs MSI from UNC; "
+            "provision the one-time HKLM token out-of-band; agent registration/heartbeat proves install. "
+            "QKA does not execute unrestricted remote PowerShell or use Domain Admin credentials."
         ),
     }
 

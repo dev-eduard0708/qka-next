@@ -343,6 +343,24 @@
         </q-card-actions>
       </q-card>
     </q-dialog>
+
+    <q-dialog v-model="tokenOpen" persistent>
+      <q-card style="min-width: 520px; max-width: 720px">
+        <q-card-section class="text-h6">{{ t("workstations.tokenTitle") }}</q-card-section>
+        <q-card-section>
+          <div class="text-body2 q-mb-sm">{{ t("workstations.tokenHint") }}</div>
+          <div class="text-caption text-grey-7 q-mb-md">{{ tokenInstruction }}</div>
+          <div v-for="job in tokenJobs" :key="job.id" class="q-mb-md">
+            <div class="text-subtitle2">{{ job.computerName }}</div>
+            <code class="text-body2" style="word-break: break-all">{{ job.machineEnrollmentToken }}</code>
+          </div>
+          <div class="text-caption text-negative">{{ t("workstations.tokenNeverSysvol") }}</div>
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn color="primary" unelevated :label="t('workstations.tokenDone')" @click="closeTokenDialog" />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
   </q-page>
 </template>
 
@@ -369,6 +387,9 @@ const selectedRows = ref<Workstation[]>([]);
 const deployPrereqs = ref<DeployPrerequisites | null>(null);
 const deployOpen = ref(false);
 const deployConfirmation = ref("");
+const tokenOpen = ref(false);
+const tokenInstruction = ref("");
+const tokenJobs = ref<Array<{ id: string; computerName: string; machineEnrollmentToken: string }>>([]);
 const total = ref(0);
 const summary = ref({ totalPresent: 0, assigned: 0, reachable: 0, noReply: 0, dnsFailed: 0, unchecked: 0 });
 const ous = ref<string[]>([]);
@@ -802,8 +823,17 @@ async function confirmDeploy() {
     });
     deployOpen.value = false;
     syncNote.value = result.note;
-    if (result.realPcDeployExecuted) {
-      syncNote.value = `${result.note} (live install executed)`;
+    const withTokens = (result.jobs || [])
+      .filter((j) => j.machineEnrollmentToken)
+      .map((j) => ({
+        id: j.id,
+        computerName: j.computerName,
+        machineEnrollmentToken: String(j.machineEnrollmentToken),
+      }));
+    if (withTokens.length) {
+      tokenJobs.value = withTokens;
+      tokenInstruction.value = result.tokenProvisioning?.instruction || t("workstations.tokenHint");
+      tokenOpen.value = true;
     }
     await reload();
     await loadDeployPrereqs();
@@ -812,6 +842,12 @@ async function confirmDeploy() {
   } finally {
     deploying.value = false;
   }
+}
+
+function closeTokenDialog() {
+  tokenOpen.value = false;
+  tokenJobs.value = [];
+  tokenInstruction.value = "";
 }
 
 async function cancelDeploy(row: Workstation) {

@@ -1,13 +1,14 @@
 """Least-privilege GPO deployment capability probe (no unrestricted remoting).
 
-QKA never runs arbitrary PowerShell against domain PCs. Managed deploy uses an
-approved computer-group / dedicated GPO path when Domain Ops has installed RSAT
-GPMC and delegated the QKA deployment GPO. Until those prerequisites exist,
-this engine reports unavailable and Deploy stays blocked.
+QKA never runs arbitrary PowerShell against domain PCs and never uses Domain Admin
+credentials in-app. Managed deploy records jobs + machine-bound enrollment tokens;
+Domain Ops applies the dedicated GPO on an authorized GPMC host. GPMC need not live
+on the QKA API host once AD shows the GPO linked and pilot-scoped.
 """
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -17,7 +18,6 @@ from pathlib import Path
 DEFAULT_MSI_PATH = Path(r"C:\QehcAI\QKA-Next\agent\dist\QKA-Agent.msi")
 DEFAULT_TARGET_GROUP = "QKA-Agent-Pilot-Computers"
 DEFAULT_GPO_NAME = "QKA-Desktop-Agent-Deployment"
-# Existing domain GPO — never recreate; look up by GUID first.
 DEFAULT_GPO_GUID = "{73E8998A-A3B3-435F-9219-419C331BA2D4}"
 
 
@@ -29,6 +29,8 @@ class GpoEngineStatus:
     msi_path: str
     msi_present: bool
     gpmc_present: bool
+    msi_unc: str = ""
+    msi_unc_reachable: bool = False
     ad_group_exists: bool = False
     ad_group_member_count: int | None = None
     ad_gpo_exists: bool = False
@@ -66,6 +68,16 @@ def _gpmc_tools_present() -> bool:
     except Exception:
         pass
     return False
+
+
+def _unc_reachable(unc: str) -> bool:
+    path = (unc or "").strip()
+    if not path:
+        return False
+    try:
+        return Path(path).is_file()
+    except Exception:
+        return False
 
 
 def _probe_ad_objects(*, target_group: str, gpo_name: str) -> dict:
@@ -131,8 +143,6 @@ $result | ConvertTo-Json -Compress
         raw = (completed.stdout or "").strip()
         if not raw:
             return out
-        import json
-
         data = json.loads(raw)
         out["groupExists"] = bool(data.get("groupExists"))
         members = data.get("groupMembers")
@@ -153,43 +163,67 @@ def probe_gpo_engine(
     msi_path: Path | None = None,
     target_group: str = DEFAULT_TARGET_GROUP,
     gpo_name: str = DEFAULT_GPO_NAME,
+    msi_unc: str = "",
 ) -> GpoEngineStatus:
     path = msi_path or DEFAULT_MSI_PATH
     msi_present = path.is_file()
     gpmc = _gpmc_tools_present()
+    unc = (msi_unc or "").strip()
+    unc_ok = _unc_reachable(unc) if unc else False
     ad = _probe_ad_objects(target_group=target_group, gpo_name=gpo_name)
 
     reasons: list[str] = []
     if not msi_present:
         reasons.append("QKA-Agent.msi is missing on the build host.")
-    if not gpmc:
+    if unc and not unc_ok:
+        reasons.append(f"MSI UNC is not reachable: {unc}")
+    if not unc:
         reasons.append(
-            "Group Policy Management tools (Get-GPO / GPMC) are not available to this QKA process. "
-            "Install RSAT GPMC with elevation on the management host."
+            "Computer-readable MSI UNC is not configured (set QKA_AGENT_MSI_UNC after New-QkaAgentMsiShare.ps1)."
         )
     if not ad["groupExists"]:
         reasons.append(f"AD security group '{target_group}' was not found.")
     elif ad["groupMembers"] == 0:
         reasons.append(
             f"AD group '{target_group}' exists but has zero computer members — "
-            "add only the approved pilot computer(s)."
+            "add only the approved pilot computer via Add-QkaPilotComputer.ps1 -IConfirmAddPilotComputer."
         )
     if not ad["gpoExists"]:
         reasons.append(f"Dedicated GPO '{gpo_name}' was not found in AD.")
     elif not ad["gpoLinked"]:
         reasons.append(
             f"GPO '{ad['gpoDisplayName'] or gpo_name}' exists but is not linked to any OU. "
-            "Link it with security filtering to the pilot computer group only (never Authenticated Users / entire OU)."
+            "On a GPMC host run Configure-QkaAgentGpo.ps1 with security filtering to the pilot "
+            "computer group only (never Authenticated Users / entire domain)."
+        )
+    if not gpmc:
+        # Informational for ops — AD-linked GPO can still be ready when managed elsewhere.
+        reasons.append(
+            "NOTE: GPMC/Get-GPO is not on this QKA API host — configure/link the GPO from an "
+            "authorized AD management host (scripts/gpo-agent-deploy)."
         )
 
-    # Engine is "available" only when local GPMC tools exist AND AD objects are present.
-    # Empty pilot group / unlinked GPO still block deployEnabled via reasons.
-    available = bool(msi_present and gpmc and ad["groupExists"] and ad["gpoExists"] and not reasons)
+    # Available when MSI + UNC + AD group + linked GPO + ≥1 pilot member.
+    # Local GPMC is NOT required on the API host (ops may use another management PC).
+    hard = [
+        r
+        for r in reasons
+        if not r.startswith("NOTE:")
+    ]
+    available = bool(
+        msi_present
+        and unc_ok
+        and ad["groupExists"]
+        and ad["gpoExists"]
+        and ad["gpoLinked"]
+        and (ad["groupMembers"] or 0) > 0
+        and not hard
+    )
 
     if not reasons:
         reason = (
-            "GPO tools and AD objects detected. Deploy still requires trusted HTTPS, "
-            "Super Admin approval, pilot group membership, and secure token provisioning."
+            "GPO AD objects, MSI UNC, and pilot membership look ready. Deploy still requires "
+            "trusted HTTPS, Super Admin confirmation, and HKLM out-of-band token provisioning."
         )
     else:
         reason = " ".join(reasons)
@@ -201,6 +235,8 @@ def probe_gpo_engine(
         msi_path=str(path),
         msi_present=msi_present,
         gpmc_present=gpmc,
+        msi_unc=unc,
+        msi_unc_reachable=unc_ok,
         ad_group_exists=bool(ad["groupExists"]),
         ad_group_member_count=ad["groupMembers"],
         ad_gpo_exists=bool(ad["gpoExists"]),
@@ -217,32 +253,37 @@ def build_gpo_package_manifest(
     server_base_url: str,
     msi_path: str,
     target_group: str,
+    msi_unc: str = "",
 ) -> dict:
-    """Describe the intended GPO Software Installation package (no domain writes)."""
+    """Describe the intended GPO package (no domain writes from QKA)."""
     names = [n.strip() for n in computer_names if (n or "").strip()]
     if not names:
         raise ValueError("Select at least one computer for deployment.")
     if len(names) > 50:
         raise ValueError("Bulk deployment is limited to 50 computers per approval batch.")
+    package_path = (msi_unc or "").strip() or msi_path
     return {
-        "packageType": "msi_software_installation",
+        "packageType": "msi_unc_startup_or_software_installation",
         "msiPath": msi_path,
+        "msiUnc": package_path,
         "silentArgs": f'/qn QKASERVERURL={server_base_url}',
         "targetGroup": target_group,
         "computers": names,
         "scopeRule": "computer_group_only",
-        "forbidden": ["entire_ou", "all_domain", "unrestricted_psexec", "unrestricted_winrm"],
+        "forbidden": ["entire_ou", "all_domain", "unrestricted_psexec", "unrestricted_winrm", "token_in_sysvol"],
         "tokenProvisioning": {
-            "required": "per_computer_hkml_machine_enrollment_token",
-            "forbidden": ["embed_in_msi", "shared_domain_secret", "log_plaintext_token"],
+            "mode": "hkml_out_of_band",
+            "script": "scripts/gpo-agent-deploy/Provision-MachineEnrollmentToken.ps1",
+            "registryValue": r"HKLM\SOFTWARE\QKA\DesktopAgent\MachineEnrollmentToken",
+            "forbidden": ["embed_in_msi", "shared_domain_secret", "gpo_registry_preference_token", "log_plaintext_token"],
             "note": (
-                "Deliver machineEnrollmentToken only via computer-targeted GPO/Registry "
-                "(HKLM) to the selected pilot PC. HMAC machineProof proves token possession "
-                "for the bound computer SID — it is not Kerberos machine authentication."
+                "Deliver machineEnrollmentToken only via Provision-MachineEnrollmentToken.ps1 "
+                "to the selected pilot PC HKLM. HMAC machineProof proves token possession for the "
+                "bound computer SID — it is not Kerberos machine authentication."
             ),
         },
         "note": (
-            "QKA records the job and machine-bound enrollment token. Domain Ops applies "
-            "the dedicated GPO to the approved computer group only."
+            "QKA records the job and one-time machine-bound token. Domain Ops applies the "
+            "dedicated GPO to the approved computer group; agent registration/heartbeat proves install."
         ),
     }

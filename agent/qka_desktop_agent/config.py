@@ -14,8 +14,8 @@ def default_data_dir() -> Path:
     return Path(program_data) / "QKA" / "DesktopAgent"
 
 
-def _registry_server_base_url() -> str:
-    """Read MSI-written HKLM\\Software\\QKA\\DesktopAgent\\ServerBaseUrl (QKASERVERURL)."""
+def _registry_value(name: str) -> str:
+    """Read HKLM\\Software\\QKA\\DesktopAgent\\<name> (MSI / out-of-band provisioning)."""
     if os.name != "nt":
         return ""
     try:
@@ -24,10 +24,49 @@ def _registry_server_base_url() -> str:
         return ""
     try:
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"Software\QKA\DesktopAgent") as key:
-            raw, _ = winreg.QueryValueEx(key, "ServerBaseUrl")
+            raw, _ = winreg.QueryValueEx(key, name)
         return str(raw or "").strip()
     except OSError:
         return ""
+
+
+def _registry_server_base_url() -> str:
+    """Read MSI-written ServerBaseUrl (QKASERVERURL)."""
+    return _registry_value("ServerBaseUrl")
+
+
+def _registry_machine_enrollment_token() -> str:
+    """One-time token from Provision-MachineEnrollmentToken.ps1 (never from GPO/SYSVOL)."""
+    return _registry_value("MachineEnrollmentToken")
+
+
+def _clear_registry_machine_enrollment_token() -> None:
+    if os.name != "nt":
+        return
+    try:
+        import winreg
+    except ImportError:
+        return
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"Software\QKA\DesktopAgent",
+            0,
+            winreg.KEY_SET_VALUE,
+        ) as key:
+            winreg.DeleteValue(key, "MachineEnrollmentToken")
+    except OSError:
+        # Local Service may lack SET_VALUE; value can be emptied instead.
+        try:
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"Software\QKA\DesktopAgent",
+                0,
+                winreg.KEY_SET_VALUE,
+            ) as key:
+                winreg.SetValueEx(key, "MachineEnrollmentToken", 0, winreg.REG_SZ, "")
+        except OSError:
+            pass
 
 
 @dataclass
@@ -82,6 +121,7 @@ def load_config() -> AgentConfig:
     machine_token = (
         os.environ.get("QKA_AGENT_MACHINE_ENROLLMENT_TOKEN")
         or values.get("machineEnrollmentToken")
+        or _registry_machine_enrollment_token()
         or ""
     ).strip()
     verify_tls = str(os.environ.get("QKA_AGENT_VERIFY_TLS", values.get("verifyTls", True))).lower() not in {
@@ -113,28 +153,27 @@ def save_credentials(cfg: AgentConfig, device_id: str, device_key: str) -> None:
         os.chmod(cfg.credentials_path, 0o600)
     except OSError:
         pass
-    # Drop one-time enrollment secrets from JSON after successful enroll (never log them).
+    # Drop one-time enrollment secrets from JSON/HKLM after successful enroll (never log them).
     clear_enrollment_secrets(cfg)
 
 
 def clear_enrollment_secrets(cfg: AgentConfig) -> None:
-    """Remove enrollmentCode / machineEnrollmentToken from agent.config.json after use."""
+    """Remove enrollmentCode / machineEnrollmentToken from JSON + HKLM after use."""
     path = cfg.config_path
-    if not path.exists():
-        cfg.enrollment_code = ""
-        cfg.machine_enrollment_token = ""
-        return
-    try:
-        values = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
-    changed = False
-    for key in ("enrollmentCode", "machineEnrollmentToken"):
-        if key in values and values.get(key):
-            values[key] = ""
-            changed = True
-    if changed:
-        path.write_text(json.dumps(values, indent=2), encoding="utf-8")
+    if path.exists():
+        try:
+            values = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            values = None
+        if isinstance(values, dict):
+            changed = False
+            for key in ("enrollmentCode", "machineEnrollmentToken"):
+                if key in values and values.get(key):
+                    values[key] = ""
+                    changed = True
+            if changed:
+                path.write_text(json.dumps(values, indent=2), encoding="utf-8")
+    _clear_registry_machine_enrollment_token()
     cfg.enrollment_code = ""
     cfg.machine_enrollment_token = ""
 

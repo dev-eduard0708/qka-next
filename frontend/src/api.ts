@@ -214,6 +214,8 @@ export type DeployPrerequisites = {
   tlsTrust: string;
   msiPresent: boolean;
   msiPath: string;
+  msiUnc?: string;
+  msiUncReachable?: boolean;
   gpoEngineAvailable: boolean;
   gpoReason: string;
   gpoTargetGroup: string;
@@ -864,6 +866,7 @@ export const api = {
       }>;
       tokensIssued: number;
       gpoManifest: Record<string, unknown> | null;
+      tokenProvisioning?: { mode: string; script: string; instruction: string };
       realPcDeployExecuted: boolean;
       note: string;
     }>("/api/v1/admin/workstations/deploy", {
