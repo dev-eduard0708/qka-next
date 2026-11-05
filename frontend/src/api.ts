@@ -863,6 +863,8 @@ export const api = {
         status: string;
         lastError: string;
         machineEnrollmentToken?: string | null;
+        tokenStaged?: boolean;
+        tokenDropPath?: string;
       }>;
       tokensIssued: number;
       gpoManifest: Record<string, unknown> | null;

@@ -11,7 +11,12 @@ from pathlib import Path
 
 from qka_desktop_agent import __version__
 from qka_desktop_agent.client import AgentApiError, AgentClient
-from qka_desktop_agent.config import device_fingerprint, load_config, save_credentials
+from qka_desktop_agent.config import (
+    device_fingerprint,
+    load_config,
+    resolve_machine_enrollment_token,
+    save_credentials,
+)
 from qka_desktop_agent.index_store import LocalIndex
 from qka_desktop_agent.folder_browser import browse_children, nodes_to_json, resolve_known_folders
 from qka_desktop_agent.readonly import run_disposable_fixture_negative_write_test
@@ -40,16 +45,19 @@ def ensure_enrolled(client: AgentClient, cfg) -> None:
     if cfg.device_id and cfg.device_key:
         client.set_credentials(cfg.device_id, cfg.device_key)
         return
-    machine_token = (getattr(cfg, "machine_enrollment_token", None) or os.environ.get("QKA_AGENT_MACHINE_ENROLLMENT_TOKEN") or "").strip()
-    if not cfg.enrollment_code and not machine_token:
-        raise RuntimeError(
-            "No device credentials and no enrollment code/token. "
-            "Set QKA_AGENT_ENROLLMENT_CODE (manual) or machine enrollment token from managed deploy."
-        )
     if not cfg.server_base_url:
         raise RuntimeError("QKA_AGENT_SERVER_URL / serverBaseUrl is required.")
     if cfg.server_base_url.lower().startswith("http://127.0.0.1") or "localhost" in cfg.server_base_url.lower():
         log.warning("server_base_url looks like loopback; employee PCs must use reachable internal HTTPS.")
+
+    identity = local_computer_sid()
+    machine_token = resolve_machine_enrollment_token(cfg, identity.computer_sid or "")
+    if not cfg.enrollment_code and not machine_token:
+        raise RuntimeError(
+            "No device credentials and no enrollment token. "
+            "Managed deploy: wait for per-computer token-drop file, or use a one-time enrollment code."
+        )
+
     payload = {
         "computerName": os.environ.get("COMPUTERNAME") or socket.gethostname(),
         "deviceFingerprint": device_fingerprint(),
@@ -57,7 +65,6 @@ def ensure_enrolled(client: AgentClient, cfg) -> None:
         "agentVersion": __version__,
     }
     if machine_token:
-        identity = local_computer_sid()
         if not identity.computer_sid:
             raise RuntimeError("Could not resolve local computer SID for machine-identity enrollment.")
         payload.update(

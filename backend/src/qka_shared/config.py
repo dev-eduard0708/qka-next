@@ -105,8 +105,10 @@ class Settings(BaseSettings):
     agent_min_version: str = "0.1.0"
     # Computer-readable MSI UNC for GPO Software Installation / startup (no secrets in share).
     agent_msi_unc: str = ""
-    # hkml_out_of_band = per-PC token via Provision-MachineEnrollmentToken.ps1 (never SYSVOL/MSI).
+    # unc_acl_drop (preferred) | hkml_out_of_band (manual fallback). Never SYSVOL/MSI secrets.
     agent_token_provisioning: str = ""
+    # Locked-down share for per-computer *.tok files (New-QkaAgentTokenDropShare.ps1).
+    agent_token_drop_unc: str = ""
 
     @property
     def cors_origin_list(self) -> list[str]:

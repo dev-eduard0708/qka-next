@@ -1,66 +1,37 @@
-# Remote QKA Agent deployment (pilot-scoped GPO)
+# Remote QKA Agent deployment (pilot-scoped, automatic enrollment)
 
-QKA never uses Domain Admin credentials in-app and never deploys to the whole domain.
+## Security model
 
-## Architecture
+| Channel | Allowed | Forbidden |
+| --- | --- | --- |
+| MSI UNC | MSI binary + `QKASERVERURL` | Enrollment tokens |
+| GPO / SYSVOL | Startup install script, optional `TokenDropUnc` path (non-secret) | Tokens, shared secrets |
+| Token-drop UNC | Per-SID `*.tok` with **that computer$ only** Read+Delete | World-readable tokens |
+| PowerShell history / logs | — | Plaintext tokens |
 
-1. **MSI UNC share** (`New-QkaAgentMsiShare.ps1`) — Domain Computers can read the MSI only.
-2. **GPO** `{73E8998A-A3B3-435F-9219-419C331BA2D4}` linked to a **pilot OU**, filtered to **`QKA-Agent-Pilot-Computers` only** (`Configure-QkaAgentGpo.ps1` on a GPMC host).
-3. **GPO installs MSI** with `QKASERVERURL` only — **no enrollment secrets in SYSVOL/MSI/GPO**.
-4. **Per-device token** issued by QKA Deploy → delivered by `Provision-MachineEnrollmentToken.ps1` into **HKLM** on that PC only.
-5. Agent enrolls with SID + HMAC `machineProof` → heartbeat proves install.
+**Preferred enrollment:** `QKA_AGENT_TOKEN_PROVISIONING=unc_acl_drop`  
+Deploy stages the one-time token to the drop share; the agent (as the computer account) claims+deletes it. No employee paste.
 
-## Ordered admin actions
+**Fallback:** `hkml_out_of_band` + `Provision-MachineEnrollmentToken.ps1 -TokenSecure` (Local Service can clear ProgramData/HKLM).
 
-### A. File server (QEC-AI-MCP, elevated)
+## Admin order (nothing runs until you confirm)
 
-```powershell
-cd C:\QehcAI\QKA-Next\scripts\gpo-agent-deploy
-.\New-QkaAgentMsiShare.ps1 -IConfirmCreateShare
-# Note MSI_UNC=\\QEC-AI-MCP\QkaAgent\QKA-Agent.msi
-```
+1. **MSI share** (elevated): `New-QkaAgentMsiShare.ps1 -IConfirmCreateShare`
+2. **Token-drop share** (elevated): `New-QkaAgentTokenDropShare.ps1 -IConfirmCreateShare`
+3. **.env** (API host) then restart API:
+   ```text
+   QKA_AGENT_MSI_UNC=\\QEC-AI-MCP\QkaAgent\QKA-Agent.msi
+   QKA_AGENT_TOKEN_DROP_UNC=\\QEC-AI-MCP\QkaAgentTokens
+   QKA_AGENT_TOKEN_PROVISIONING=unc_acl_drop
+   ```
+4. **GPMC host** (only when approved): `Configure-QkaAgentGpo.ps1 -PilotOuDn '...' -MsiUnc '...' -IConfirmGpoScope`  
+   Registers Machine Startup via `scripts.ini` **and** Scripts CSE + GPT.INI version bump (not scripts.ini alone).
+5. **One pilot PC** (only when approved): `Add-QkaPilotComputer.ps1 -ComputerName 'PC' -IConfirmAddPilotComputer`
+6. Trust HTTPS CER on that PC; `gpupdate /force`
+7. QKA UI → select that PC → `DEPLOY SELECTED` → tokens auto-stage → agent enrolls + heartbeat
 
-Set in `C:\QehcAI\QKA-Next\.env` then restart API:
+Until approval: leave GPO **unlinked** and pilot group **empty**. Use `Test-QkaAgentDeployReadiness.ps1` for read-only checks.
 
-```text
-QKA_AGENT_MSI_UNC=\\QEC-AI-MCP\QkaAgent\QKA-Agent.msi
-QKA_AGENT_TOKEN_PROVISIONING=hkml_out_of_band
-```
+## GPO scope
 
-### B. AD management host with RSAT GPMC (elevated)
-
-```powershell
-.\Configure-QkaAgentGpo.ps1 `
-  -PilotOuDn 'OU=...,DC=qehc,DC=edu,DC=sa' `
-  -MsiUnc '\\QEC-AI-MCP\QkaAgent\QKA-Agent.msi' `
-  -IConfirmGpoScope
-```
-
-### C. Your approved pilot PC (explicit)
-
-```powershell
-.\Add-QkaPilotComputer.ps1 -ComputerName 'YOUR-PC-NAME' -IConfirmAddPilotComputer
-```
-
-Trust the pilot HTTPS CER on that PC (`docs/11-PILOT-PC-HTTPS-TRUST.md`), then `gpupdate /force`.
-
-### D. QKA UI Deploy (Super Admin)
-
-1. Select **only** your pilot workstation.
-2. Confirm phrase `DEPLOY SELECTED`.
-3. Copy the one-time `machineEnrollmentToken` from the response (shown once).
-4. On the pilot PC (admin):
-
-```powershell
-.\Provision-MachineEnrollmentToken.ps1 -Token '<paste-once>' -IConfirmProvisionToThisComputer
-Restart-Service QkaDesktopAgent
-```
-
-5. Verify Agent Connected in QKA (employee may remain Unassigned).
-
-## Forbidden
-
-- Authenticated Users / Domain Computers Apply on the GPO (use pilot group only)
-- Embedding tokens in MSI / GPO Registry Preferences / SYSVOL scripts
-- Linking GPO at domain root
-- Disabling TLS verification
+`Configure-QkaAgentGpo.ps1` refuses domain-root links and fails if `Authenticated Users` / `Domain Computers` / `Everyone` retain **GpoApply**. Only `QKA-Agent-Pilot-Computers` may Apply.

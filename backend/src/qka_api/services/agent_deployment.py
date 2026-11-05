@@ -77,26 +77,45 @@ def deployment_prerequisites(settings: Settings) -> dict:
         and "127.0.0.1" not in parsed.netloc
     )
     msi_unc = (getattr(settings, "agent_msi_unc", None) or "").strip()
+    drop_unc = (getattr(settings, "agent_token_drop_unc", None) or "").strip()
     gpo = gpo_engine.probe_gpo_engine(msi_unc=msi_unc)
-    # Secure mode: one-time token delivered by Provision-MachineEnrollmentToken.ps1 → HKLM
-    # (never MSI / GPO Preferences / SYSVOL). HMAC proof ≠ Kerberos.
+    # Preferred: unc_acl_drop — server stages per-SID *.tok with computer-only ACL; agent claims+deletes.
+    # Fallback: hkml_out_of_band — Provision-MachineEnrollmentToken.ps1 (no paste into GPO/SYSVOL).
     provisioning_mode = (getattr(settings, "agent_token_provisioning", None) or "").strip().lower()
+    unc_drop_mode = provisioning_mode in {"unc_acl_drop", "token_drop", "unc_drop"}
     hkml_mode = provisioning_mode in {"hkml_out_of_band", "hkml", "registry_out_of_band"}
-    machine_proof_ready = bool(hkml_mode and gpo.msi_unc_reachable and gpo.ad_gpo_linked)
+    drop_ok = False
+    if unc_drop_mode and drop_unc:
+        try:
+            from pathlib import Path
+
+            drop_ok = Path(drop_unc).is_dir()
+        except Exception:
+            drop_ok = False
+    machine_proof_ready = bool(
+        gpo.msi_unc_reachable
+        and gpo.ad_gpo_linked
+        and ((unc_drop_mode and drop_ok) or hkml_mode)
+    )
     machine_proof = {
         "hmacImplemented": True,
         "tokenEmbeddedInMsi": False,
         "kerberosMachineAuth": False,
         "securePerComputerProvisioning": machine_proof_ready,
         "provisioningMode": provisioning_mode or "unset",
-        "provisioningScript": "scripts/gpo-agent-deploy/Provision-MachineEnrollmentToken.ps1",
+        "tokenDropUnc": drop_unc if unc_drop_mode else "",
+        "provisioningScript": (
+            "scripts/gpo-agent-deploy/New-QkaAgentTokenDropShare.ps1"
+            if unc_drop_mode
+            else "scripts/gpo-agent-deploy/Provision-MachineEnrollmentToken.ps1"
+        ),
         "replayProtection": "one_time_token_consume",
         "revocation": "desktop_device_revoke_rotates_device_key",
         "status": "ready" if machine_proof_ready else "blocked",
         "detail": (
-            "machineProof=HMAC-SHA256(token, computerSid). Deliver the one-time token only via "
-            "Provision-MachineEnrollmentToken.ps1 to HKLM on the selected PC. Never put tokens in "
-            "MSI, GPO Preferences, or SYSVOL. Not Kerberos machine authentication."
+            "machineProof=HMAC-SHA256(token, computerSid). Preferred delivery: per-computer ACL "
+            "token-drop UNC (agent claims+deletes). Never put tokens in MSI, GPO Preferences, "
+            "SYSVOL, PowerShell history, or logs. Not Kerberos machine authentication."
         ),
     }
     blockers: list[str] = []
@@ -116,15 +135,20 @@ def deployment_prerequisites(settings: Settings) -> dict:
             line = text if text.endswith(".") else text + "."
             if line not in blockers:
                 blockers.append(line)
-    if not hkml_mode:
+    if not unc_drop_mode and not hkml_mode:
         blockers.append(
-            "Set QKA_AGENT_TOKEN_PROVISIONING=hkml_out_of_band and use "
-            "Provision-MachineEnrollmentToken.ps1 for per-PC HKLM delivery (no SYSVOL secrets)."
+            "Set QKA_AGENT_TOKEN_PROVISIONING=unc_acl_drop (preferred) with QKA_AGENT_TOKEN_DROP_UNC, "
+            "or hkml_out_of_band fallback. Never place tokens in SYSVOL/MSI."
+        )
+    elif unc_drop_mode and not drop_ok:
+        blockers.append(
+            "Token-drop UNC missing/unreachable — run New-QkaAgentTokenDropShare.ps1 and set "
+            "QKA_AGENT_TOKEN_DROP_UNC."
         )
     elif not machine_proof_ready:
         blockers.append(
             "Secure per-computer token provisioning is not ready "
-            "(need reachable MSI UNC + linked pilot GPO + hkml_out_of_band mode)."
+            "(need reachable MSI UNC + linked pilot GPO + unc_acl_drop or hkml mode)."
         )
     # tlsTrust: server-side HTTPS health already validated in ops; clients still need CER trust.
     tls_trust = "server_ok_pilot_cer_required" if https_ok else "blocked"
@@ -159,9 +183,10 @@ def deployment_prerequisites(settings: Settings) -> dict:
         "confirmationPhrase": CONFIRM_PHRASE,
         "maxBulk": 50,
         "realPcDeployAllowed": deploy_enabled,
+        "tokenDropUnc": drop_unc,
         "note": (
             "Deploy Agent enables only for selected computers after HTTPS, MSI UNC, linked "
-            "pilot-scoped GPO, pilot group membership, and hkml_out_of_band token mode are ready. "
+            "pilot-scoped GPO, pilot group membership, and unc_acl_drop (or hkml fallback) are ready. "
             "Confirmation phrase required. Install success = agent registration + heartbeat."
         ),
     }
@@ -288,8 +313,38 @@ def request_deployments(
         tokens_issued += 1
         session.flush()
         dto = job_dto(job, ws)
-        # Plaintext token only at creation for delegated GPO/registry delivery — never in MSI.
-        dto["machineEnrollmentToken"] = plain_token
+        # Prefer automatic UNC ACL drop — do not return plaintext token to the UI when staged.
+        staged_path = ""
+        provisioning_mode = (getattr(settings, "agent_token_provisioning", None) or "").strip().lower()
+        drop_unc = (getattr(settings, "agent_token_drop_unc", None) or "").strip()
+        if provisioning_mode in {"unc_acl_drop", "token_drop", "unc_drop"} and drop_unc:
+            from qka_api.services import token_drop
+
+            try:
+                staged_path = token_drop.stage_token_for_computer(
+                    drop_unc=drop_unc,
+                    computer_sid=sid,
+                    computer_name=ws.computer_name,
+                    token=plain_token,
+                )
+                dto["tokenStaged"] = True
+                dto["tokenDropPath"] = staged_path  # path only — not the secret
+                dto["machineEnrollmentToken"] = None
+            except Exception as exc:  # noqa: BLE001
+                # Fail the job rather than falling back to exposing the token in the browser.
+                job.status = DEPLOY_FAILED
+                job.last_error = f"Token drop staging failed: {exc}"[:2000]
+                job.updated_at = _now()
+                dto = job_dto(job, ws)
+                dto["tokenStaged"] = False
+                dto["machineEnrollmentToken"] = None
+                jobs.append(dto)
+                computer_names.append(ws.computer_name)
+                continue
+        else:
+            # Manual HKLM fallback — shown once in UI; never log.
+            dto["tokenStaged"] = False
+            dto["machineEnrollmentToken"] = plain_token
         computer_names.append(ws.computer_name)
         jobs.append(dto)
 
@@ -301,6 +356,27 @@ def request_deployments(
         msi_unc=gpo.msi_unc,
     )
 
+    mode = (getattr(settings, "agent_token_provisioning", None) or "").strip().lower()
+    if mode in {"unc_acl_drop", "token_drop", "unc_drop"}:
+        token_info = {
+            "mode": "unc_acl_drop",
+            "script": "scripts/gpo-agent-deploy/New-QkaAgentTokenDropShare.ps1",
+            "instruction": (
+                "One-time tokens were staged to the token-drop UNC with per-computer ACL. "
+                "After GPO installs the MSI, the agent claims and deletes its own *.tok automatically. "
+                "No employee paste. Do not copy tokens into GPO/SYSVOL/MSI/logs."
+            ),
+        }
+    else:
+        token_info = {
+            "mode": "hkml_out_of_band",
+            "script": "scripts/gpo-agent-deploy/Provision-MachineEnrollmentToken.ps1",
+            "instruction": (
+                "Fallback: run Provision-MachineEnrollmentToken.ps1 on the pilot PC with the one-time "
+                "token (stdin/secure string preferred). Do not paste into GPO/SYSVOL/MSI or log history."
+            ),
+        }
+
     return {
         "ok": True,
         "deployEnabled": True,
@@ -308,19 +384,12 @@ def request_deployments(
         "jobs": jobs,
         "tokensIssued": tokens_issued,
         "gpoManifest": manifest,
-        "tokenProvisioning": {
-            "mode": "hkml_out_of_band",
-            "script": "scripts/gpo-agent-deploy/Provision-MachineEnrollmentToken.ps1",
-            "instruction": (
-                "For each job, run Provision-MachineEnrollmentToken.ps1 -Token <machineEnrollmentToken> "
-                "-IConfirmProvisionToThisComputer on that pilot PC (or Invoke-Command with your admin rights). "
-                "Do not paste tokens into GPO/SYSVOL/MSI. Do not log the token."
-            ),
-        },
+        "tokenProvisioning": token_info,
         "realPcDeployExecuted": False,
         "note": (
             "Jobs scheduled for selected computers only. GPO installs MSI from UNC; "
-            "provision the one-time HKLM token out-of-band; agent registration/heartbeat proves install. "
+            "enrollment uses per-computer ACL token-drop (automatic) or HKLM fallback; "
+            "agent registration/heartbeat proves install. "
             "QKA does not execute unrestricted remote PowerShell or use Domain Admin credentials."
         ),
     }

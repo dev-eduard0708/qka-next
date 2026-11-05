@@ -823,6 +823,7 @@ async function confirmDeploy() {
     });
     deployOpen.value = false;
     syncNote.value = result.note;
+    const staged = (result.jobs || []).filter((j) => (j as { tokenStaged?: boolean }).tokenStaged);
     const withTokens = (result.jobs || [])
       .filter((j) => j.machineEnrollmentToken)
       .map((j) => ({
@@ -830,7 +831,9 @@ async function confirmDeploy() {
         computerName: j.computerName,
         machineEnrollmentToken: String(j.machineEnrollmentToken),
       }));
-    if (withTokens.length) {
+    if (staged.length && !withTokens.length) {
+      syncNote.value = `${result.note} ${result.tokenProvisioning?.instruction || t("workstations.tokenAutoStaged")}`;
+    } else if (withTokens.length) {
       tokenJobs.value = withTokens;
       tokenInstruction.value = result.tokenProvisioning?.instruction || t("workstations.tokenHint");
       tokenOpen.value = true;

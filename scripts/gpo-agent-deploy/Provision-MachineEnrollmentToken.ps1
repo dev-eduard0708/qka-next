@@ -1,23 +1,26 @@
-<#
+﻿<#
 .SYNOPSIS
-  Deliver a one-time machineEnrollmentToken to HKLM on ONE computer (out-of-band).
+  FALLBACK: deliver one-time machineEnrollmentToken for Local Service cleanup-safe storage.
 
 .DESCRIPTION
-  Tokens must NEVER be placed in MSI, GPO Preferences, or SYSVOL.
-  This script writes:
-    HKLM\SOFTWARE\QKA\DesktopAgent\MachineEnrollmentToken
-  with ACL limited to Administrators + SYSTEM (+ Local Service read).
+  Preferred path is automatic UNC ACL token-drop (unc_acl_drop) — no paste required.
+  This script is the manual fallback when token-drop share is unavailable.
 
-  Preferred for the first pilot: run locally ON the pilot PC (you are admin of your PC).
-  Optional: -ComputerName with Invoke-Command if you already have admin remoting rights
-  (not Domain Admin via the QKA app).
+  Writes %ProgramData%\QKA\DesktopAgent\pending.enrollment.token with ACL:
+    Administrators, SYSTEM, Local Service — Modify
+  Also sets HKLM MachineEnrollmentToken with Local Service Read+SetValue so the
+  agent service can clear it after enroll.
 
-  Pass the token from the QKA Deploy response once; do not log it.
+  Token is accepted via -TokenSecure (SecureString) or pipeline to avoid PSHistory.
+  Do NOT pass plaintext -Token on interactive command lines when avoidable.
 #>
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Secure')]
 param(
-  [Parameter(Mandatory)]
+  [Parameter(ParameterSetName = 'Plain')]
   [string]$Token,
+
+  [Parameter(ParameterSetName = 'Secure')]
+  [SecureString]$TokenSecure,
 
   [string]$ComputerName = $env:COMPUTERNAME,
   [switch]$IConfirmProvisionToThisComputer
@@ -25,44 +28,71 @@ param(
 
 $ErrorActionPreference = 'Stop'
 if (-not $IConfirmProvisionToThisComputer) {
-  throw 'Pass -IConfirmProvisionToThisComputer. Refusing to write enrollment token without confirmation.'
+  throw 'Pass -IConfirmProvisionToThisComputer.'
 }
-if ([string]::IsNullOrWhiteSpace($Token) -or $Token.Length -lt 16) {
-  throw 'Token looks empty/short. Paste the one-time machineEnrollmentToken from Deploy (not logged).'
+
+if ($PSCmdlet.ParameterSetName -eq 'Secure') {
+  if (-not $TokenSecure) {
+    $TokenSecure = Read-Host -AsSecureString -Prompt 'Paste one-time machine enrollment token'
+  }
+  $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($TokenSecure)
+  try {
+    $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+  } finally {
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+  }
+} else {
+  $plain = $Token
+}
+if ([string]::IsNullOrWhiteSpace($plain) -or $plain.Length -lt 16) {
+  throw 'Token empty/short.'
 }
 
 $scriptBlock = {
   param([string]$PlainToken)
   $ErrorActionPreference = 'Stop'
+  $dataDir = Join-Path $env:ProgramData 'QKA\DesktopAgent'
+  New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+  $pending = Join-Path $dataDir 'pending.enrollment.token'
+  # Write then ACL for Local Service modify/delete
+  [IO.File]::WriteAllText($pending, $PlainToken)
+  $acl = Get-Acl -LiteralPath $pending
+  $acl.SetAccessRuleProtection($true, $false)
+  @($acl.Access) | ForEach-Object { [void]$acl.RemoveAccessRule($_) }
+  foreach ($id in @(
+      'BUILTIN\Administrators',
+      'NT AUTHORITY\SYSTEM',
+      'NT AUTHORITY\LOCAL SERVICE'
+    )) {
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+      $id, 'Modify', 'Allow')
+    $acl.AddAccessRule($rule)
+  }
+  Set-Acl -LiteralPath $pending -AclObject $acl
+
   $keyPath = 'HKLM:\SOFTWARE\QKA\DesktopAgent'
   New-Item -Path $keyPath -Force | Out-Null
   New-ItemProperty -Path $keyPath -Name 'MachineEnrollmentToken' -Value $PlainToken -PropertyType String -Force | Out-Null
-  # Tighten ACL on the key: Admins + SYSTEM full; Local Service read
-  $acl = Get-Acl -Path $keyPath
-  $acl.SetAccessRuleProtection($true, $false)
-  $acl.Access | ForEach-Object { [void]$acl.RemoveAccessRule($_) }
+  $racl = Get-Acl -Path $keyPath
+  $racl.SetAccessRuleProtection($true, $false)
+  @($racl.Access) | ForEach-Object { [void]$racl.RemoveAccessRule($_) }
   foreach ($rule in @(
       (New-Object System.Security.AccessControl.RegistryAccessRule('BUILTIN\Administrators', 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')),
       (New-Object System.Security.AccessControl.RegistryAccessRule('NT AUTHORITY\SYSTEM', 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')),
-      (New-Object System.Security.AccessControl.RegistryAccessRule('NT AUTHORITY\LOCAL SERVICE', 'ReadKey', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
-    )) {
-    $acl.AddAccessRule($rule)
-  }
-  Set-Acl -Path $keyPath -AclObject $acl
+      (New-Object System.Security.AccessControl.RegistryAccessRule('NT AUTHORITY\LOCAL SERVICE', 'ReadKey,SetValue,Delete', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+    )) { $racl.AddAccessRule($rule) }
+  Set-Acl -Path $keyPath -AclObject $racl
   'OK'
 }
 
 $target = ($ComputerName -replace '\..*$', '').ToUpperInvariant()
 $local = $env:COMPUTERNAME.ToUpperInvariant()
 if ($target -eq $local -or $ComputerName -eq '.' -or $ComputerName -eq 'localhost') {
-  Write-Host ("Provisioning HKLM token on LOCAL computer " + $env:COMPUTERNAME)
-  & $scriptBlock -PlainToken $Token | Out-Null
+  & $scriptBlock -PlainToken $plain | Out-Null
 } else {
-  Write-Host ("Provisioning HKLM token via Invoke-Command on " + $ComputerName)
-  Invoke-Command -ComputerName $ComputerName -ScriptBlock $scriptBlock -ArgumentList $Token | Out-Null
+  Invoke-Command -ComputerName $ComputerName -ScriptBlock $scriptBlock -ArgumentList $plain | Out-Null
 }
-Write-Host 'Token written to HKLM\SOFTWARE\QKA\DesktopAgent\MachineEnrollmentToken (not printed).'
-Write-Host 'Restart service QkaDesktopAgent. After enroll succeeds the agent clears the value.'
-# Scrub from this session
-$Token = $null
-Remove-Variable Token -ErrorAction SilentlyContinue
+$plain = $null
+Remove-Variable plain, Token, TokenSecure -ErrorAction SilentlyContinue
+Write-Host 'Token stored for Local Service (ProgramData pending file + HKLM). Not printed.'
+Write-Host 'Restart-Service QkaDesktopAgent — agent clears pending file/HKLM after enroll.'
