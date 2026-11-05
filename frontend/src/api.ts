@@ -153,7 +153,9 @@ export type Workstation = {
   computerName: string;
   dnsHostname: string;
   ipAddress: string;
+  distinguishedName?: string;
   ou: string;
+  ouBreadcrumb?: string;
   operatingSystem: string;
   accountStatus: string;
   accountEnabled: boolean;
@@ -180,6 +182,8 @@ export type Workstation = {
     enabled: boolean;
     status: string;
     note: string;
+    pilotGroupMember?: boolean;
+    pilotGroup?: string;
     prerequisites?: {
       httpsConfigured: boolean;
       gpoEngineAvailable: boolean;
@@ -219,6 +223,8 @@ export type DeployPrerequisites = {
   gpoEngineAvailable: boolean;
   gpoReason: string;
   gpoTargetGroup: string;
+  approvedPilotComputer?: string;
+  pilotAuthorization?: string;
   machineIdentityEnrollmentReady: boolean;
   manualEnrollmentCodeFallback: boolean;
   blockers: string[];
@@ -226,6 +232,14 @@ export type DeployPrerequisites = {
   maxBulk: number;
   realPcDeployAllowed: boolean;
   note: string;
+};
+
+export type WorkstationOuTreeNode = {
+  id: string;
+  label: string;
+  breadcrumb: string;
+  count: number;
+  children?: WorkstationOuTreeNode[];
 };
 
 export type WorkstationsPage = {
@@ -242,8 +256,14 @@ export type WorkstationsPage = {
     unchecked: number;
   };
   ous: string[];
+  ouTree?: WorkstationOuTreeNode[];
+  filterOuDns?: string[];
+  includeChildren?: boolean;
+  scopeOu?: string | null;
   scopeOnly?: boolean;
-  activeSyncOus?: Array<{ name: string; distinguishedName: string }>;
+  activeSyncOus?: Array<{ name: string; distinguishedName: string; breadcrumb?: string }>;
+  syncScopeNote?: string;
+  readinessCached?: boolean;
 };
 
 export type DirectoryUsersPage = {
@@ -737,8 +757,12 @@ export const api = {
     reachability?: string;
     agentStatus?: string;
     assigned?: string;
+    deployStatus?: string;
     includeMissing?: boolean;
     includeServers?: boolean;
+    filterOuDns?: string[];
+    includeChildren?: boolean;
+    scopeOu?: string;
     scopeOnly?: boolean;
     sort?: string;
     sortDir?: string;
@@ -748,14 +772,21 @@ export const api = {
     const q = new URLSearchParams();
     if (params?.search) q.set("search", params.search);
     if (params?.ou) q.set("ou", params.ou);
+    if (params?.scopeOu) q.set("scopeOu", params.scopeOu);
+    for (const dn of params?.filterOuDns || []) {
+      if (dn) q.append("filterOuDns", dn);
+    }
+    if (params?.includeChildren === false) q.set("includeChildren", "false");
+    if (params?.includeChildren === true) q.set("includeChildren", "true");
     if (params?.accountStatus) q.set("accountStatus", params.accountStatus);
     if (params?.reachability) q.set("reachability", params.reachability);
     if (params?.agentStatus) q.set("agentStatus", params.agentStatus);
     if (params?.assigned) q.set("assigned", params.assigned);
+    if (params?.deployStatus) q.set("deployStatus", params.deployStatus);
     if (params?.includeMissing) q.set("includeMissing", "true");
     if (params?.includeServers) q.set("includeServers", "true");
-    if (params?.scopeOnly === false) q.set("scopeOnly", "false");
-    if (params?.scopeOnly === true) q.set("scopeOnly", "true");
+    // Always send scopeOnly explicitly. Display filters must never fall back to sync-OU-only.
+    q.set("scopeOnly", params?.scopeOnly === true ? "true" : "false");
     if (params?.sort) q.set("sort", params.sort);
     if (params?.sortDir) q.set("sortDir", params.sortDir);
     if (params?.page) q.set("page", String(params.page));

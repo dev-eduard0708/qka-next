@@ -80,11 +80,89 @@ def test_sync_requires_ou_selection(client):
     assert "Organizational Unit" in denied.json()["detail"]
 
 
-def test_list_defaults_to_selected_sync_ou_scope(client):
+def test_scope_ou_dropdown_includes_nested_children(client):
     gateway, _probe = _install(client)
     headers = _admin(client)
     conn_id = _ensure_ad_connection(client, headers)
-    # Seed a computer outside Workstations OU to prove scope filtering.
+    from qka_api.ldap_client import AdComputerRecord
+
+    # Nested under HO + sibling under Workstations root.
+    gateway.computers.append(
+        AdComputerRecord(
+            object_guid="c5555555-5555-5555-5555-555555555555",
+            object_sid="S-1-5-21-1-2-3-3005",
+            computer_name="HO-PC01",
+            dns_hostname="ho-pc01.qehc.edu.sa",
+            distinguished_name="CN=HO-PC01,OU=HO,OU=QEHC,DC=qehc,DC=edu,DC=sa",
+            operating_system="Windows 11 Pro",
+            account_enabled=True,
+            is_server_or_dc=False,
+        )
+    )
+    gateway.computers.append(
+        AdComputerRecord(
+            object_guid="c6666666-6666-6666-6666-666666666666",
+            object_sid="S-1-5-21-1-2-3-3006",
+            computer_name="WSIT02",
+            dns_hostname="wsit02.qehc.edu.sa",
+            distinguished_name="CN=WSIT02,OU=WorkStations,OU=IT,OU=HO,OU=QEHC,DC=qehc,DC=edu,DC=sa",
+            operating_system="Windows 11 Pro",
+            account_enabled=True,
+            is_server_or_dc=False,
+        )
+    )
+    ws_ou = "OU=Workstations,DC=qehc,DC=edu,DC=sa"
+    ho_ou = "OU=HO,OU=QEHC,DC=qehc,DC=edu,DC=sa"
+    assert (
+        client.post(
+            "/api/v1/admin/workstations/sync",
+            headers=headers,
+            json={"connectionId": conn_id, "ouDns": [ws_ou]},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/api/v1/admin/workstations/sync",
+            headers=headers,
+            json={"connectionId": conn_id, "ouDns": [ho_ou]},
+        ).status_code
+        == 200
+    )
+
+    # Default list is full inventory (no silent multi-OU banner filter).
+    all_rows = client.get("/api/v1/admin/workstations", headers=headers)
+    assert all_rows.status_code == 200
+    all_names = {i["computerName"] for i in all_rows.json()["items"]}
+    assert "HO-PC01" in all_names
+    assert "WSIT02" in all_names
+    assert "PILOT-PC" in all_names
+    assert all_rows.json()["scopeOu"] is None
+
+    # Dropdown scopeOu=HO includes HO and nested IT/WorkStations under HO.
+    scoped = client.get(
+        f"/api/v1/admin/workstations?scopeOu={quote(ho_ou)}",
+        headers=headers,
+    )
+    assert scoped.status_code == 200, scoped.text
+    names = {i["computerName"] for i in scoped.json()["items"]}
+    assert names == {"HO-PC01", "WSIT02"}
+    assert "PILOT-PC" not in names
+    assert scoped.json()["scopeOu"] == ho_ou
+    assert scoped.json()["summary"]["totalPresent"] == 2
+    assert any(o["distinguishedName"] == ho_ou for o in scoped.json()["activeSyncOus"])
+
+    # Legacy scopeOnly still OR-filters all selected sync OUs when requested.
+    legacy = client.get("/api/v1/admin/workstations?scopeOnly=true", headers=headers)
+    assert legacy.status_code == 200
+    legacy_names = {i["computerName"] for i in legacy.json()["items"]}
+    assert legacy_names == {"HO-PC01", "WSIT02"}
+
+
+def test_display_ou_filter_multi_select_and_ou_tree(client):
+    gateway, _probe = _install(client)
+    headers = _admin(client)
+    conn_id = _ensure_ad_connection(client, headers)
     from qka_api.ldap_client import AdComputerRecord
 
     gateway.computers.append(
@@ -99,18 +177,19 @@ def test_list_defaults_to_selected_sync_ou_scope(client):
             is_server_or_dc=False,
         )
     )
-    ws_ou = "OU=Workstations,DC=qehc,DC=edu,DC=sa"
-    ho_ou = "OU=HO,OU=QEHC,DC=qehc,DC=edu,DC=sa"
-    # First sync workstations OU (creates PILOT-PC etc.)
-    assert (
-        client.post(
-            "/api/v1/admin/workstations/sync",
-            headers=headers,
-            json={"connectionId": conn_id, "ouDns": [ws_ou]},
-        ).status_code
-        == 200
+    gateway.computers.append(
+        AdComputerRecord(
+            object_guid="c6666666-6666-6666-6666-666666666666",
+            object_sid="S-1-5-21-1-2-3-3006",
+            computer_name="WSIT02",
+            dns_hostname="wsit02.qehc.edu.sa",
+            distinguished_name="CN=WSIT02,OU=WorkStations,OU=IT,OU=HO,OU=QEHC,DC=qehc,DC=edu,DC=sa",
+            operating_system="Windows 11 Pro",
+            account_enabled=True,
+            is_server_or_dc=False,
+        )
     )
-    # Then sync HO only — table with scopeOnly should show only HO.
+    ho_ou = "OU=HO,OU=QEHC,DC=qehc,DC=edu,DC=sa"
     assert (
         client.post(
             "/api/v1/admin/workstations/sync",
@@ -119,18 +198,48 @@ def test_list_defaults_to_selected_sync_ou_scope(client):
         ).status_code
         == 200
     )
-    scoped = client.get("/api/v1/admin/workstations?scopeOnly=true", headers=headers)
-    assert scoped.status_code == 200, scoped.text
-    names = {i["computerName"] for i in scoped.json()["items"]}
-    assert names == {"HO-PC01"}
-    assert scoped.json()["summary"]["totalPresent"] == 1
-    assert any(o["distinguishedName"] == ho_ou for o in scoped.json()["activeSyncOus"])
 
-    all_rows = client.get("/api/v1/admin/workstations?scopeOnly=false", headers=headers)
+    all_rows = client.get("/api/v1/admin/workstations", headers=headers)
     assert all_rows.status_code == 200
-    all_names = {i["computerName"] for i in all_rows.json()["items"]}
+    body = all_rows.json()
+    all_names = {i["computerName"] for i in body["items"]}
     assert "HO-PC01" in all_names
-    assert "PILOT-PC" in all_names
+    assert "WSIT02" in all_names
+    assert isinstance(body.get("ouTree"), list)
+    assert body.get("ouTree"), "ouTree should be populated from inventory metadata"
+    assert body.get("includeChildren") is True
+    assert body.get("filterOuDns") == []
+    # Sync scope metadata is separate from display filter.
+    assert any(o["distinguishedName"] == ho_ou for o in body["activeSyncOus"])
+    sync_before = [o["distinguishedName"] for o in body["activeSyncOus"]]
+
+    filtered = client.get(
+        f"/api/v1/admin/workstations?filterOuDns={quote(ho_ou)}&includeChildren=true",
+        headers=headers,
+    )
+    assert filtered.status_code == 200, filtered.text
+    fbody = filtered.json()
+    assert {i["computerName"] for i in fbody["items"]} == {"HO-PC01", "WSIT02"}
+    assert fbody["filterOuDns"] == [ho_ou]
+    assert fbody["summary"]["totalPresent"] == 2
+    # Display filter must not mutate saved sync OUs.
+    assert [o["distinguishedName"] for o in fbody["activeSyncOus"]] == sync_before
+
+    exact = client.get(
+        f"/api/v1/admin/workstations?filterOuDns={quote(ho_ou)}&includeChildren=false",
+        headers=headers,
+    )
+    assert exact.status_code == 200
+    exact_names = {i["computerName"] for i in exact.json()["items"]}
+    assert exact_names == {"HO-PC01"}  # WSIT02 is nested under HO/IT/WorkStations
+
+    unknown = client.get(
+        "/api/v1/admin/workstations?filterOuDns=OU=NotSelected,DC=qehc,DC=edu,DC=sa",
+        headers=headers,
+    )
+    assert unknown.status_code == 200
+    assert unknown.json()["total"] == 0
+    assert unknown.json()["filterOuDns"] == ["OU=NotSelected,DC=qehc,DC=edu,DC=sa"]
 
 
 def test_sync_ou_options_supports_nested_browse(client):

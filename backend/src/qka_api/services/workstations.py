@@ -168,11 +168,35 @@ def _match_desktop_device(session: Session, ws: AdWorkstation) -> DesktopDevice 
     return None
 
 
-def _deploy_agent_fields(settings: Settings, ws: AdWorkstation, device: DesktopDevice | None, job_dto: dict | None) -> dict[str, Any]:
-    prereq = deploy_svc.deployment_prerequisites(settings)
+def _deploy_agent_fields(
+    settings: Settings,
+    ws: AdWorkstation,
+    device: DesktopDevice | None,
+    job_dto: dict | None,
+    *,
+    prereq: dict[str, Any] | None = None,
+    pilot_member_sids: frozenset[str] | None = None,
+) -> dict[str, Any]:
+    from qka_api.services import gpo_engine
+
+    prereq = prereq or deploy_svc.deployment_prerequisites(settings)
     has_sid = bool((ws.object_sid or "").strip())
-    # Employee assignment is post-install; deploy selection needs SID + presence only.
-    can_select = bool(ws.is_present and ws.account_enabled and has_sid)
+    target_group = str(prereq.get("gpoTargetGroup") or gpo_engine.DEFAULT_TARGET_GROUP)
+    members = (
+        pilot_member_sids
+        if pilot_member_sids is not None
+        else gpo_engine.list_pilot_group_member_sids(target_group)
+    )
+    in_pilot = bool(
+        has_sid
+        and gpo_engine.computer_sid_in_pilot_group(
+            ws.object_sid or "",
+            target_group=target_group,
+            member_sids=members,
+        )
+    )
+    # Employee assignment is post-install; deploy needs SID + presence + pilot-group membership.
+    can_select = bool(ws.is_present and ws.account_enabled and has_sid and in_pilot)
     enabled = bool(prereq["deployEnabled"] and can_select and device is None)
     status = "ready" if enabled else "blocked"
     if device is not None:
@@ -184,6 +208,11 @@ def _deploy_agent_fields(settings: Settings, ws: AdWorkstation, device: DesktopD
         note = "AD objectSid is required for machine-identity enrollment."
     elif device is not None:
         note = "Agent already registered for this workstation."
+    elif not in_pilot:
+        note = (
+            f"Not a member of '{target_group}'. Only the approved pilot computer "
+            f"(WSIT02) may be deployed — add it with Add-QkaPilotComputer.ps1."
+        )
     elif prereq["blockers"]:
         note = "; ".join(prereq["blockers"])
     else:
@@ -192,17 +221,26 @@ def _deploy_agent_fields(settings: Settings, ws: AdWorkstation, device: DesktopD
         "enabled": enabled,
         "status": status,
         "note": note,
+        "pilotGroupMember": in_pilot,
+        "pilotGroup": target_group,
         "prerequisites": {
-            "httpsConfigured": prereq["httpsConfigured"],
-            "gpoEngineAvailable": prereq["gpoEngineAvailable"],
-            "msiPresent": prereq["msiPresent"],
-            "tlsTrust": prereq["tlsTrust"],
-            "machineIdentityEnrollmentReady": prereq["machineIdentityEnrollmentReady"],
+            "httpsConfigured": bool(prereq.get("httpsConfigured")),
+            "gpoEngineAvailable": bool(prereq.get("gpoEngineAvailable")),
+            "msiPresent": bool(prereq.get("msiPresent")),
+            "tlsTrust": str(prereq.get("tlsTrust") or "blocked"),
+            "machineIdentityEnrollmentReady": bool(prereq.get("machineIdentityEnrollmentReady")),
         },
     }
 
 
-def workstation_dto(session: Session, ws: AdWorkstation, settings: Settings | None = None) -> dict[str, Any]:
+def workstation_dto(
+    session: Session,
+    ws: AdWorkstation,
+    settings: Settings | None = None,
+    *,
+    prereq: dict[str, Any] | None = None,
+    pilot_member_sids: frozenset[str] | None = None,
+) -> dict[str, Any]:
     settings = settings or get_settings()
     employee_name = ""
     employee_email = ""
@@ -227,7 +265,9 @@ def workstation_dto(session: Session, ws: AdWorkstation, settings: Settings | No
         "computerName": ws.computer_name,
         "dnsHostname": ws.dns_hostname,
         "ipAddress": ws.resolved_ip or "",
+        "distinguishedName": ws.distinguished_name or "",
         "ou": ws.ou_path,
+        "ouBreadcrumb": _breadcrumb_for_ou_dn(ws.ou_path),
         "operatingSystem": ws.operating_system,
         "accountStatus": "enabled" if ws.account_enabled else "disabled",
         "accountEnabled": ws.account_enabled,
@@ -254,7 +294,14 @@ def workstation_dto(session: Session, ws: AdWorkstation, settings: Settings | No
         "desktopDeviceId": agent["desktopDeviceId"],
         "objectGuid": ws.object_guid,
         "objectSid": ws.object_sid,
-        "deployAgent": _deploy_agent_fields(settings, ws, device, job_payload),
+        "deployAgent": _deploy_agent_fields(
+            settings,
+            ws,
+            device,
+            job_payload,
+            prereq=prereq,
+            pilot_member_sids=pilot_member_sids,
+        ),
         "deploymentJob": job_payload,
     }
 
@@ -544,32 +591,145 @@ def _saved_sync_ou_dns(session: Session, connection_id: uuid.UUID | None = None)
     return [r.distinguished_name for r in session.execute(q).scalars().all() if r.distinguished_name]
 
 
+def _ou_label(dn: str) -> str:
+    head = (dn or "").split(",")[0].strip()
+    for prefix in ("OU=", "ou=", "DC=", "dc="):
+        if head.startswith(prefix):
+            return head[len(prefix) :]
+    return head or dn
+
+
+def _breadcrumb_for_ou_dn(dn: str) -> str:
+    parts = [p.strip() for p in (dn or "").split(",") if p.strip()]
+    labels: list[str] = []
+    for part in reversed(parts):
+        upper = part.upper()
+        if upper.startswith("OU="):
+            labels.append(part.split("=", 1)[1])
+        elif upper.startswith("DC="):
+            continue
+    return " / ".join(labels) if labels else _ou_label(dn)
+
+
+def build_inventory_ou_tree(session: Session) -> list[dict[str, Any]]:
+    """Hierarchical OU tree from synchronized inventory only (no live LDAP)."""
+    rows = session.execute(
+        select(AdWorkstation.ou_path, AdWorkstation.distinguished_name).where(
+            AdWorkstation.is_present.is_(True),
+            AdWorkstation.is_server_or_dc.is_(False),
+            AdWorkstation.ou_path != "",
+        )
+    ).all()
+    # node_dn -> {label, count, children set}
+    nodes: dict[str, dict[str, Any]] = {}
+    for ou_path, dn in rows:
+        path = (ou_path or "").strip()
+        if not path:
+            continue
+        # Count this computer on its own OU and every ancestor OU.
+        parts = [p.strip() for p in path.split(",") if p.strip()]
+        for i in range(len(parts)):
+            if not parts[i].upper().startswith("OU="):
+                continue
+            node_dn = ",".join(parts[i:])
+            entry = nodes.setdefault(
+                node_dn,
+                {
+                    "id": node_dn,
+                    "label": _ou_label(node_dn),
+                    "breadcrumb": _breadcrumb_for_ou_dn(node_dn),
+                    "count": 0,
+                    "childIds": set(),
+                },
+            )
+            entry["count"] += 1
+            # Link to parent OU if present
+            for j in range(i + 1, len(parts)):
+                if parts[j].upper().startswith("OU="):
+                    parent_dn = ",".join(parts[j:])
+                    parent = nodes.setdefault(
+                        parent_dn,
+                        {
+                            "id": parent_dn,
+                            "label": _ou_label(parent_dn),
+                            "breadcrumb": _breadcrumb_for_ou_dn(parent_dn),
+                            "count": 0,
+                            "childIds": set(),
+                        },
+                    )
+                    parent["childIds"].add(node_dn)
+                    break
+
+    def _to_tree(node_dn: str) -> dict[str, Any]:
+        entry = nodes[node_dn]
+        children = sorted(
+            (_to_tree(cid) for cid in entry["childIds"] if cid in nodes),
+            key=lambda n: n["label"].lower(),
+        )
+        payload: dict[str, Any] = {
+            "id": entry["id"],
+            "label": entry["label"],
+            "breadcrumb": entry["breadcrumb"],
+            "count": entry["count"],
+        }
+        # Omit empty children — Quasar QTree treats [] as expandable empty nodes.
+        if children:
+            payload["children"] = children
+        return payload
+
+    roots = []
+    for node_dn, entry in nodes.items():
+        # Root = no other node lists this as child
+        is_child = any(node_dn in other["childIds"] for other in nodes.values())
+        if not is_child:
+            roots.append(_to_tree(node_dn))
+    roots.sort(key=lambda n: n["label"].lower())
+    return roots
+
+
 def list_workstations(
     session: Session,
     *,
     settings: Settings | None = None,
     search: str = "",
     ou: str = "",
+    scope_ou: str = "",
+    filter_ou_dns: list[str] | None = None,
+    include_children: bool = True,
     account_status: str = "",
     reachability: str = "",
     agent_status: str = "",
     assigned: str = "",
+    deploy_status: str = "",
     include_missing: bool = False,
     include_servers: bool = False,
-    scope_only: bool = True,
+    scope_only: bool = False,
     sort: str = "computerName",
     sort_dir: str = "asc",
     page: int = 1,
     page_size: int = 25,
 ) -> dict[str, Any]:
+    """List AD workstations.
+
+    Inventory visibility is independent of agent deployment / pilot GPO and of AD sync scope.
+    ``filter_ou_dns`` is a *display* filter only — it never mutates sync OU selection.
+    """
     settings = settings or get_settings()
     page = max(1, int(page))
     page_size = max(1, min(int(page_size), 200))
+    active_sync_ous = _saved_sync_ou_dns(session)
+    display_ous = [d.strip() for d in (filter_ou_dns or []) if (d or "").strip()]
+    # Legacy single scopeOu still supported.
+    selected_scope = (scope_ou or "").strip()
+    if selected_scope and not display_ous:
+        display_ous = [selected_scope]
+
     q = select(AdWorkstation)
     if not include_missing:
         q = q.where(AdWorkstation.is_present.is_(True))
     if not include_servers:
         q = q.where(AdWorkstation.is_server_or_dc.is_(False))
+    # Exact leaf OU path (optional secondary refine).
     if ou:
         q = q.where(AdWorkstation.ou_path == ou)
     if account_status == "enabled":
@@ -601,27 +761,64 @@ def list_workstations(
             )
         )
 
-    # Agent status filter requires post-filter (join desktop devices)
     rows = list(session.execute(q).scalars().all())
-    active_sync_ous = _saved_sync_ou_dns(session)
-    if scope_only and active_sync_ous:
+    if display_ous:
+        if include_children:
+            rows = [ws for ws in rows if _dn_in_scopes(ws.distinguished_name, display_ous)]
+        else:
+            wanted = {d.lower() for d in display_ous}
+            rows = [ws for ws in rows if (ws.ou_path or "").lower() in wanted]
+    elif scope_only and active_sync_ous:
+        # Legacy multi-OU OR filter — UI no longer defaults to this.
         rows = [ws for ws in rows if _dn_in_scopes(ws.distinguished_name, active_sync_ous)]
-    if agent_status:
+
+    # Cached readiness + pilot SIDs once per list (not per row). Deploy submit still force-refreshes.
+    from qka_api.services import gpo_engine
+
+    list_prereq = deploy_svc.deployment_prerequisites(settings)
+    pilot_member_sids = gpo_engine.list_pilot_group_member_sids(
+        str(list_prereq.get("gpoTargetGroup") or gpo_engine.DEFAULT_TARGET_GROUP)
+    )
+
+    if agent_status or deploy_status:
         filtered: list[AdWorkstation] = []
         for ws in rows:
-            dto = workstation_dto(session, ws, settings)
-            if agent_status == "not_registered" and dto["agentStatus"] == "not_registered":
-                filtered.append(ws)
-            elif agent_status == "connected" and dto["agentStatus"] == "connected":
-                filtered.append(ws)
-            elif agent_status == "registered" and dto["agentStatus"] in (
-                "connected",
-                "registered_offline",
-                "revoked",
-            ):
-                filtered.append(ws)
-            elif agent_status == dto["agentStatus"]:
-                filtered.append(ws)
+            dto = workstation_dto(
+                session,
+                ws,
+                settings,
+                prereq=list_prereq,
+                pilot_member_sids=pilot_member_sids,
+            )
+            if agent_status:
+                ok = False
+                if agent_status == "not_registered" and dto["agentStatus"] == "not_registered":
+                    ok = True
+                elif agent_status == "connected" and dto["agentStatus"] == "connected":
+                    ok = True
+                elif agent_status == "registered" and dto["agentStatus"] in (
+                    "connected",
+                    "registered_offline",
+                    "revoked",
+                ):
+                    ok = True
+                elif agent_status == dto["agentStatus"]:
+                    ok = True
+                if not ok:
+                    continue
+            if deploy_status:
+                job_status = ((dto.get("deploymentJob") or {}) or {}).get("status") or ""
+                agent_deploy = ((dto.get("deployAgent") or {}) or {}).get("status") or ""
+                needle_status = deploy_status.lower()
+                if needle_status == "none":
+                    if job_status:
+                        continue
+                elif needle_status == "ready":
+                    if agent_deploy != "ready":
+                        continue
+                elif job_status != needle_status:
+                    continue
+            filtered.append(ws)
         rows = filtered
 
     reverse = sort_dir.lower() == "desc"
@@ -642,9 +839,17 @@ def list_workstations(
     total = len(rows)
     start = (page - 1) * page_size
     page_rows = rows[start : start + page_size]
-    items = [workstation_dto(session, ws, settings) for ws in page_rows]
+    items = [
+        workstation_dto(
+            session,
+            ws,
+            settings,
+            prereq=list_prereq,
+            pilot_member_sids=pilot_member_sids,
+        )
+        for ws in page_rows
+    ]
 
-    # Summary + OU filter options match the same scoped row set shown in the table.
     summary = {
         "totalPresent": len(rows),
         "assigned": sum(1 for ws in rows if ws.assigned_qka_user_id is not None),
@@ -654,6 +859,14 @@ def list_workstations(
         "unchecked": sum(1 for ws in rows if ws.reachability_status == REACH_UNCHECKED),
     }
     ous = sorted({(ws.ou_path or "") for ws in rows if ws.ou_path})
+    sync_ou_options = [
+        {
+            "name": _ou_label(dn),
+            "distinguishedName": dn,
+            "breadcrumb": _breadcrumb_for_ou_dn(dn),
+        }
+        for dn in active_sync_ous
+    ]
     return {
         "items": items,
         "total": total,
@@ -661,11 +874,16 @@ def list_workstations(
         "pageSize": page_size,
         "summary": summary,
         "ous": ous,
-        "scopeOnly": bool(scope_only and active_sync_ous),
-        "activeSyncOus": [
-            {"name": dn.split(",")[0].removeprefix("OU=").removeprefix("ou="), "distinguishedName": dn}
-            for dn in active_sync_ous
-        ],
+        "ouTree": build_inventory_ou_tree(session),
+        "filterOuDns": display_ous,
+        "includeChildren": bool(include_children),
+        "scopeOu": display_ous[0] if len(display_ous) == 1 else None,
+        "scopeOnly": bool(display_ous) or bool(scope_only and active_sync_ous),
+        "activeSyncOus": sync_ou_options,
+        "syncScopeNote": (
+            "Configured AD sync OUs (inventory refresh only). Display filters never change this."
+        ),
+        "readinessCached": bool(list_prereq.get("cached")),
     }
 
 

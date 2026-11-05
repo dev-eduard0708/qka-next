@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from threading import Lock
 from urllib.parse import urlparse
 
 from sqlalchemy import select
@@ -39,6 +41,17 @@ _ACTIVE_JOB_STATUSES = {
     DEPLOY_WAITING_COMPUTER,
 }
 
+_PREREQ_TTL_SEC = 45.0
+_PREREQ_CACHE: dict[str, tuple[float, dict]] = {}
+_PREREQ_LOCK = Lock()
+
+
+def invalidate_deployment_readiness_cache() -> None:
+    """Clear display-cache for readiness; deploy submit always uses force_refresh."""
+    with _PREREQ_LOCK:
+        _PREREQ_CACHE.clear()
+    gpo_engine.invalidate_ad_readiness_caches()
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -67,7 +80,25 @@ def _status_label(status: int) -> str:
     }.get(status, "unknown")
 
 
-def deployment_prerequisites(settings: Settings) -> dict:
+def deployment_prerequisites(settings: Settings, *, force_refresh: bool = False) -> dict:
+    """Readiness snapshot for UI. Cached briefly; pass force_refresh=True for deploy submit."""
+    cache_key = "|".join(
+        [
+            (settings.agent_public_base_url or "").strip(),
+            (getattr(settings, "agent_msi_unc", None) or "").strip(),
+            (getattr(settings, "agent_token_drop_unc", None) or "").strip(),
+            (getattr(settings, "agent_token_provisioning", None) or "").strip().lower(),
+        ]
+    )
+    now = time.monotonic()
+    if not force_refresh:
+        with _PREREQ_LOCK:
+            hit = _PREREQ_CACHE.get(cache_key)
+            if hit and (now - hit[0]) < _PREREQ_TTL_SEC:
+                cached = dict(hit[1])
+                cached["cached"] = True
+                return cached
+
     base = (settings.agent_public_base_url or "").strip()
     parsed = urlparse(base)
     https_ok = (
@@ -78,7 +109,7 @@ def deployment_prerequisites(settings: Settings) -> dict:
     )
     msi_unc = (getattr(settings, "agent_msi_unc", None) or "").strip()
     drop_unc = (getattr(settings, "agent_token_drop_unc", None) or "").strip()
-    gpo = gpo_engine.probe_gpo_engine(msi_unc=msi_unc)
+    gpo = gpo_engine.probe_gpo_engine(msi_unc=msi_unc, force_refresh=force_refresh)
     # Preferred: unc_acl_drop — server stages per-SID *.tok with computer-only ACL; agent claims+deletes.
     # Fallback: hkml_out_of_band — Provision-MachineEnrollmentToken.ps1 (no paste into GPO/SYSVOL).
     provisioning_mode = (getattr(settings, "agent_token_provisioning", None) or "").strip().lower()
@@ -127,14 +158,33 @@ def deployment_prerequisites(settings: Settings) -> dict:
     if not gpo.msi_present:
         blockers.append(f"MSI missing at {gpo.msi_path}.")
     if not gpo.available:
-        # Surface hard GPO/UNC/membership blockers only (skip success text / NOTE: lines).
-        for part in (gpo.reason or "").split(". "):
-            text = part.strip().rstrip(".")
+        # Use structured hard_reasons — never sentence-split gpo.reason (that turned
+        # "On a GPMC host run…" into a false GPMC-required blocker). Skip NOTE: lines.
+        hard = list(getattr(gpo, "hard_reasons", ()) or ())
+        if not hard:
+            # Backward-compatible fallback for older probe mocks in tests.
+            for part in (gpo.reason or "").split(". "):
+                text = part.strip().rstrip(".")
+                if not text or text.startswith("NOTE:"):
+                    continue
+                lower = text.lower()
+                # Local GPMC is never a hard blocker on the API host.
+                if lower.startswith("on a gpmc host"):
+                    continue
+                if "group policy management" in lower or "rsat gpmc" in lower or "gpmc" in lower:
+                    continue
+                hard.append(text if text.endswith(".") else text + ".")
+        for line in hard:
+            text = line.strip()
             if not text or text.startswith("NOTE:"):
                 continue
-            line = text if text.endswith(".") else text + "."
-            if line not in blockers:
-                blockers.append(line)
+            lower = text.lower()
+            if "group policy management" in lower or "rsat gpmc" in lower:
+                continue
+            if not text.endswith("."):
+                text += "."
+            if text not in blockers:
+                blockers.append(text)
     if not unc_drop_mode and not hkml_mode:
         blockers.append(
             "Set QKA_AGENT_TOKEN_PROVISIONING=unc_acl_drop (preferred) with QKA_AGENT_TOKEN_DROP_UNC, "
@@ -153,7 +203,7 @@ def deployment_prerequisites(settings: Settings) -> dict:
     # tlsTrust: server-side HTTPS health already validated in ops; clients still need CER trust.
     tls_trust = "server_ok_pilot_cer_required" if https_ok else "blocked"
     deploy_enabled = bool(https_ok and gpo.available and machine_proof_ready and not blockers)
-    return {
+    payload = {
         "deployEnabled": deploy_enabled,
         "httpsConfigured": https_ok,
         "httpsEndpoint": base if https_ok else "",
@@ -176,6 +226,11 @@ def deployment_prerequisites(settings: Settings) -> dict:
             "gpoLinkTargets": list(gpo.ad_gpo_link_targets),
             "gpmcPresent": gpo.gpmc_present,
         },
+        "approvedPilotComputer": "WSIT02",
+        "pilotAuthorization": (
+            "Each Deploy target must be a computer member of QKA-Agent-Pilot-Computers "
+            "(matched by AD objectSid). Name-only matching is not accepted."
+        ),
         "machineIdentityEnrollmentReady": machine_proof_ready,
         "machineProofSecurity": machine_proof,
         "manualEnrollmentCodeFallback": True,
@@ -185,11 +240,17 @@ def deployment_prerequisites(settings: Settings) -> dict:
         "realPcDeployAllowed": deploy_enabled,
         "tokenDropUnc": drop_unc,
         "note": (
-            "Deploy Agent enables only for selected computers after HTTPS, MSI UNC, linked "
-            "pilot-scoped GPO, pilot group membership, and unc_acl_drop (or hkml fallback) are ready. "
-            "Confirmation phrase required. Install success = agent registration + heartbeat."
+            "Deploy Agent enables only for selected computers that are members of "
+            "QKA-Agent-Pilot-Computers (SID-verified), after HTTPS, MSI UNC, linked "
+            "pilot-scoped GPO, and unc_acl_drop (or hkml fallback) are ready. "
+            "Approved pilot computer: WSIT02. Confirmation phrase required. "
+            "Install success = agent registration + heartbeat."
         ),
+        "cached": False,
     }
+    with _PREREQ_LOCK:
+        _PREREQ_CACHE[cache_key] = (time.monotonic(), dict(payload))
+    return payload
 
 
 def job_dto(job: AgentDeploymentJob, ws: AdWorkstation | None = None) -> dict:
@@ -233,7 +294,8 @@ def request_deployments(
     confirmation: str,
     approve: bool = True,
 ) -> dict:
-    prereq = deployment_prerequisites(settings)
+    # Fail-closed: always revalidate readiness + pilot SIDs at submit time (ignore display cache).
+    prereq = deployment_prerequisites(settings, force_refresh=True)
     if (confirmation or "").strip() != CONFIRM_PHRASE:
         raise ValueError(f'Confirmation phrase must be exactly "{CONFIRM_PHRASE}".')
     if not approve:
@@ -247,17 +309,36 @@ def request_deployments(
     if len(ids) > int(prereq["maxBulk"]):
         raise ValueError(f"Select at most {prereq['maxBulk']} workstations per batch.")
 
-    gpo = gpo_engine.probe_gpo_engine(msi_unc=(getattr(settings, "agent_msi_unc", None) or "").strip())
-    jobs: list[dict] = []
-    tokens_issued = 0
-    computer_names: list[str] = []
+    gpo = gpo_engine.probe_gpo_engine(
+        msi_unc=(getattr(settings, "agent_msi_unc", None) or "").strip(),
+        force_refresh=True,
+    )
+    # Authorize every target against live AD pilot-group membership (objectSid), before any job/token.
+    pilot_sids = gpo_engine.list_pilot_group_member_sids(gpo.target_group, force_refresh=True)
+    authorized: list[AdWorkstation] = []
     for wid in ids:
         ws = session.get(AdWorkstation, wid)
         if ws is None or not ws.is_present:
             raise LookupError(f"Workstation {wid} was not found or is not present.")
-        # Employee assignment is optional at deploy/install time (assign after registration).
-        if not (ws.object_sid or "").strip():
+        sid = (ws.object_sid or "").strip()
+        if not sid:
             raise ValueError(f"{ws.computer_name}: AD objectSid is required for machine-identity enrollment.")
+        if not gpo_engine.computer_sid_in_pilot_group(
+            sid, target_group=gpo.target_group, member_sids=pilot_sids
+        ):
+            raise ValueError(
+                f"{ws.computer_name}: not authorized for pilot deployment — AD objectSid is not a "
+                f"computer member of '{gpo.target_group}'. Add only the approved pilot computer "
+                f"(WSIT02) via Add-QkaPilotComputer.ps1; do not deploy other workstations."
+            )
+        authorized.append(ws)
+
+    jobs: list[dict] = []
+    tokens_issued = 0
+    computer_names: list[str] = []
+    for ws in authorized:
+        wid = ws.id
+        # Employee assignment is optional at deploy/install time (assign after registration).
 
         open_job = session.execute(
             select(AgentDeploymentJob).where(
@@ -416,7 +497,23 @@ def retry_job(session: Session, settings: Settings, *, actor: QkaUser, job_id: u
         raise LookupError("Deployment job was not found.")
     if job.status not in {DEPLOY_FAILED, DEPLOY_WAITING_COMPUTER, DEPLOY_CANCELLED}:
         raise ValueError("Only failed, waiting, or cancelled jobs can be retried.")
-    prereq = deployment_prerequisites(settings)
+    ws = session.get(AdWorkstation, job.workstation_id)
+    if ws is None:
+        raise LookupError("Workstation for that deployment job was not found.")
+    sid = (ws.object_sid or "").strip()
+    if not gpo_engine.computer_sid_in_pilot_group(
+        sid,
+        target_group=job.gpo_target_group or gpo_engine.DEFAULT_TARGET_GROUP,
+        member_sids=gpo_engine.list_pilot_group_member_sids(
+            job.gpo_target_group or gpo_engine.DEFAULT_TARGET_GROUP,
+            force_refresh=True,
+        ),
+    ):
+        raise ValueError(
+            f"{ws.computer_name}: not authorized for pilot deployment — AD objectSid is not a "
+            f"computer member of '{job.gpo_target_group or gpo_engine.DEFAULT_TARGET_GROUP}'."
+        )
+    prereq = deployment_prerequisites(settings, force_refresh=True)
     job.attempt_count = int(job.attempt_count or 0) + 1
     job.updated_at = _now()
     job.cancelled_at = None
@@ -430,7 +527,6 @@ def retry_job(session: Session, settings: Settings, *, actor: QkaUser, job_id: u
         job.last_error = "; ".join(prereq["blockers"])[:2000]
         job.engine = "blocked"
     session.flush()
-    ws = session.get(AdWorkstation, job.workstation_id)
     return job_dto(job, ws)
 
 

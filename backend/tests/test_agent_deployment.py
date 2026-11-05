@@ -15,6 +15,12 @@ from qka_shared.models import DEPLOY_FAILED, AgentDeploymentJob
 from tests.conftest import ALLOWED_USER, auth_cookies
 from tests.test_workstations import _admin, _ensure_ad_connection, _install
 
+# Fake LDAP SIDs from tests/fake_ldap.py
+PILOT_SID = "S-1-5-21-1-2-3-3001"
+FINANCE_SID = "S-1-5-21-1-2-3-3002"
+# Real approved pilot (documentation / live AD) — not in fake LDAP inventory.
+WSIT02_SID = "S-1-5-21-3770028088-2973123715-664028206-1527"
+
 
 def _sync_workstations(client, headers) -> list[dict]:
     conn_id = _ensure_ad_connection(client, headers)
@@ -84,6 +90,22 @@ def test_prerequisites_block_without_https_and_gpo(client):
     assert body["realPcDeployAllowed"] is False
     assert body["blockers"]
     assert body["confirmationPhrase"] == deploy_svc.CONFIRM_PHRASE
+    # Local GPMC absence must never appear as a deploy blocker.
+    joined = " ".join(body["blockers"]).lower()
+    assert "gpmc/get-gpo is not on this qka" not in joined
+    assert not any(b.lower().startswith("on a gpmc host") for b in body["blockers"])
+
+
+def test_gpo_hard_reasons_exclude_gpmc_note():
+    status = gpo_engine.probe_gpo_engine(msi_unc="")
+    assert all(not r.startswith("NOTE:") for r in status.hard_reasons)
+    assert all("On a GPMC host" not in r for r in status.hard_reasons)
+    assert any("MSI UNC" in r for r in status.hard_reasons)
+    from qka_shared.config import get_settings
+
+    pr = deploy_svc.deployment_prerequisites(get_settings())
+    assert not any(b.lower().startswith("on a gpmc host") for b in pr["blockers"])
+    assert not any("gpmc/get-gpo is not on this qka" in b.lower() for b in pr["blockers"])
 
 
 def test_deploy_rejected_when_prerequisites_fail(client):
@@ -149,6 +171,7 @@ def test_selected_and_bulk_deploy_jobs_when_ready(client, tmp_path):
 
     with (
         patch.object(gpo_engine, "probe_gpo_engine", return_value=ready),
+        patch.object(gpo_engine, "list_pilot_group_member_sids", return_value=frozenset({PILOT_SID})),
         patch.object(deploy_svc, "deployment_prerequisites") as prereq_fn,
     ):
         prereq_fn.return_value = {
@@ -160,6 +183,7 @@ def test_selected_and_bulk_deploy_jobs_when_ready(client, tmp_path):
             "gpoEngineAvailable": True,
             "msiPresent": True,
             "maxBulk": 50,
+            "gpoTargetGroup": "QKA-Agent-Pilot-Computers",
         }
         # Wrong confirmation
         bad = client.post(
@@ -169,7 +193,7 @@ def test_selected_and_bulk_deploy_jobs_when_ready(client, tmp_path):
         )
         assert bad.status_code == 400
 
-        # Single selected PC
+        # Single selected PC (pilot-group member by SID)
         one = client.post(
             "/api/v1/admin/workstations/deploy",
             headers=headers,
@@ -204,8 +228,8 @@ def test_selected_and_bulk_deploy_jobs_when_ready(client, tmp_path):
         assert cancel.status_code == 200
         assert cancel.json()["status"] == "cancelled"
 
-        # Bulk remaining computer
-        bulk = client.post(
+        # Non-pilot SID rejected even when global prereqs are ready — no job/token created.
+        denied = client.post(
             "/api/v1/admin/workstations/deploy",
             headers=headers,
             json={
@@ -214,8 +238,22 @@ def test_selected_and_bulk_deploy_jobs_when_ready(client, tmp_path):
                 "approve": True,
             },
         )
-        assert bulk.status_code == 200, bulk.text
-        assert bulk.json()["gpoManifest"]["computers"] == ["FINANCE-01"]
+        assert denied.status_code == 400
+        assert "not authorized for pilot deployment" in denied.json()["detail"].lower()
+        assert FINANCE_SID not in denied.json()["detail"]  # do not leak unrelated internals needlessly
+
+        # Mixed batch with one unauthorized PC rejects entirely (no partial tokens).
+        mixed = client.post(
+            "/api/v1/admin/workstations/deploy",
+            headers=headers,
+            json={
+                "workstationIds": [pilot["id"], finance["id"]],
+                "confirmation": deploy_svc.CONFIRM_PHRASE,
+                "approve": True,
+            },
+        )
+        assert mixed.status_code == 400
+        assert "FINANCE-01" in mixed.json()["detail"]
 
 
 def test_deploy_without_employee_then_enroll_unassigned(client, tmp_path):
@@ -239,6 +277,7 @@ def test_deploy_without_employee_then_enroll_unassigned(client, tmp_path):
     settings = Settings(agent_public_base_url="https://agent.qehc.internal")
     with (
         patch.object(gpo_engine, "probe_gpo_engine", return_value=ready),
+        patch.object(gpo_engine, "list_pilot_group_member_sids", return_value=frozenset({PILOT_SID})),
         patch.object(deploy_svc, "deployment_prerequisites") as prereq_fn,
     ):
         prereq_fn.return_value = {
@@ -250,6 +289,7 @@ def test_deploy_without_employee_then_enroll_unassigned(client, tmp_path):
             "gpoEngineAvailable": True,
             "msiPresent": True,
             "maxBulk": 50,
+            "gpoTargetGroup": "QKA-Agent-Pilot-Computers",
         }
         created = client.post(
             "/api/v1/admin/workstations/deploy",
@@ -315,6 +355,7 @@ def test_machine_identity_enroll_and_job_registered(client, tmp_path):
     settings = Settings(agent_public_base_url="https://agent.qehc.internal")
     with (
         patch.object(gpo_engine, "probe_gpo_engine", return_value=ready),
+        patch.object(gpo_engine, "list_pilot_group_member_sids", return_value=frozenset({PILOT_SID})),
         patch.object(deploy_svc, "deployment_prerequisites") as prereq_fn,
     ):
         prereq_fn.return_value = {
@@ -326,6 +367,7 @@ def test_machine_identity_enroll_and_job_registered(client, tmp_path):
             "gpoEngineAvailable": True,
             "msiPresent": True,
             "maxBulk": 50,
+            "gpoTargetGroup": "QKA-Agent-Pilot-Computers",
         }
         created = client.post(
             "/api/v1/admin/workstations/deploy",
@@ -457,6 +499,7 @@ def test_offline_workstation_still_schedules_without_claiming_install(client, tm
     settings = Settings(agent_public_base_url="https://agent.qehc.internal")
     with (
         patch.object(gpo_engine, "probe_gpo_engine", return_value=ready),
+        patch.object(gpo_engine, "list_pilot_group_member_sids", return_value=frozenset({PILOT_SID})),
         patch.object(deploy_svc, "deployment_prerequisites") as prereq_fn,
     ):
         prereq_fn.return_value = {
@@ -468,6 +511,7 @@ def test_offline_workstation_still_schedules_without_claiming_install(client, tm
             "gpoEngineAvailable": True,
             "msiPresent": True,
             "maxBulk": 50,
+            "gpoTargetGroup": "QKA-Agent-Pilot-Computers",
         }
         created = client.post(
             "/api/v1/admin/workstations/deploy",
@@ -517,8 +561,133 @@ def test_retry_failed_job_without_duplicate(client):
         session.commit()
         job_id = str(job.id)
 
-    retried = client.post(f"/api/v1/admin/workstations/deploy/{job_id}/retry", headers=headers)
+    with patch.object(gpo_engine, "list_pilot_group_member_sids", return_value=frozenset({PILOT_SID})):
+        retried = client.post(f"/api/v1/admin/workstations/deploy/{job_id}/retry", headers=headers)
     assert retried.status_code == 200, retried.text
     # Without live HTTPS/GPO, retry stays waiting — never invents installing.
     assert retried.json()["status"] in {"waiting_for_computer", "scheduled"}
     assert retried.json()["attemptCount"] == 2
+
+
+def test_deploy_rejects_non_pilot_sid_creates_no_token(client, tmp_path):
+    """Unauthorized computer cannot receive a deployment job or enrollment token."""
+    from qka_shared.models import MachineEnrollmentToken
+    from sqlalchemy import func, select
+
+    _install(client)
+    headers = _admin(client)
+    items = _sync_workstations(client, headers)
+    finance = next(i for i in items if i["computerName"] == "FINANCE-01")
+    assert finance["objectSid"] == FINANCE_SID
+
+    msi = tmp_path / "QKA-Agent.msi"
+    msi.write_bytes(b"MZ")
+    ready = gpo_engine.GpoEngineStatus(
+        available=True,
+        reason="ok",
+        target_group="QKA-Agent-Pilot-Computers",
+        msi_path=str(msi),
+        msi_present=True,
+        gpmc_present=True,
+    )
+    settings = Settings(agent_public_base_url="https://agent.qehc.internal")
+    # Only WSIT02's real SID is in the pilot group — FINANCE-01 must be rejected.
+    with (
+        patch.object(gpo_engine, "probe_gpo_engine", return_value=ready),
+        patch.object(gpo_engine, "list_pilot_group_member_sids", return_value=frozenset({WSIT02_SID})),
+        patch.object(deploy_svc, "deployment_prerequisites") as prereq_fn,
+    ):
+        prereq_fn.return_value = {
+            **deploy_svc.deployment_prerequisites(settings),
+            "deployEnabled": True,
+            "httpsConfigured": True,
+            "httpsEndpoint": "https://agent.qehc.internal",
+            "blockers": [],
+            "gpoEngineAvailable": True,
+            "msiPresent": True,
+            "maxBulk": 50,
+            "gpoTargetGroup": "QKA-Agent-Pilot-Computers",
+            "approvedPilotComputer": "WSIT02",
+        }
+        before = 0
+        with client.app.state.session_factory() as session:
+            before = session.execute(select(func.count()).select_from(MachineEnrollmentToken)).scalar_one()
+
+        denied = client.post(
+            "/api/v1/admin/workstations/deploy",
+            headers=headers,
+            json={
+                "workstationIds": [finance["id"]],
+                "confirmation": deploy_svc.CONFIRM_PHRASE,
+                "approve": True,
+            },
+        )
+        assert denied.status_code == 400
+        detail = denied.json()["detail"].lower()
+        assert "not authorized for pilot deployment" in detail
+        assert "wsit02" in detail
+
+        with client.app.state.session_factory() as session:
+            after = session.execute(select(func.count()).select_from(MachineEnrollmentToken)).scalar_one()
+            jobs = session.execute(select(func.count()).select_from(AgentDeploymentJob)).scalar_one()
+        assert after == before
+        assert jobs == 0
+
+
+def test_list_marks_non_pilot_ineligible_for_deploy(client, tmp_path):
+    _install(client)
+    headers = _admin(client)
+    _sync_workstations(client, headers)
+    settings = Settings(agent_public_base_url="https://agent.qehc.internal")
+    (tmp_path / "QKA-Agent.msi").write_bytes(b"MZ")
+    ready = gpo_engine.GpoEngineStatus(
+        available=True,
+        reason="ok",
+        target_group="QKA-Agent-Pilot-Computers",
+        msi_path=str(tmp_path / "QKA-Agent.msi"),
+        msi_present=True,
+        gpmc_present=True,
+    )
+    # Build prereq from the real function before patching (mock would recurse).
+    with patch.object(gpo_engine, "probe_gpo_engine", return_value=ready):
+        base_prereq = deploy_svc.deployment_prerequisites(settings)
+    base_prereq = {
+        **base_prereq,
+        "deployEnabled": True,
+        "httpsConfigured": True,
+        "httpsEndpoint": "https://agent.qehc.internal",
+        "tlsTrust": "server_ok_pilot_cer_required",
+        "blockers": [],
+        "gpoEngineAvailable": True,
+        "msiPresent": True,
+        "maxBulk": 50,
+        "gpoTargetGroup": "QKA-Agent-Pilot-Computers",
+        "machineIdentityEnrollmentReady": True,
+    }
+    with (
+        patch.object(gpo_engine, "probe_gpo_engine", return_value=ready),
+        patch.object(gpo_engine, "list_pilot_group_member_sids", return_value=frozenset({PILOT_SID})),
+        patch.object(deploy_svc, "deployment_prerequisites", return_value=base_prereq),
+    ):
+        listed = client.get("/api/v1/admin/workstations?scopeOnly=false", headers=headers)
+        assert listed.status_code == 200
+        by_name = {i["computerName"]: i for i in listed.json()["items"]}
+        assert by_name["PILOT-PC"]["deployAgent"]["pilotGroupMember"] is True
+        assert by_name["PILOT-PC"]["deployAgent"]["enabled"] is True
+        assert by_name["FINANCE-01"]["deployAgent"]["pilotGroupMember"] is False
+        assert by_name["FINANCE-01"]["deployAgent"]["enabled"] is False
+        assert "QKA-Agent-Pilot-Computers" in by_name["FINANCE-01"]["deployAgent"]["note"]
+
+
+def test_wsit02_sid_recognized_as_only_approved_pilot_identity():
+    """Document/verify the live WSIT02 objectSid used for pilot authorization."""
+    assert WSIT02_SID.startswith("S-1-5-21-")
+    assert gpo_engine.computer_sid_in_pilot_group(
+        WSIT02_SID, member_sids=frozenset({WSIT02_SID})
+    )
+    assert not gpo_engine.computer_sid_in_pilot_group(
+        FINANCE_SID, member_sids=frozenset({WSIT02_SID})
+    )
+    assert not gpo_engine.computer_sid_in_pilot_group(
+        "WSIT02", member_sids=frozenset({WSIT02_SID})
+    )  # name-only must never authorize

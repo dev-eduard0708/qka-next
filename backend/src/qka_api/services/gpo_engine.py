@@ -11,8 +11,17 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Lock
+
+_PILOT_SID_TTL_SEC = 60.0
+_PILOT_SID_CACHE: dict[str, tuple[float, frozenset[str]]] = {}
+_PILOT_SID_LOCK = Lock()
+_GPO_PROBE_TTL_SEC = 45.0
+_GPO_PROBE_CACHE: dict[str, tuple[float, "GpoEngineStatus"]] = {}
+_GPO_PROBE_LOCK = Lock()
 
 
 DEFAULT_MSI_PATH = Path(r"C:\QehcAI\QKA-Next\agent\dist\QKA-Agent.msi")
@@ -38,6 +47,8 @@ class GpoEngineStatus:
     ad_gpo_guid: str = ""
     ad_gpo_linked: bool = False
     ad_gpo_link_targets: tuple[str, ...] = field(default_factory=tuple)
+    # Hard failures only (never GPMC-missing notes or instructional fragments).
+    hard_reasons: tuple[str, ...] = field(default_factory=tuple)
 
 
 def _gpmc_tools_present() -> bool:
@@ -78,6 +89,92 @@ def _unc_reachable(unc: str) -> bool:
         return Path(path).is_file()
     except Exception:
         return False
+
+
+def invalidate_ad_readiness_caches() -> None:
+    """Drop cached AD probes (call after admin changes GPO/pilot membership)."""
+    with _PILOT_SID_LOCK:
+        _PILOT_SID_CACHE.clear()
+    with _GPO_PROBE_LOCK:
+        _GPO_PROBE_CACHE.clear()
+
+
+def list_pilot_group_member_sids(
+    target_group: str = DEFAULT_TARGET_GROUP,
+    *,
+    force_refresh: bool = False,
+) -> frozenset[str]:
+    """Return objectSid values for computer accounts in the pilot security group.
+
+    Used to authorize Deploy Agent targets. Empty set means no computer is eligible.
+    Read-only — never adds/removes group members. Cached briefly for inventory UI.
+    """
+    group_key = (target_group or DEFAULT_TARGET_GROUP).strip() or DEFAULT_TARGET_GROUP
+    now = time.monotonic()
+    if not force_refresh:
+        with _PILOT_SID_LOCK:
+            hit = _PILOT_SID_CACHE.get(group_key)
+            if hit and (now - hit[0]) < _PILOT_SID_TTL_SEC:
+                return hit[1]
+
+    group = group_key.replace("'", "''")
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$sids = @()
+try {{
+  Import-Module ActiveDirectory -ErrorAction Stop
+  $g = Get-ADGroup -Identity '{group}' -ErrorAction Stop
+  $members = @(Get-ADGroupMember -Identity $g -Recursive -ErrorAction SilentlyContinue)
+  foreach ($m in $members) {{
+    if ($m.objectClass -ne 'computer') {{ continue }}
+    try {{
+      $c = Get-ADComputer -Identity $m.SID -Properties objectSid -ErrorAction Stop
+      if ($c.SID) {{ $sids += [string]$c.SID.Value }}
+    }} catch {{
+      try {{
+        $c = Get-ADComputer -Identity $m.SamAccountName -Properties objectSid -ErrorAction Stop
+        if ($c.SID) {{ $sids += [string]$c.SID.Value }}
+      }} catch {{}}
+    }}
+  }}
+}} catch {{}}
+(@{{ sids = $sids }} | ConvertTo-Json -Compress)
+"""
+    result: frozenset[str] = frozenset()
+    try:
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        raw = (completed.stdout or "").strip()
+        if raw:
+            data = json.loads(raw)
+            sids = data.get("sids") or []
+            if isinstance(sids, str):
+                sids = [sids]
+            result = frozenset(str(s).strip() for s in sids if str(s).strip())
+    except Exception:
+        result = frozenset()
+    with _PILOT_SID_LOCK:
+        _PILOT_SID_CACHE[group_key] = (time.monotonic(), result)
+    return result
+
+
+def computer_sid_in_pilot_group(
+    computer_sid: str,
+    *,
+    target_group: str = DEFAULT_TARGET_GROUP,
+    member_sids: frozenset[str] | None = None,
+) -> bool:
+    """True when the workstation's AD objectSid is a computer member of the pilot group."""
+    sid = (computer_sid or "").strip()
+    if not sid:
+        return False
+    members = member_sids if member_sids is not None else list_pilot_group_member_sids(target_group)
+    return sid in members
 
 
 def _probe_ad_objects(*, target_group: str, gpo_name: str) -> dict:
@@ -164,52 +261,59 @@ def probe_gpo_engine(
     target_group: str = DEFAULT_TARGET_GROUP,
     gpo_name: str = DEFAULT_GPO_NAME,
     msi_unc: str = "",
+    force_refresh: bool = False,
 ) -> GpoEngineStatus:
     path = msi_path or DEFAULT_MSI_PATH
+    unc = (msi_unc or "").strip()
+    cache_key = f"{path}|{target_group}|{gpo_name}|{unc}"
+    now = time.monotonic()
+    if not force_refresh:
+        with _GPO_PROBE_LOCK:
+            hit = _GPO_PROBE_CACHE.get(cache_key)
+            if hit and (now - hit[0]) < _GPO_PROBE_TTL_SEC:
+                return hit[1]
+
     msi_present = path.is_file()
     gpmc = _gpmc_tools_present()
-    unc = (msi_unc or "").strip()
     unc_ok = _unc_reachable(unc) if unc else False
     ad = _probe_ad_objects(target_group=target_group, gpo_name=gpo_name)
 
-    reasons: list[str] = []
+    hard: list[str] = []
+    notes: list[str] = []
     if not msi_present:
-        reasons.append("QKA-Agent.msi is missing on the build host.")
+        hard.append("QKA-Agent.msi is missing on the build host.")
     if unc and not unc_ok:
-        reasons.append(f"MSI UNC is not reachable: {unc}")
+        hard.append(f"MSI UNC is not reachable: {unc}")
     if not unc:
-        reasons.append(
+        hard.append(
             "Computer-readable MSI UNC is not configured (set QKA_AGENT_MSI_UNC after New-QkaAgentMsiShare.ps1)."
         )
     if not ad["groupExists"]:
-        reasons.append(f"AD security group '{target_group}' was not found.")
+        hard.append(f"AD security group '{target_group}' was not found.")
     elif ad["groupMembers"] == 0:
-        reasons.append(
+        hard.append(
             f"AD group '{target_group}' exists but has zero computer members — "
             "add only the approved pilot computer via Add-QkaPilotComputer.ps1 -IConfirmAddPilotComputer."
         )
     if not ad["gpoExists"]:
-        reasons.append(f"Dedicated GPO '{gpo_name}' was not found in AD.")
+        hard.append(f"Dedicated GPO '{gpo_name}' was not found in AD.")
     elif not ad["gpoLinked"]:
-        reasons.append(
-            f"GPO '{ad['gpoDisplayName'] or gpo_name}' exists but is not linked to any OU. "
-            "On a GPMC host run Configure-QkaAgentGpo.ps1 with security filtering to the pilot "
-            "computer group only (never Authenticated Users / entire domain)."
+        # Keep as one hard reason — do not embed "On a GPMC host…" here (that was split into a
+        # false GPMC-required blocker by the prerequisites sentence splitter).
+        hard.append(
+            f"GPO '{ad['gpoDisplayName'] or gpo_name}' exists but is not linked to any OU "
+            f"(run scripts/gpo-agent-deploy/Configure-QkaAgentGpo.ps1 on an authorized AD "
+            f"management host; Apply only for '{target_group}')."
         )
     if not gpmc:
-        # Informational for ops — AD-linked GPO can still be ready when managed elsewhere.
-        reasons.append(
+        # Informational only — local GPMC is NOT required on the QKA API host.
+        notes.append(
             "NOTE: GPMC/Get-GPO is not on this QKA API host — configure/link the GPO from an "
             "authorized AD management host (scripts/gpo-agent-deploy)."
         )
 
     # Available when MSI + UNC + AD group + linked GPO + ≥1 pilot member.
     # Local GPMC is NOT required on the API host (ops may use another management PC).
-    hard = [
-        r
-        for r in reasons
-        if not r.startswith("NOTE:")
-    ]
     available = bool(
         msi_present
         and unc_ok
@@ -220,15 +324,15 @@ def probe_gpo_engine(
         and not hard
     )
 
-    if not reasons:
+    if not hard and not notes:
         reason = (
             "GPO AD objects, MSI UNC, and pilot membership look ready. Deploy still requires "
-            "trusted HTTPS, Super Admin confirmation, and HKLM out-of-band token provisioning."
+            "trusted HTTPS, Super Admin confirmation, and secure per-computer token provisioning."
         )
     else:
-        reason = " ".join(reasons)
+        reason = " ".join([*hard, *notes])
 
-    return GpoEngineStatus(
+    status = GpoEngineStatus(
         available=available,
         reason=reason,
         target_group=target_group,
@@ -244,7 +348,11 @@ def probe_gpo_engine(
         ad_gpo_guid=str(ad["gpoGuid"] or ""),
         ad_gpo_linked=bool(ad["gpoLinked"]),
         ad_gpo_link_targets=tuple(ad["gpoLinks"] or ()),
+        hard_reasons=tuple(hard),
     )
+    with _GPO_PROBE_LOCK:
+        _GPO_PROBE_CACHE[cache_key] = (time.monotonic(), status)
+    return status
 
 
 def build_gpo_package_manifest(
