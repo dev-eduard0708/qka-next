@@ -268,6 +268,9 @@ def create_directory_user(
                 mcp_enabled=bool(body.mcpEnabled),
             )
         session.flush()
+        linked_existing = bool(enrolled.get("linkedExisting"))
+        # When AD is attached to an existing Google QkaUser, both identities are linked.
+        identity_source = "both" if linked_existing else "ad"
         return {
             "allowlistId": None,
             "qkaUserId": enrolled["qkaUserId"],
@@ -276,16 +279,20 @@ def create_directory_user(
             "contactEmail": enrolled.get("contactEmail"),
             "domainUsername": enrolled.get("domainUsername"),
             "department": enrolled.get("department") or "",
-            "identitySource": "ad",
-            "linkedIdentities": "ad",
-            "identityStatus": "ad_enrolled",
+            "identitySource": identity_source,
+            "linkedIdentities": identity_source,
+            "identityBadges": ["ad", "google"] if linked_existing else ["ad"],
+            "adLinked": True,
+            "googleLinked": linked_existing,
+            "identityStatus": "linked" if linked_existing else "ad_enrolled",
             "accountStatus": "active",
             "localChatEnabled": bool(body.localChatEnabled),
             "mcpEnabled": bool(body.mcpEnabled),
             "allowlisted": False,
             "adOnlyLoginImplemented": False,
+            "adBrowserLoginImplemented": False,
             "created": enrolled.get("created"),
-            "linkedExisting": enrolled.get("linkedExisting"),
+            "linkedExisting": linked_existing,
             "objectGuid": enrolled.get("objectGuid"),
             "objectSid": enrolled.get("objectSid"),
         }

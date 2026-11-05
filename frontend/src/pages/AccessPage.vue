@@ -117,7 +117,7 @@
               </q-card-section>
               <q-card-section class="q-gutter-md">
                 <q-select
-                  v-if="!editingUser || !hasLinkedAd"
+                  v-if="!editingUser || canAttachAd"
                   v-model="selectedAdUser"
                   outlined
                   dense
@@ -132,9 +132,8 @@
                   option-label="label"
                   emit-value
                   map-options
-                  :disable="!!editingUser"
-                  :label="t('access.adPickerOptional')"
-                  :hint="t('access.adPickerOptionalHint')"
+                  :label="editingUser ? t('access.adPickerLinkDomain') : t('access.adPickerOptional')"
+                  :hint="editingUser ? t('access.adPickerLinkDomainHint') : t('access.adPickerOptionalHint')"
                   @filter="filterAdUsers"
                   @update:model-value="onAdUserSelected"
                 >
@@ -742,9 +741,14 @@ const userColumns: QTableProps["columns"] = [
 const hasLinkedAd = computed(
   () =>
     !!editingUser.value &&
-    (editingUser.value.identitySource === "ad" ||
+    (editingUser.value.adLinked === true ||
+      editingUser.value.identitySource === "ad" ||
       editingUser.value.identitySource === "both" ||
       (editingUser.value.adIdentities || []).length > 0),
+);
+/** Google (or allowlist) employee with a QkaUser and no AD yet — Super Admin may attach a domain account. */
+const canAttachAd = computed(
+  () => !!editingUser.value?.qkaUserId && !hasLinkedAd.value,
 );
 
 const adDepartmentNeedsSelection = computed(() => {
@@ -1082,8 +1086,11 @@ async function filterAdUsers(val: string, update: (fn: () => void) => void) {
 function onAdUserSelected(guid: string | null) {
   if (!guid) {
     userForm.value.objectGuid = "";
-    userForm.value.domainUsername = "";
-    adDepartmentRaw.value = "";
+    if (!editingUser.value) {
+      userForm.value.domainUsername = "";
+      adDepartmentRaw.value = "";
+    }
+    userForm.value.linkExistingQkaUserId = editingUser.value?.qkaUserId || null;
     alreadyLinkedPrompt.value = false;
     pendingLinkedQkaUserId.value = null;
     return;
@@ -1094,19 +1101,39 @@ function onAdUserSelected(guid: string | null) {
     return;
   }
   if (hit.alreadyLinked && hit.linkedQkaUserId) {
+    // Attaching to this Google user is only valid when the AD account is free.
+    if (editingUser.value?.qkaUserId && hit.linkedQkaUserId === editingUser.value.qkaUserId) {
+      userForm.value.objectGuid = hit.objectGuid;
+      userForm.value.domainUsername = hit.samAccountName;
+      userForm.value.linkExistingQkaUserId = editingUser.value.qkaUserId;
+      alreadyLinkedPrompt.value = false;
+      pendingLinkedQkaUserId.value = null;
+      return;
+    }
     pendingLinkedQkaUserId.value = hit.linkedQkaUserId;
     alreadyLinkedPrompt.value = true;
     usersError.value = "";
     userForm.value.objectGuid = hit.objectGuid;
-    userForm.value.displayName = hit.displayName;
-    userForm.value.domainUsername = hit.samAccountName;
+    if (!editingUser.value) {
+      userForm.value.displayName = hit.displayName;
+      userForm.value.domainUsername = hit.samAccountName;
+    }
     return;
   }
   alreadyLinkedPrompt.value = false;
   pendingLinkedQkaUserId.value = null;
   userForm.value.objectGuid = hit.objectGuid;
-  userForm.value.displayName = hit.displayName;
   userForm.value.domainUsername = hit.samAccountName;
+  if (editingUser.value?.qkaUserId) {
+    // Keep Google profile fields; only stage the AD SID/GUID link.
+    userForm.value.linkExistingQkaUserId = editingUser.value.qkaUserId;
+    adDepartmentRaw.value = hit.department || "";
+    if (!(userForm.value.department || "").trim()) {
+      userForm.value.department = matchDepartmentOption(hit.department) || "";
+    }
+    return;
+  }
+  userForm.value.displayName = hit.displayName;
   userForm.value.email = hit.mail || "";
   adDepartmentRaw.value = hit.department || "";
   const matched = matchDepartmentOption(hit.department);
@@ -1134,6 +1161,18 @@ async function saveUserDialog() {
   usersError.value = "";
   try {
     if (editingUser.value) {
+      // Explicit Super Admin attach of AD domain identity onto existing Google QkaUser.
+      if (canAttachAd.value && userForm.value.objectGuid && editingUser.value.qkaUserId) {
+        await api.createDirectoryUser({
+          objectGuid: userForm.value.objectGuid,
+          displayName: userForm.value.displayName,
+          department: userForm.value.department || null,
+          contactEmail: userForm.value.email || null,
+          linkExistingQkaUserId: editingUser.value.qkaUserId,
+          localChatEnabled: userForm.value.localChatEnabled,
+          mcpEnabled: userForm.value.mcpEnabled,
+        });
+      }
       if (editingUser.value.allowlistId) {
         await api.updateDirectoryUser(editingUser.value.allowlistId, {
           displayName: userForm.value.displayName,
