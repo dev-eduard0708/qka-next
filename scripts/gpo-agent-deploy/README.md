@@ -6,13 +6,16 @@
 | --- | --- | --- |
 | MSI UNC | MSI binary + `QKASERVERURL` | Enrollment tokens |
 | GPO / SYSVOL | Startup install script, optional `TokenDropUnc` path (non-secret) | Tokens, shared secrets |
-| Token-drop UNC | Per-SID `*.tok` with **that computer$ only** Read+Delete | World-readable tokens |
+| Token-drop UNC | Per-SID `*.tok` with **that computer$ only** Read+Delete; share Change for Domain Computers | World-readable tokens; share Read-only (blocks delete) |
 | PowerShell history / logs | — | Plaintext tokens |
+| Agent service | **Network Service** (SMB as `DOMAIN\COMPUTER$`) | Local Service (anonymous SMB), SYSTEM/Admin for scanner |
 
 **Preferred enrollment:** `QKA_AGENT_TOKEN_PROVISIONING=unc_acl_drop`  
-Deploy stages the one-time token to the drop share; the agent (as the computer account) claims+deletes it. No employee paste.
+Deploy stages the one-time token to the drop share; the agent as **Network Service** authenticates SMB as the computer account, claims+deletes its own file. Scanner stays non-admin / read-only.
 
-**Fallback:** `hkml_out_of_band` + `Provision-MachineEnrollmentToken.ps1 -TokenSecure` (Local Service can clear ProgramData/HKLM).
+**Fallback:** `hkml_out_of_band` + `Provision-MachineEnrollmentToken.ps1 -TokenSecure` (Network Service can clear ProgramData/HKLM).
+
+**Isolation proof (no install):** `Test-QkaTokenDropIsolation.ps1 -PilotComputer WSIT02`
 
 ## Admin order (nothing runs until you confirm)
 

@@ -21,7 +21,7 @@ Do **not** install remotely / via GPO. Do **not** index real employee profile fo
 5. Delete `enrollmentCode` from JSON if still present (agent clears it after successful enroll).
 6. Super Admin **Assign** your AD-linked employee.
 7. Create a **disposable** folder e.g. `C:\QKA-Pilot-Docs` with a few sample PDF/TXT files.
-8. Grant **LOCAL SERVICE** (or the agent account) **Read & execute / List folder** only — no Write/Modify/Delete.
+8. Grant **NETWORK SERVICE** (or the agent account) **Read & execute / List folder** only — no Write/Modify/Delete.
 9. Browse/approve **only** that disposable folder → **Start** indexing.
 10. Confirm read-only verified, counts in UI, restart service, incremental change.
 

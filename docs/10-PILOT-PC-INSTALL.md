@@ -23,7 +23,7 @@ Pilot PC must use **reachable internal HTTPS**:
 
 ## Silent install (approved test PC only — no GPO required for first pilot)
 
-Prerequisites on the pilot PC: DNS resolves `qka-agent.qehc.edu.sa`, and the pilot CER is trusted in **LocalMachine\Root** (see `docs/11-PILOT-PC-HTTPS-TRUST.md`). Local Service needs machine trust — CurrentUser trust alone is not enough for the agent service.
+Prerequisites on the pilot PC: DNS resolves `qka-agent.qehc.edu.sa`, and the pilot CER is trusted in **LocalMachine\Root** (see `docs/11-PILOT-PC-HTTPS-TRUST.md`). The agent runs as **Network Service** (machine trust required — CurrentUser trust alone is not enough).
 
 ```bat
 msiexec /i "C:\path\QKA-Agent.msi" /qn QKASERVERURL=https://qka-agent.qehc.edu.sa
@@ -54,7 +54,7 @@ Flow: **Install → Register Device → Assign User → Approve Folders → Star
 
 ## Approved folders + read-only NTFS
 
-1. Grant the agent scanner identity (**Local Service** / dedicated restricted account) **Read & list only** on the approved folder(s).
+1. Grant the agent scanner identity (**Network Service** / dedicated restricted account) **Read & list only** on the approved folder(s).
 2. Do **not** grant Modify/Write/Delete on employee source trees.
 3. Do **not** grant blanket rights to all profile directories.
 4. In QKA Agent devices UI, set approved folder paths and Start indexing.

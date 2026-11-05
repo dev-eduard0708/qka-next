@@ -3,7 +3,10 @@
      Build with build-msi.ps1 when WiX Toolset is installed.
      Does NOT embed enrollment secrets or employee passwords. -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-  <Product Id="*" Name="QKA Desktop Agent" Language="1033" Version="0.1.0.0"
+  <!-- Network Service (not Local Service): outbound SMB/HTTPS use DOMAIN\COMPUTER$ so
+       per-computer token-drop ACLs work. Still a restricted non-admin account — scanner
+       stays read-only; do not run as SYSTEM/Administrator. -->
+  <Product Id="*" Name="QKA Desktop Agent" Language="1033" Version="0.1.1.0"
            Manufacturer="QEHC" UpgradeCode="A7C3E91B-4D2F-4E8A-9B11-6F0C2D8E4A10">
     <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
     <MajorUpgrade DowngradeErrorMessage="A newer version of QKA Desktop Agent is already installed." />
@@ -17,6 +20,7 @@
 
     <Property Id="QKASERVERURL" Secure="yes" />
     <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="SystemFolder" Name="SystemFolder" />
       <Directory Id="ProgramFilesFolder">
         <Directory Id="QkaDir" Name="QKA">
           <Directory Id="INSTALLFOLDER" Name="DesktopAgent" />
@@ -51,12 +55,30 @@
                       Type="ownProcess"
                       Name="QkaDesktopAgent"
                       DisplayName="QKA Desktop Agent"
-                      Description="Read-only local file indexing agent for QKA-Next"
+                      Description="Read-only local file indexing agent for QKA-Next (Network Service / computer account for token-drop SMB)"
                       Start="auto"
-                      Account="NT AUTHORITY\LOCAL SERVICE"
+                      Account="NT AUTHORITY\NETWORK SERVICE"
                       ErrorControl="normal"
                       Arguments="service" />
       <ServiceControl Id="StartService" Name="QkaDesktopAgent" Start="install" Stop="both" Remove="uninstall" Wait="yes" />
     </Component>
+
+    <!-- Restart on failure so enrollment can pick up a token staged after first boot. -->
+    <CustomAction Id="SetServiceRecovery"
+                  Directory="SystemFolder"
+                  ExeCommand="sc.exe failure QkaDesktopAgent reset= 86400 actions= restart/60000/restart/60000/restart/60000"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+    <CustomAction Id="SetServiceRecoveryFlag"
+                  Directory="SystemFolder"
+                  ExeCommand="sc.exe failureflag QkaDesktopAgent 1"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom Action="SetServiceRecovery" After="InstallServices">NOT Installed</Custom>
+      <Custom Action="SetServiceRecoveryFlag" After="SetServiceRecovery">NOT Installed</Custom>
+    </InstallExecuteSequence>
   </Product>
 </Wix>

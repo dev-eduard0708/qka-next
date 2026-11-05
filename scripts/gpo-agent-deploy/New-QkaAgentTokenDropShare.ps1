@@ -46,11 +46,16 @@ if (-not $existing) {
   Write-Host ("Share exists path=" + $existing.Path)
 }
 
-# Allow computer accounts to connect to share then be denied by NTFS until granted per-file.
-# Grant share Read to Domain Computers so SMB session can open; NTFS still blocks listing/read of others' files.
-Grant-SmbShareAccess -Name $ShareName -AccountName 'QEHC\Domain Computers' -AccessRight Read -Force | Out-Null
+# Share Change (not Read-only): agent must DELETE its one-time *.tok after claim.
+# Isolation is NTFS per-file ACL (computer SID R,D only) — not share-level secrecy.
+# Agent runs as Network Service so outbound SMB authenticates as DOMAIN\COMPUTER$.
+# Replace prior Read-only share ACE if present (Read blocks Delete of claimed *.tok).
+try { Revoke-SmbShareAccess -Name $ShareName -AccountName 'QEHC\Domain Computers' -Force -ErrorAction SilentlyContinue | Out-Null } catch { }
+Grant-SmbShareAccess -Name $ShareName -AccountName 'QEHC\Domain Computers' -AccessRight Change -Force | Out-Null
 
 $unc = "\\$env:COMPUTERNAME\$ShareName"
 Write-Host ("TOKEN_DROP_UNC=" + $unc)
+Write-Host 'SHARE_ACCESS=Domain Computers Change (NTFS per-SID isolates tokens)'
+Write-Host 'AGENT_IDENTITY=NT AUTHORITY\NETWORK SERVICE (SMB as computer$)'
 Write-Host 'Set QKA_AGENT_TOKEN_DROP_UNC and QKA_AGENT_TOKEN_PROVISIONING=unc_acl_drop, then restart API.'
-Write-Host 'VERIFY: Domain Computers cannot read foreign *.tok files (only their SID-named file after Deploy).'
+Write-Host 'VERIFY: Run Test-QkaTokenDropIsolation.ps1 -PilotComputer WSIT02 (no production share required for local ACL proof).'

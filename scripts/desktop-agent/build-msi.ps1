@@ -44,7 +44,8 @@ $msi = Join-Path $OutDir "QKA-Agent.msi"
 & $light -nologo -o $msi $wixobj
 if ($LASTEXITCODE -ne 0) { throw "light failed" }
 Write-Host "MSI_OUT=$msi"
-Write-Host "MSI_VERSION=0.1.0.0"
+Write-Host "MSI_VERSION=0.1.1.0"
+Write-Host "SERVICE_ACCOUNT=NT AUTHORITY\NETWORK SERVICE"
 Write-Host "SILENT_INSTALL=msiexec /i `"$msi`" /qn QKASERVERURL=https://qka-agent.qehc.edu.sa"
 Write-Host "SILENT_UNINSTALL=msiexec /x `"$msi`" /qn"
 Write-Host "SIGNING=not performed (production blocker until approved code-signing certificate is configured)"

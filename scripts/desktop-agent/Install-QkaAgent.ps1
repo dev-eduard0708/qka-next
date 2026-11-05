@@ -1,9 +1,10 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   Silent install / uninstall helper for the QKA Desktop Agent pilot.
   Prefer QKA-Agent.msi when WiX build is available. This script registers a
-  LocalService-friendly scheduled task / service wrapper without embedding secrets.
+  NetworkService scheduled task / service wrapper (computer$ SMB auth for token-drop).
+  Scanner stays non-admin / read-only — never SYSTEM or Administrator.
 #>
 param(
     [ValidateSet("install", "uninstall")]
@@ -75,17 +76,27 @@ $config = @{
 }
 $config | ConvertTo-Json | Set-Content (Join-Path $DataDir "agent.config.json") -Encoding UTF8
 
-# Register a hidden logon/boot scheduled task as a recovery-friendly service substitute
-# when a signed MSI/service binary is not yet available. Prefer Local Service via task.
+# Network Service: domain SMB uses COMPUTER$ (Local Service is anonymous). Restricted locally.
 $action = New-ScheduledTaskAction -Execute $runTarget
 $trigger = New-ScheduledTaskTrigger -AtStartup
-$principal = New-ScheduledTaskPrincipal -UserId "LOCAL SERVICE" -LogonType ServiceAccount -RunLevel Limited
-$settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable -AllowStartIfOnBatteries
+$principal = New-ScheduledTaskPrincipal -UserId "NETWORK SERVICE" -LogonType ServiceAccount -RunLevel Limited
+$settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable -AllowStartIfOnBatteries -ExecutionTimeLimit (New-TimeSpan -Days 365)
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
-Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+# Prefer real Windows service when exe supports it
+if ($exe) {
+  sc.exe stop $ServiceName 2>$null | Out-Null
+  sc.exe delete $ServiceName 2>$null | Out-Null
+  sc.exe create $ServiceName binPath= "`"$($exe.FullName)`" service" start= auto obj= "NT AUTHORITY\NETWORK SERVICE" DisplayName= "QKA Desktop Agent" | Out-Null
+  sc.exe failure $ServiceName reset= 86400 actions= restart/60000/restart/60000/restart/60000 | Out-Null
+  sc.exe failureflag $ServiceName 1 | Out-Null
+  sc.exe description $ServiceName "Read-only QKA indexer (Network Service / computer account for token-drop)" | Out-Null
+  sc.exe start $ServiceName | Out-Null
+} else {
+  Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+}
 
 Write-Host "INSTALLED_DIR=$InstallDir"
 Write-Host "DATA_DIR=$DataDir"
-Write-Host "TASK=$TaskName"
-Write-Host "NOTE=Enrollment code must be supplied separately (env/registry/config). Not embedded in installer."
+Write-Host "SERVICE_ACCOUNT=NT AUTHORITY\NETWORK SERVICE"
+Write-Host "NOTE=Enrollment via unc_acl_drop or one-time token. Not embedded in installer."
 Write-Host "NOTE=Deployment is not complete until the agent enrolls and heartbeats to QKA."

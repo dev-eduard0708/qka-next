@@ -50,12 +50,20 @@ def ensure_enrolled(client: AgentClient, cfg) -> None:
     if cfg.server_base_url.lower().startswith("http://127.0.0.1") or "localhost" in cfg.server_base_url.lower():
         log.warning("server_base_url looks like loopback; employee PCs must use reachable internal HTTPS.")
 
+    # Reload config each attempt so a token staged after MSI install is picked up.
+    fresh = load_config()
+    cfg.machine_enrollment_token = fresh.machine_enrollment_token
+    cfg.enrollment_code = fresh.enrollment_code
+    cfg.token_drop_unc = fresh.token_drop_unc
+    if not cfg.server_base_url:
+        cfg.server_base_url = fresh.server_base_url
+
     identity = local_computer_sid()
     machine_token = resolve_machine_enrollment_token(cfg, identity.computer_sid or "")
     if not cfg.enrollment_code and not machine_token:
         raise RuntimeError(
-            "No device credentials and no enrollment token. "
-            "Managed deploy: wait for per-computer token-drop file, or use a one-time enrollment code."
+            "No device credentials and no enrollment token yet. "
+            "Waiting for per-computer token-drop (Network Service / computer$) or enrollment code."
         )
 
     payload = {
@@ -90,7 +98,10 @@ def ensure_enrolled(client: AgentClient, cfg) -> None:
 def run_loop(stop_flag: list[bool] | None = None) -> int:
     cfg = load_config()
     _configure_logging(cfg.log_path)
-    log.info("qka_desktop_agent starting version=%s", __version__)
+    log.info(
+        "qka_desktop_agent starting version=%s identity_hint=NetworkService_computer_account",
+        __version__,
+    )
     fixture = run_disposable_fixture_negative_write_test(cfg.data_dir)
     log.info("readonly_fixture %s", fixture.detail)
 
@@ -99,15 +110,10 @@ def run_loop(stop_flag: list[bool] | None = None) -> int:
         return 2
 
     client = AgentClient(cfg.server_base_url, verify_tls=cfg.verify_tls)
-    try:
-        ensure_enrolled(client, cfg)
-    except Exception as exc:  # noqa: BLE001
-        log.exception("enrollment_failed")
-        print(f"enrollment_failed: {exc}", file=sys.stderr)
-        return 3
-
-    index = LocalIndex(cfg.index_path)
+    enrolled = bool(cfg.device_id and cfg.device_key)
+    index: LocalIndex | None = None
     paused = False
+    enrollment_failures = 0
 
     def should_pause() -> bool:
         return paused or bool(stop_flag and stop_flag[0])
@@ -115,6 +121,26 @@ def run_loop(stop_flag: list[bool] | None = None) -> int:
     while True:
         if stop_flag and stop_flag[0]:
             break
+
+        if not enrolled:
+            try:
+                ensure_enrolled(client, cfg)
+                enrolled = True
+                enrollment_failures = 0
+                index = LocalIndex(cfg.index_path)
+                log.info("enrollment_ready — entering scan loop")
+            except Exception as exc:  # noqa: BLE001
+                enrollment_failures += 1
+                # Do not exit: token may be staged after MSI/GPO first boot.
+                log.warning(
+                    "enrollment_pending attempt=%s detail=%s",
+                    enrollment_failures,
+                    str(exc)[:300],
+                )
+                time.sleep(max(15, min(120, 15 + enrollment_failures * 5)))
+                continue
+
+        assert index is not None
         try:
             client.heartbeat(
                 {
@@ -209,7 +235,8 @@ def run_loop(stop_flag: list[bool] | None = None) -> int:
             except Exception:  # noqa: BLE001
                 pass
         time.sleep(max(10, int(cfg.poll_seconds)))
-    index.close()
+    if index is not None:
+        index.close()
     return 0
 
 

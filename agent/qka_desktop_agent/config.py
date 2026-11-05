@@ -57,7 +57,11 @@ def _sid_token_filename(computer_sid: str) -> str:
 
 
 def claim_machine_token_from_unc_drop(*, computer_sid: str, drop_unc: str) -> str:
-    """Read+delete this computer's ACL-bound *.tok from the drop share (computer account)."""
+    """Read+delete this computer's ACL-bound *.tok from the drop share.
+
+    Requires the agent process to authenticate to SMB as the machine account
+    (Network Service or SYSTEM). Local Service uses anonymous SMB and cannot claim.
+    """
     root = (drop_unc or "").strip().rstrip("\\/")
     sid = (computer_sid or "").strip()
     if not root or not sid:
@@ -78,7 +82,7 @@ def claim_machine_token_from_unc_drop(*, computer_sid: str, drop_unc: str) -> st
 
 
 def _clear_registry_machine_enrollment_token() -> None:
-    """Clear HKLM token using rights Local Service should have if provisioned correctly."""
+    """Clear HKLM token using rights Network Service should have if provisioned correctly."""
     if os.name != "nt":
         return
     try:

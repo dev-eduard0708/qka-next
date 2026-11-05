@@ -1,14 +1,14 @@
 ﻿<#
 .SYNOPSIS
-  FALLBACK: deliver one-time machineEnrollmentToken for Local Service cleanup-safe storage.
+  FALLBACK: deliver one-time machineEnrollmentToken for Network Service cleanup-safe storage.
 
 .DESCRIPTION
   Preferred path is automatic UNC ACL token-drop (unc_acl_drop) — no paste required.
   This script is the manual fallback when token-drop share is unavailable.
 
   Writes %ProgramData%\QKA\DesktopAgent\pending.enrollment.token with ACL:
-    Administrators, SYSTEM, Local Service — Modify
-  Also sets HKLM MachineEnrollmentToken with Local Service Read+SetValue so the
+    Administrators, SYSTEM, Network Service — Modify
+  Also sets HKLM MachineEnrollmentToken with Network Service Read+SetValue/Delete so the
   agent service can clear it after enroll.
 
   Token is accepted via -TokenSecure (SecureString) or pipeline to avoid PSHistory.
@@ -54,7 +54,7 @@ $scriptBlock = {
   $dataDir = Join-Path $env:ProgramData 'QKA\DesktopAgent'
   New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
   $pending = Join-Path $dataDir 'pending.enrollment.token'
-  # Write then ACL for Local Service modify/delete
+  # Write then ACL for Network Service modify/delete (agent service identity)
   [IO.File]::WriteAllText($pending, $PlainToken)
   $acl = Get-Acl -LiteralPath $pending
   $acl.SetAccessRuleProtection($true, $false)
@@ -62,7 +62,7 @@ $scriptBlock = {
   foreach ($id in @(
       'BUILTIN\Administrators',
       'NT AUTHORITY\SYSTEM',
-      'NT AUTHORITY\LOCAL SERVICE'
+      'NT AUTHORITY\NETWORK SERVICE'
     )) {
     $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
       $id, 'Modify', 'Allow')
@@ -79,7 +79,7 @@ $scriptBlock = {
   foreach ($rule in @(
       (New-Object System.Security.AccessControl.RegistryAccessRule('BUILTIN\Administrators', 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')),
       (New-Object System.Security.AccessControl.RegistryAccessRule('NT AUTHORITY\SYSTEM', 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')),
-      (New-Object System.Security.AccessControl.RegistryAccessRule('NT AUTHORITY\LOCAL SERVICE', 'ReadKey,SetValue,Delete', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
+      (New-Object System.Security.AccessControl.RegistryAccessRule('NT AUTHORITY\NETWORK SERVICE', 'ReadKey,SetValue,Delete', 'ContainerInherit,ObjectInherit', 'None', 'Allow'))
     )) { $racl.AddAccessRule($rule) }
   Set-Acl -Path $keyPath -AclObject $racl
   'OK'
