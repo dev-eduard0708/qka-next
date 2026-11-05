@@ -9,16 +9,26 @@ Target: `https://qka-agent.qehc.edu.sa` → IIS SNI site → `http://127.0.0.1:5
    Public **A NXDOMAIN for `qka-agent` does not block DNS-01**. Create TXT `_acme-challenge.qka-agent.qehc.edu.sa` in the JustHost/Bluehost DNS panel; **do not** publish a public A to the internal host. Keep the service internal-only.
 3. **Pilot-only self-signed** (explicit approval) →  
    `New-QkaAgentHttpsCertificate.ps1 -PilotSelfSigned -IApprovePilotSelfSigned`  
-   Then trust the exported `.cer` **only** on the approved pilot PC via `Trust-QkaAgentPilotCertOnClient.ps1`.
+   **90-day** lifetime, **non-exportable** private key; public `.cer` only.  
+   Trust that CER **only** on the approved pilot PC via `Trust-QkaAgentPilotCertOnClient.ps1`.
 
 Never auto-install AD CS. Never disable TLS verification on the agent.
 
 ## IIS (authorized administrator, elevated)
 
-Prerequisites on QEC-AI-MCP: **URL Rewrite** + **ARR**. Current host may lack both.
+Prerequisites on QEC-AI-MCP: **URL Rewrite** + **ARR**.
+
+`Install-QkaAgentIisHttps.ps1` will:
+
+- Back up IIS (`appcmd add backup` + copy `applicationHost.config`)
+- Inventory sites/bindings/sslcert for `qka-agent.qehc.edu.sa:443` only
+- Create site with **HTTPS directly** (`New-Website -Ssl -SslFlags 1`) — never HTTP on 443
+- Touch **only** site `QKA-Agent-HTTPS` and sslcert `hostnameport=qka-agent.qehc.edu.sa:443`
+- Report if ARR `system.webServer/proxy` must be enabled server-wide
+- Re-run safely (idempotent; no duplicate sites/bindings)
 
 ```powershell
-# Elevated on QEC-AI-MCP
+# Elevated on QEC-AI-MCP — review script output before continuing
 cd C:\QehcAI\QKA-Next\scripts\iis-agent-https
 
 # A) Org PFX  OR  B) pilot self-signed
@@ -28,7 +38,7 @@ $thumb = (Get-Content C:\QehcAI\Temp\qka-agent-https\last-cert.json | ConvertFro
 .\Install-QkaAgentIisHttps.ps1 -CertificateThumbprint $thumb
 ```
 
-Preserves existing IIS sites / MCP / OAuth. Site name: `QKA-Agent-HTTPS`.
+Preserves Default Web Site, QEC PKI, MCP, Google OAuth, and all unrelated bindings.
 
 ## After client trust validates
 
