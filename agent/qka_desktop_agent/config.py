@@ -14,6 +14,22 @@ def default_data_dir() -> Path:
     return Path(program_data) / "QKA" / "DesktopAgent"
 
 
+def _registry_server_base_url() -> str:
+    """Read MSI-written HKLM\\Software\\QKA\\DesktopAgent\\ServerBaseUrl (QKASERVERURL)."""
+    if os.name != "nt":
+        return ""
+    try:
+        import winreg
+    except ImportError:
+        return ""
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"Software\QKA\DesktopAgent") as key:
+            raw, _ = winreg.QueryValueEx(key, "ServerBaseUrl")
+        return str(raw or "").strip()
+    except OSError:
+        return ""
+
+
 @dataclass
 class AgentConfig:
     server_base_url: str
@@ -28,6 +44,10 @@ class AgentConfig:
     @property
     def credentials_path(self) -> Path:
         return self.data_dir / "device.credentials.json"
+
+    @property
+    def config_path(self) -> Path:
+        return self.data_dir / "agent.config.json"
 
     @property
     def index_path(self) -> Path:
@@ -47,10 +67,11 @@ def load_config() -> AgentConfig:
     values: dict = {}
     if cfg_path.exists():
         values = json.loads(cfg_path.read_text(encoding="utf-8"))
-    # Optional machine policy / GPO-deployed values via environment.
+    # Precedence: env → JSON → MSI registry (QKASERVERURL). Never log secrets.
     server = (
         os.environ.get("QKA_AGENT_SERVER_URL")
         or values.get("serverBaseUrl")
+        or _registry_server_base_url()
         or ""
     ).strip()
     enrollment = (
@@ -92,6 +113,30 @@ def save_credentials(cfg: AgentConfig, device_id: str, device_key: str) -> None:
         os.chmod(cfg.credentials_path, 0o600)
     except OSError:
         pass
+    # Drop one-time enrollment secrets from JSON after successful enroll (never log them).
+    clear_enrollment_secrets(cfg)
+
+
+def clear_enrollment_secrets(cfg: AgentConfig) -> None:
+    """Remove enrollmentCode / machineEnrollmentToken from agent.config.json after use."""
+    path = cfg.config_path
+    if not path.exists():
+        cfg.enrollment_code = ""
+        cfg.machine_enrollment_token = ""
+        return
+    try:
+        values = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    changed = False
+    for key in ("enrollmentCode", "machineEnrollmentToken"):
+        if key in values and values.get(key):
+            values[key] = ""
+            changed = True
+    if changed:
+        path.write_text(json.dumps(values, indent=2), encoding="utf-8")
+    cfg.enrollment_code = ""
+    cfg.machine_enrollment_token = ""
 
 
 def device_fingerprint() -> str:

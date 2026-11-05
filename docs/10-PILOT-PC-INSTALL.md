@@ -23,6 +23,8 @@ Pilot PC must use **reachable internal HTTPS**:
 
 ## Silent install (approved test PC only — no GPO required for first pilot)
 
+Prerequisites on the pilot PC: DNS resolves `qka-agent.qehc.edu.sa`, and the pilot CER is trusted in **LocalMachine\Root** (see `docs/11-PILOT-PC-HTTPS-TRUST.md`). Local Service needs machine trust — CurrentUser trust alone is not enough for the agent service.
+
 ```bat
 msiexec /i "C:\path\QKA-Agent.msi" /qn QKASERVERURL=https://qka-agent.qehc.edu.sa
 ```
@@ -34,7 +36,7 @@ msiexec /x "C:\path\QKA-Agent.msi" /qn
 ```
 
 The MSI does **not** embed enrollment codes, employee passwords, or device keys.
-`QKASERVERURL` is only the HTTPS base for the agent API.
+`QKASERVERURL` writes `HKLM\Software\QKA\DesktopAgent\ServerBaseUrl` only (read by the agent). Keep `verifyTls=true` (default).
 
 ## After install (registration)
 
