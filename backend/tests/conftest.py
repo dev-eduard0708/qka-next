@@ -353,9 +353,36 @@ def seed_db():
                     ad_computer_sid VARCHAR(256) NOT NULL,
                     ad_computer_guid VARCHAR(64) NOT NULL DEFAULT '',
                     token_hash VARCHAR(128) NOT NULL UNIQUE,
+                    proof_hash VARCHAR(128) NOT NULL DEFAULT '',
                     expires_at TIMESTAMPTZ NOT NULL,
                     consumed_at TIMESTAMPTZ NULL,
                     created_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+        )
+        session.execute(
+            text(
+                "ALTER TABLE qka_next_machine_enrollment_token "
+                "ADD COLUMN IF NOT EXISTS proof_hash VARCHAR(128) NOT NULL DEFAULT ''"
+            )
+        )
+        session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS qka_next_desktop_folder_browse (
+                    id UUID PRIMARY KEY,
+                    device_id UUID NOT NULL,
+                    requested_by_user_id UUID NOT NULL,
+                    employee_ad_sid VARCHAR(256) NOT NULL DEFAULT '',
+                    parent_path VARCHAR(2048) NOT NULL DEFAULT '',
+                    status INTEGER NOT NULL DEFAULT 0,
+                    result_json TEXT NOT NULL DEFAULT '[]',
+                    error VARCHAR(2000) NOT NULL DEFAULT '',
+                    max_entries INTEGER NOT NULL DEFAULT 200,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    completed_at TIMESTAMPTZ NULL
                 )
                 """
             )
@@ -784,6 +811,7 @@ def seed_db():
         session.execute(text("DELETE FROM allowed_email"))
         session.execute(text("DELETE FROM google_workspace_account"))
         session.execute(text("DELETE FROM external_identity"))
+        session.execute(text("DELETE FROM qka_next_desktop_folder_browse"))
         session.execute(text("DELETE FROM qka_next_machine_enrollment_token"))
         session.execute(text("DELETE FROM qka_next_agent_deployment_job"))
         session.execute(text("DELETE FROM qka_next_desktop_device_folder"))

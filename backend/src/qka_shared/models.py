@@ -933,6 +933,7 @@ class MachineEnrollmentToken(Base):
 
     Bound to AD computer SID/GUID + assigned employee + deployment job.
     Never embedded in the MSI. Manual enrollment codes remain a separate fallback.
+    Requires machineProof = HMAC-SHA256(token, sid|guid) so a stolen SID claim alone fails.
     """
 
     __tablename__ = "qka_next_machine_enrollment_token"
@@ -944,9 +945,36 @@ class MachineEnrollmentToken(Base):
     ad_computer_sid: Mapped[str] = mapped_column(String(256), index=True)
     ad_computer_guid: Mapped[str] = mapped_column(String(64), default="", index=True)
     token_hash: Mapped[str] = mapped_column(String(128), unique=True)
+    proof_hash: Mapped[str] = mapped_column(String(128), default="")
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+# Folder browse jobs (admin request → agent outbound poll → result). Status: 0 pending 1 done 2 failed 3 expired
+FOLDER_BROWSE_PENDING = 0
+FOLDER_BROWSE_COMPLETED = 1
+FOLDER_BROWSE_FAILED = 2
+FOLDER_BROWSE_EXPIRED = 3
+
+
+class DesktopFolderBrowse(Base):
+    """Super Admin folder discovery request fulfilled by the authenticated agent."""
+
+    __tablename__ = "qka_next_desktop_folder_browse"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    device_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    requested_by_user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    employee_ad_sid: Mapped[str] = mapped_column(String(256), default="")
+    parent_path: Mapped[str] = mapped_column(String(2048), default="")
+    status: Mapped[int] = mapped_column(Integer, default=FOLDER_BROWSE_PENDING, index=True)
+    result_json: Mapped[str] = mapped_column(Text, default="[]")
+    error: Mapped[str] = mapped_column(String(2000), default="")
+    max_entries: Mapped[int] = mapped_column(Integer, default=200)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class DesktopDeviceFolder(Base):

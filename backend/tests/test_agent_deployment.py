@@ -267,12 +267,14 @@ def test_machine_identity_enroll_and_job_registered(client, tmp_path):
         token = created.json()["jobs"][0]["machineEnrollmentToken"]
         sid = pilot["objectSid"]
 
-    # Spoofed SID rejected
+    # Spoofed SID / missing proof rejected
     spoof = client.post(
         "/api/v1/agent/desktop/enroll",
         json={
             "machineEnrollmentToken": token,
             "adComputerSid": "S-1-5-21-SPOOF",
+            "sidSource": "local_machine",
+            "machineProof": "deadbeef",
             "computerName": "PILOT-PC",
             "deviceFingerprint": "machine-enroll-fp-1",
             "agentVersion": "0.1.0",
@@ -280,11 +282,27 @@ def test_machine_identity_enroll_and_job_registered(client, tmp_path):
     )
     assert spoof.status_code in (403, 400)
 
+    no_proof = client.post(
+        "/api/v1/agent/desktop/enroll",
+        json={
+            "machineEnrollmentToken": token,
+            "adComputerSid": sid,
+            "sidSource": "local_machine",
+            "computerName": "PILOT-PC",
+            "deviceFingerprint": "machine-enroll-fp-1",
+            "agentVersion": "0.1.0",
+        },
+    )
+    assert no_proof.status_code == 403
+
+    proof = deploy_svc.machine_proof_digest(token=token, computer_sid=sid, computer_guid="")
     enrolled = client.post(
         "/api/v1/agent/desktop/enroll",
         json={
             "machineEnrollmentToken": token,
             "adComputerSid": sid,
+            "sidSource": "local_machine",
+            "machineProof": proof,
             "computerName": "PILOT-PC",
             "deviceFingerprint": "machine-enroll-fp-1",
             "domainJoinedName": "QEHC",
@@ -302,6 +320,8 @@ def test_machine_identity_enroll_and_job_registered(client, tmp_path):
         json={
             "machineEnrollmentToken": token,
             "adComputerSid": sid,
+            "sidSource": "local_machine",
+            "machineProof": proof,
             "computerName": "PILOT-PC",
             "deviceFingerprint": "machine-enroll-fp-2",
             "agentVersion": "0.1.0",

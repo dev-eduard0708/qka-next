@@ -21,6 +21,10 @@ from qka_shared.models import (
     DEVICE_PAUSED,
     DEVICE_PENDING,
     DEVICE_REVOKED,
+    FOLDER_BROWSE_COMPLETED,
+    FOLDER_BROWSE_EXPIRED,
+    FOLDER_BROWSE_FAILED,
+    FOLDER_BROWSE_PENDING,
     INDEX_ERROR,
     INDEX_IDLE,
     INDEX_PAUSED,
@@ -28,6 +32,7 @@ from qka_shared.models import (
     DesktopDevice,
     DesktopDeviceFolder,
     DesktopEnrollmentCode,
+    DesktopFolderBrowse,
     ExternalIdentity,
     QkaUser,
 )
@@ -149,6 +154,8 @@ def enroll_device(
     machine_enrollment_token: str = "",
     ad_computer_sid: str = "",
     ad_computer_guid: str = "",
+    machine_proof: str = "",
+    sid_source: str = "",
     computer_name: str,
     device_fingerprint: str,
     domain_joined_name: str = "",
@@ -157,7 +164,7 @@ def enroll_device(
     """Enroll via machine-bound token (managed deploy) or one-time enrollment code (manual fallback).
 
     Hostname/MAC/IP/email alone are never accepted as proof of device identity for
-    the managed path — AD computer SID (and GUID when present) must match inventory.
+    the managed path — AD computer SID + HMAC machineProof bound to the one-time token.
     """
     from qka_api.services import agent_deployment as deploy_svc
 
@@ -177,11 +184,17 @@ def enroll_device(
     if machine_token:
         if not sid:
             raise ValueError("AD computer SID is required for machine-identity enrollment.")
+        if (sid_source or "").strip().lower() not in {"local_machine", "lookup_account_name"}:
+            raise PermissionError(
+                "Machine SID must be resolved from the local computer account "
+                "(sidSource=local_machine). Client-supplied SID claims are rejected."
+            )
         machine_row, ws = deploy_svc.consume_machine_enrollment_token(
             session,
             token=machine_token,
             ad_computer_sid=sid,
             ad_computer_guid=guid,
+            machine_proof=machine_proof,
         )
         if not ws.assigned_qka_user_id or ws.assigned_qka_user_id != machine_row.qka_user_id:
             raise PermissionError("Workstation employee assignment does not match enrollment token.")
@@ -320,6 +333,17 @@ def heartbeat(
     return {"ok": True, "serverTime": _now().isoformat(), "status": _status_label(device.status)}
 
 
+def _employee_ad_sid(session: Session, qka_user_id: uuid.UUID) -> str:
+    ad = session.execute(
+        select(ExternalIdentity).where(
+            ExternalIdentity.qka_user_id == qka_user_id,
+            ExternalIdentity.provider == PROVIDER_AD,
+            ExternalIdentity.link_status == LINKED,
+        )
+    ).scalar_one_or_none()
+    return (ad.stable_external_id or "").strip() if ad else ""
+
+
 def get_policy(session: Session, device: DesktopDevice) -> dict:
     folders = session.execute(
         select(DesktopDeviceFolder).where(
@@ -332,6 +356,14 @@ def get_policy(session: Session, device: DesktopDevice) -> dict:
         command = "pause"
     elif device.status == DEVICE_REVOKED:
         command = "stop"
+    now = _now()
+    pending_browse = session.execute(
+        select(DesktopFolderBrowse).where(
+            DesktopFolderBrowse.device_id == device.id,
+            DesktopFolderBrowse.status == FOLDER_BROWSE_PENDING,
+            DesktopFolderBrowse.expires_at > now,
+        )
+    ).scalars().all()
     return {
         "deviceId": str(device.id),
         "command": command,
@@ -343,13 +375,157 @@ def get_policy(session: Session, device: DesktopDevice) -> dict:
             }
             for f in folders
         ],
+        "pendingFolderBrowse": [
+            {
+                "id": str(b.id),
+                "parentPath": b.parent_path or "",
+                "employeeAdSid": b.employee_ad_sid,
+                "maxEntries": int(b.max_entries or 200),
+                "timeoutSeconds": 8,
+            }
+            for b in pending_browse
+        ],
+        "employeeAdSid": _employee_ad_sid(session, device.qka_user_id),
         "supportedExtensions": list(AGENT_SUPPORTED_EXTS),
         "defaultExcludes": list(DEFAULT_EXCLUDES),
         "contentUploadEnabled": False,
         "throttleWhenBusy": True,
         "localIndexOnly": True,
         "requireReadOnlyVerified": True,
+        "scannerMustNotBeSystemAdmin": True,
+        "forbidSourceAclChanges": True,
     }
+
+
+def request_folder_browse(
+    session: Session,
+    *,
+    actor_id: uuid.UUID,
+    device_id: uuid.UUID,
+    parent_path: str = "",
+) -> dict:
+    device = session.get(DesktopDevice, device_id)
+    if device is None or device.status == DEVICE_REVOKED:
+        raise LookupError("Device was not found.")
+    if not _online(device):
+        raise ValueError(
+            "Agent is offline or not heartbeating. Folder browsing requires a connected Desktop Agent "
+            "(outbound HTTPS poll). Install/enroll the agent and wait until status is Connected."
+        )
+    employee_sid = _employee_ad_sid(session, device.qka_user_id)
+    if not employee_sid:
+        raise ValueError("Assigned employee has no linked AD SID for profile mapping.")
+    now = _now()
+    row = DesktopFolderBrowse(
+        id=uuid.uuid4(),
+        device_id=device.id,
+        requested_by_user_id=actor_id,
+        employee_ad_sid=employee_sid,
+        parent_path=_normalize_win_path(parent_path)[:2048],
+        status=FOLDER_BROWSE_PENDING,
+        result_json="[]",
+        error="",
+        max_entries=200,
+        created_at=now,
+        expires_at=now + timedelta(minutes=2),
+        completed_at=None,
+    )
+    session.add(row)
+    session.flush()
+    return {
+        "id": str(row.id),
+        "deviceId": str(device.id),
+        "status": "pending",
+        "parentPath": row.parent_path,
+        "employeeAdSid": employee_sid,
+        "expiresAt": row.expires_at.isoformat(),
+        "note": "Waiting for the connected agent to fulfill this browse over outbound HTTPS.",
+    }
+
+
+def get_folder_browse(session: Session, *, device_id: uuid.UUID, browse_id: uuid.UUID) -> dict:
+    row = session.get(DesktopFolderBrowse, browse_id)
+    if row is None or row.device_id != device_id:
+        raise LookupError("Folder browse request was not found.")
+    if row.status == FOLDER_BROWSE_PENDING and row.expires_at < _now():
+        row.status = FOLDER_BROWSE_EXPIRED
+        row.error = "Browse request expired before the agent responded."
+        row.completed_at = _now()
+        session.flush()
+    try:
+        nodes = json.loads(row.result_json or "[]")
+    except json.JSONDecodeError:
+        nodes = []
+    status = {
+        FOLDER_BROWSE_PENDING: "pending",
+        FOLDER_BROWSE_COMPLETED: "completed",
+        FOLDER_BROWSE_FAILED: "failed",
+        FOLDER_BROWSE_EXPIRED: "expired",
+    }.get(row.status, "unknown")
+    return {
+        "id": str(row.id),
+        "deviceId": str(row.device_id),
+        "status": status,
+        "parentPath": row.parent_path,
+        "nodes": nodes if isinstance(nodes, list) else [],
+        "error": row.error or "",
+        "createdAt": row.created_at.isoformat() if row.created_at else None,
+        "completedAt": row.completed_at.isoformat() if row.completed_at else None,
+        "expiresAt": row.expires_at.isoformat() if row.expires_at else None,
+    }
+
+
+def complete_folder_browse(
+    session: Session,
+    device: DesktopDevice,
+    *,
+    browse_id: uuid.UUID,
+    nodes: list[dict],
+    error: str = "",
+) -> dict:
+    row = session.get(DesktopFolderBrowse, browse_id)
+    if row is None or row.device_id != device.id:
+        raise LookupError("Folder browse request was not found.")
+    if row.status != FOLDER_BROWSE_PENDING:
+        raise ValueError("Folder browse request is no longer pending.")
+    if row.expires_at < _now():
+        row.status = FOLDER_BROWSE_EXPIRED
+        row.error = "Browse request expired."
+        row.completed_at = _now()
+        session.flush()
+        raise ValueError("Folder browse request expired.")
+    # Accept directory metadata only — strip unexpected keys / reject file content fields.
+    clean: list[dict] = []
+    for item in nodes or []:
+        if not isinstance(item, dict):
+            continue
+        path = _normalize_win_path(str(item.get("path") or ""))
+        name = str(item.get("name") or "").strip()[:256]
+        if not name:
+            continue
+        clean.append(
+            {
+                "name": name,
+                "path": path[:2048],
+                "kind": str(item.get("kind") or "directory")[:32],
+                "accessible": bool(item.get("accessible")),
+                "hasChildren": bool(item.get("hasChildren")),
+                "detail": str(item.get("detail") or "")[:512],
+            }
+        )
+        if len(clean) >= int(row.max_entries or 200):
+            break
+    err = (error or "").strip()
+    row.result_json = json.dumps(clean, ensure_ascii=False)
+    row.error = err[:2000]
+    row.status = FOLDER_BROWSE_FAILED if err and not clean else FOLDER_BROWSE_COMPLETED
+    if err and clean:
+        row.status = FOLDER_BROWSE_COMPLETED
+    row.completed_at = _now()
+    device.last_heartbeat_at = _now()
+    device.updated_at = _now()
+    session.flush()
+    return {"ok": True, "id": str(row.id), "status": "completed" if row.status == FOLDER_BROWSE_COMPLETED else "failed"}
 
 
 def report_progress(
@@ -531,6 +707,13 @@ def device_dto(session: Session, device: DesktopDevice) -> dict:
             }
             for f in folders
         ],
+        "employeeAdSid": _employee_ad_sid(session, device.qka_user_id),
+        "folderBrowseAvailable": bool(_online(device) and device.status != DEVICE_REVOKED),
+        "folderBrowseBlockedReason": (
+            ""
+            if _online(device) and device.status != DEVICE_REVOKED
+            else "Agent offline or not installed — folder browsing requires a connected Desktop Agent."
+        ),
         "gpoDeployment": {
             "supported": True,
             "status": "installer_ready",

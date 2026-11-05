@@ -23,10 +23,21 @@ class EnrollBody(BaseModel):
     machineEnrollmentToken: str = ""
     adComputerSid: str = ""
     adComputerGuid: str = ""
+    machineProof: str = ""
+    sidSource: str = ""
     computerName: str = ""
     deviceFingerprint: str
     domainJoinedName: str = ""
     agentVersion: str = ""
+
+
+class FolderBrowseResultBody(BaseModel):
+    nodes: list[dict] = Field(default_factory=list)
+    error: str = ""
+
+
+class FolderBrowseRequestBody(BaseModel):
+    parentPath: str = ""
 
 
 class HeartbeatBody(BaseModel):
@@ -113,6 +124,8 @@ def enroll(
             machine_enrollment_token=body.machineEnrollmentToken,
             ad_computer_sid=body.adComputerSid,
             ad_computer_guid=body.adComputerGuid,
+            machine_proof=body.machineProof,
+            sid_source=body.sidSource,
             computer_name=body.computerName,
             device_fingerprint=body.deviceFingerprint,
             domain_joined_name=body.domainJoinedName,
@@ -163,6 +176,27 @@ def progress(body: ProgressBody, device=Depends(_device_auth), session: Session 
 @agent_router.post("/errors")
 def errors(body: ErrorBody, device=Depends(_device_auth), session: Session = Depends(get_session)):
     return svc.report_error(session, device, message=body.message, category=body.category)
+
+
+@agent_router.post("/folder-browse/{browse_id}/result")
+def folder_browse_result(
+    browse_id: uuid.UUID,
+    body: FolderBrowseResultBody,
+    device=Depends(_device_auth),
+    session: Session = Depends(get_session),
+):
+    try:
+        return svc.complete_folder_browse(
+            session,
+            device,
+            browse_id=browse_id,
+            nodes=body.nodes,
+            error=body.error,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @admin_router.get("")
@@ -227,6 +261,43 @@ def put_folders(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"folders": folders}
+
+
+@admin_router.post("/{device_id}/folder-browse")
+def request_folder_browse(
+    device_id: uuid.UUID,
+    body: FolderBrowseRequestBody,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+):
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    try:
+        return svc.request_folder_browse(
+            session,
+            actor_id=actor.id,
+            device_id=device_id,
+            parent_path=body.parentPath,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@admin_router.get("/{device_id}/folder-browse/{browse_id}")
+def get_folder_browse(
+    device_id: uuid.UUID,
+    browse_id: uuid.UUID,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+):
+    _require_super_admin(request, settings, session, mutating=False)
+    try:
+        return svc.get_folder_browse(session, device_id=device_id, browse_id=browse_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @admin_router.post("/{device_id}/command")

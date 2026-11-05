@@ -18,6 +18,7 @@ def default_data_dir() -> Path:
 class AgentConfig:
     server_base_url: str
     enrollment_code: str = ""
+    machine_enrollment_token: str = ""
     device_id: str = ""
     device_key: str = ""
     verify_tls: bool = True
@@ -57,6 +58,11 @@ def load_config() -> AgentConfig:
         or values.get("enrollmentCode")
         or ""
     ).strip()
+    machine_token = (
+        os.environ.get("QKA_AGENT_MACHINE_ENROLLMENT_TOKEN")
+        or values.get("machineEnrollmentToken")
+        or ""
+    ).strip()
     verify_tls = str(os.environ.get("QKA_AGENT_VERIFY_TLS", values.get("verifyTls", True))).lower() not in {
         "0",
         "false",
@@ -65,6 +71,7 @@ def load_config() -> AgentConfig:
     cfg = AgentConfig(
         server_base_url=server.rstrip("/"),
         enrollment_code=enrollment,
+        machine_enrollment_token=machine_token,
         verify_tls=verify_tls,
         poll_seconds=int(values.get("pollSeconds") or 30),
         data_dir=data_dir,

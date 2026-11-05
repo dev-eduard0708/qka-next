@@ -18,8 +18,8 @@
 
     <q-banner v-if="error" class="bg-negative text-white q-mb-md">{{ error }}</q-banner>
 
-    <div class="row q-col-gutter-md q-mb-md">
-      <div class="col-12 col-md-4">
+    <div class="row q-col-gutter-md q-mb-md items-center">
+      <div class="col-12 col-md-5">
         <q-select
           v-model="selectedUserId"
           :options="employeeOptions"
@@ -31,11 +31,17 @@
           @update:model-value="onEmployeeChange"
         />
       </div>
-      <div class="col-12 col-md-4">
-        <q-input v-model="folderDraft" outlined dense :label="t('desktop.approvedFolder')" />
-      </div>
-      <div class="col-12 col-md-4 row q-gutter-sm items-center">
-        <q-btn color="primary" outline :disable="!selectedDevice" :loading="busy" :label="t('desktop.saveFolders')" @click="saveFolders" />
+      <div class="col-12 col-md-7 row q-gutter-sm items-center">
+        <q-btn
+          color="primary"
+          outline
+          :disable="!canBrowseFolders"
+          :loading="browseBusy"
+          :label="t('desktop.browseFolders')"
+          @click="openBrowse"
+        >
+          <q-tooltip v-if="!canBrowseFolders">{{ browseBlockedReason }}</q-tooltip>
+        </q-btn>
         <q-btn color="primary" unelevated :disable="!selectedUserId" :loading="busy" :label="t('desktop.issueEnrollment')" @click="issueEnrollment" />
       </div>
     </div>
@@ -78,6 +84,25 @@
       <q-separator />
 
       <q-card-section v-if="selectedDevice">
+        <div class="text-caption text-grey-7 q-mb-sm">
+          {{ selectedDevice.domainJoinedName || selectedDevice.computerName }}
+          · {{ selectedDevice.employeeName }}
+        </div>
+
+        <div class="text-subtitle2 q-mb-xs">{{ t("desktop.currentApproved") }}</div>
+        <div v-if="selectedDevice.folders?.length" class="q-mb-md">
+          <q-chip
+            v-for="f in selectedDevice.folders"
+            :key="f.id"
+            dense
+            color="primary"
+            text-color="white"
+            class="q-ma-xs"
+            :label="f.path"
+          />
+        </div>
+        <div v-else class="text-caption text-grey-7 q-mb-md">{{ t("desktop.noApprovedFolders") }}</div>
+
         <div class="row items-center q-mb-sm">
           <div class="col text-subtitle1">{{ t("desktop.backgroundIndexing") }}</div>
           <div class="col-auto">
@@ -140,26 +165,127 @@
         <div class="text-body2 text-grey-7">{{ t("desktop.selectDeviceHint") }}</div>
       </q-card-section>
     </q-card>
+
+    <q-dialog v-model="browseOpen" persistent>
+      <q-card style="min-width: 560px; max-width: 760px">
+        <q-card-section class="text-h6">{{ t("desktop.browseTitle") }}</q-card-section>
+        <q-card-section>
+          <div class="text-caption q-mb-sm">
+            {{ selectedDevice?.domainJoinedName || selectedDevice?.computerName }}
+            · {{ selectedDevice?.employeeName }}
+          </div>
+          <div class="text-caption text-grey-7 q-mb-md">{{ t("desktop.browseHint") }}</div>
+
+          <div class="row q-gutter-sm q-mb-md">
+            <q-btn
+              v-for="shortcut in knownShortcuts"
+              :key="shortcut"
+              dense
+              outline
+              color="primary"
+              :label="shortcut"
+              :disable="browseBusy || !shortcutPath(shortcut)"
+              @click="selectKnown(shortcut)"
+            />
+          </div>
+
+          <q-banner v-if="browseError" class="bg-warning text-dark q-mb-sm">{{ browseError }}</q-banner>
+          <q-linear-progress v-if="browseBusy" indeterminate color="primary" class="q-mb-sm" />
+
+          <q-tree
+            :nodes="treeNodes"
+            node-key="pathKey"
+            :expanded="expandedKeys"
+            @update:expanded="onExpanded"
+            children-key="children"
+          >
+            <template #default-header="prop">
+              <div class="row items-center no-wrap full-width">
+                <q-checkbox
+                  dense
+                  :model-value="isSelected(prop.node.path)"
+                  :disable="!prop.node.accessible || !prop.node.path"
+                  @update:model-value="(v: boolean) => toggleSelect(prop.node, v)"
+                />
+                <q-icon :name="prop.node.kind === 'known_folder' ? 'folder_special' : 'folder'" class="q-mx-xs" size="18px" />
+                <span>{{ prop.node.label }}</span>
+                <span v-if="!prop.node.accessible" class="text-caption text-negative q-ml-sm">{{ t("desktop.inaccessible") }}</span>
+              </div>
+            </template>
+          </q-tree>
+
+          <q-checkbox v-model="includeSubfolders" dense class="q-mt-md" :label="t('desktop.includeSubfolders')" />
+
+          <div class="text-subtitle2 q-mt-md q-mb-xs">{{ t("desktop.selectedFolders") }}</div>
+          <div v-if="selectedFolderPaths.length" class="q-gutter-xs">
+            <q-chip
+              v-for="p in selectedFolderPaths"
+              :key="p"
+              removable
+              dense
+              color="primary"
+              text-color="white"
+              :label="p"
+              @remove="removeSelected(p)"
+            />
+          </div>
+          <div v-else class="text-caption text-grey-7">{{ t("desktop.noneSelectedFolders") }}</div>
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn flat :label="t('desktop.cancel')" v-close-popup />
+          <q-btn
+            color="primary"
+            unelevated
+            :loading="busy"
+            :disable="!selectedFolderPaths.length"
+            :label="t('desktop.saveApproved')"
+            @click="saveSelectedFolders"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
   </q-page>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { api, type DesktopDevice, type DirectoryUser } from "@/api";
+import { api, type DesktopDevice, type DirectoryUser, type FolderBrowseNode } from "@/api";
+
+type TreeNode = {
+  label: string;
+  path: string;
+  pathKey: string;
+  kind: string;
+  accessible: boolean;
+  hasChildren: boolean;
+  detail?: string;
+  lazy?: boolean;
+  children?: TreeNode[];
+};
 
 const { t } = useI18n();
 const loading = ref(false);
 const busy = ref(false);
+const browseBusy = ref(false);
 const error = ref("");
+const browseError = ref("");
 const devices = ref<DesktopDevice[]>([]);
 const employees = ref<DirectoryUser[]>([]);
 const selectedUserId = ref<string | null>(null);
 const selectedRows = ref<DesktopDevice[]>([]);
-const folderDraft = ref("");
 const enrollmentCode = ref("");
 const enrollmentExpires = ref("");
+const browseOpen = ref(false);
+const treeNodes = ref<TreeNode[]>([]);
+const expandedKeys = ref<string[]>([]);
+const selectedFolderPaths = ref<string[]>([]);
+const includeSubfolders = ref(true);
+const knownMap = ref<Record<string, string>>({});
+const childrenCache = ref<Record<string, TreeNode[]>>({});
 let pollTimer: number | undefined;
+
+const knownShortcuts = ["Desktop", "Documents", "Downloads"];
 
 const columns = [
   { name: "employeeName", label: t("desktop.employee"), field: "employeeName", align: "left" as const },
@@ -182,6 +308,15 @@ const employeeOptions = computed(() =>
 
 const selectedDevice = computed(() => selectedRows.value[0] || null);
 
+const canBrowseFolders = computed(
+  () => Boolean(selectedDevice.value?.folderBrowseAvailable && selectedDevice.value?.online),
+);
+
+const browseBlockedReason = computed(() => {
+  if (!selectedDevice.value) return t("desktop.selectDeviceHint");
+  return selectedDevice.value.folderBrowseBlockedReason || t("desktop.browseOffline");
+});
+
 const indexBadgeColor = computed(() => {
   const state = selectedDevice.value?.indexingState;
   if (state === "running") return "positive";
@@ -194,6 +329,152 @@ const indexBadgeLabel = computed(() => {
   const state = selectedDevice.value?.indexingState || "idle";
   return t(`desktop.index.${state}`);
 });
+
+function shortcutPath(name: string) {
+  return knownMap.value[name] || "";
+}
+
+function isSelected(path: string) {
+  return Boolean(path) && selectedFolderPaths.value.includes(path);
+}
+
+function toggleSelect(node: TreeNode, checked: boolean) {
+  if (!node.path || !node.accessible) return;
+  const set = new Set(selectedFolderPaths.value);
+  if (checked) set.add(node.path);
+  else set.delete(node.path);
+  selectedFolderPaths.value = [...set];
+}
+
+function removeSelected(path: string) {
+  selectedFolderPaths.value = selectedFolderPaths.value.filter((p) => p !== path);
+}
+
+function selectKnown(name: string) {
+  const path = knownMap.value[name];
+  if (!path) return;
+  if (!selectedFolderPaths.value.includes(path)) {
+    selectedFolderPaths.value = [...selectedFolderPaths.value, path];
+  }
+}
+
+function toTreeNode(n: FolderBrowseNode): TreeNode {
+  const path = n.path || `virtual:${n.name}`;
+  return {
+    label: n.name,
+    path: n.path || "",
+    pathKey: path,
+    kind: n.kind,
+    accessible: n.accessible,
+    hasChildren: n.hasChildren,
+    detail: n.detail,
+    lazy: Boolean(n.hasChildren && n.path),
+    children: n.hasChildren && n.path ? childrenCache.value[n.path] || [] : undefined,
+  };
+}
+
+async function waitBrowse(deviceId: string, browseId: string) {
+  const started = Date.now();
+  while (Date.now() - started < 45000) {
+    const result = await api.getDesktopFolderBrowse(deviceId, browseId);
+    if (result.status === "completed" || result.status === "failed" || result.status === "expired") {
+      return result;
+    }
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+  throw new Error(t("desktop.browseTimeout"));
+}
+
+async function loadRoots() {
+  if (!selectedDevice.value) return;
+  browseBusy.value = true;
+  browseError.value = "";
+  try {
+    const req = await api.requestDesktopFolderBrowse(selectedDevice.value.id, "");
+    const result = await waitBrowse(selectedDevice.value.id, req.id);
+    if (result.error) browseError.value = result.error;
+    knownMap.value = {};
+    for (const n of result.nodes) {
+      if (n.kind === "known_folder" && n.accessible && n.path) {
+        knownMap.value[n.name] = n.path;
+      }
+    }
+    treeNodes.value = result.nodes.map(toTreeNode);
+    expandedKeys.value = treeNodes.value.filter((n) => n.path).map((n) => n.pathKey).slice(0, 1);
+  } catch (err) {
+    browseError.value = err instanceof Error ? err.message : t("desktop.browseError");
+    treeNodes.value = [];
+  } finally {
+    browseBusy.value = false;
+  }
+}
+
+async function loadChildren(parentPath: string) {
+  if (!selectedDevice.value || !parentPath) return;
+  if (childrenCache.value[parentPath]) return;
+  browseBusy.value = true;
+  try {
+    const req = await api.requestDesktopFolderBrowse(selectedDevice.value.id, parentPath);
+    const result = await waitBrowse(selectedDevice.value.id, req.id);
+    childrenCache.value = {
+      ...childrenCache.value,
+      [parentPath]: result.nodes.map(toTreeNode),
+    };
+    // Refresh tree nodes to attach children
+    treeNodes.value = treeNodes.value.map((n) => attachChildren(n));
+  } catch (err) {
+    browseError.value = err instanceof Error ? err.message : t("desktop.browseError");
+  } finally {
+    browseBusy.value = false;
+  }
+}
+
+function attachChildren(node: TreeNode): TreeNode {
+  if (!node.path) return node;
+  const kids = childrenCache.value[node.path];
+  return {
+    ...node,
+    children: kids ? kids.map(attachChildren) : node.children,
+  };
+}
+
+function onExpanded(keys: readonly any[]) {
+  expandedKeys.value = keys.map((k) => String(k));
+  for (const key of expandedKeys.value) {
+    if (key.startsWith("virtual:")) continue;
+    if (!childrenCache.value[key]) {
+      void loadChildren(key);
+    }
+  }
+}
+
+function openBrowse() {
+  if (!canBrowseFolders.value || !selectedDevice.value) return;
+  selectedFolderPaths.value = (selectedDevice.value.folders || []).map((f) => f.path);
+  includeSubfolders.value = true;
+  childrenCache.value = {};
+  treeNodes.value = [];
+  browseOpen.value = true;
+  void loadRoots();
+}
+
+async function saveSelectedFolders() {
+  if (!selectedDevice.value) return;
+  busy.value = true;
+  error.value = "";
+  try {
+    await api.setDesktopDeviceFolders(
+      selectedDevice.value.id,
+      selectedFolderPaths.value.map((path) => ({ path, includeSubfolders: includeSubfolders.value })),
+    );
+    browseOpen.value = false;
+    await reload();
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : t("desktop.saveError");
+  } finally {
+    busy.value = false;
+  }
+}
 
 async function reload() {
   loading.value = true;
@@ -208,9 +489,6 @@ async function reload() {
     if (selectedDevice.value) {
       const keep = devices.value.find((d) => d.id === selectedDevice.value?.id);
       selectedRows.value = keep ? [keep] : [];
-      if (keep?.folders?.length) {
-        folderDraft.value = keep.folders.map((f) => f.path).join("; ");
-      }
     }
   } catch (err) {
     error.value = err instanceof Error ? err.message : t("desktop.loadError");
@@ -220,6 +498,7 @@ async function reload() {
 }
 
 function onEmployeeChange() {
+  selectedRows.value = [];
   void reload();
 }
 
@@ -233,25 +512,6 @@ async function issueEnrollment() {
     enrollmentExpires.value = created.expiresAt;
   } catch (err) {
     error.value = err instanceof Error ? err.message : t("desktop.enrollError");
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function saveFolders() {
-  if (!selectedDevice.value) return;
-  busy.value = true;
-  error.value = "";
-  try {
-    const folders = folderDraft.value
-      .split(";")
-      .map((p) => p.trim())
-      .filter(Boolean)
-      .map((path) => ({ path, includeSubfolders: true }));
-    await api.setDesktopDeviceFolders(selectedDevice.value.id, folders);
-    await reload();
-  } catch (err) {
-    error.value = err instanceof Error ? err.message : t("desktop.saveError");
   } finally {
     busy.value = false;
   }
@@ -283,6 +543,10 @@ async function revoke() {
     busy.value = false;
   }
 }
+
+watch(selectedRows, () => {
+  // Selection drives browse availability; no manual path field.
+});
 
 onMounted(async () => {
   await reload();

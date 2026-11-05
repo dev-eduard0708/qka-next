@@ -118,7 +118,31 @@ export type DesktopDevice = {
   enrolledAt: string | null;
   revokedAt: string | null;
   folders: Array<{ id: string; path: string; includeSubfolders: boolean; enabled: boolean }>;
+  employeeAdSid?: string;
+  folderBrowseAvailable?: boolean;
+  folderBrowseBlockedReason?: string;
   gpoDeployment?: { supported: boolean; status: string; note: string };
+};
+
+export type FolderBrowseNode = {
+  name: string;
+  path: string;
+  kind: string;
+  accessible: boolean;
+  hasChildren: boolean;
+  detail?: string;
+};
+
+export type FolderBrowseResult = {
+  id: string;
+  deviceId: string;
+  status: string;
+  parentPath: string;
+  nodes: FolderBrowseNode[];
+  error: string;
+  createdAt?: string | null;
+  completedAt?: string | null;
+  expiresAt?: string | null;
 };
 
 export type Workstation = {
@@ -674,6 +698,21 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ folders }),
     }),
+  requestDesktopFolderBrowse: (deviceId: string, parentPath = "") =>
+    request<{
+      id: string;
+      deviceId: string;
+      status: string;
+      parentPath: string;
+      employeeAdSid: string;
+      expiresAt: string;
+      note: string;
+    }>(`/api/v1/admin/desktop-devices/${deviceId}/folder-browse`, {
+      method: "POST",
+      body: JSON.stringify({ parentPath }),
+    }),
+  getDesktopFolderBrowse: (deviceId: string, browseId: string) =>
+    request<FolderBrowseResult>(`/api/v1/admin/desktop-devices/${deviceId}/folder-browse/${browseId}`),
   desktopDeviceCommand: (deviceId: string, command: "start" | "pause" | "resume") =>
     request<DesktopDevice>(`/api/v1/admin/desktop-devices/${deviceId}/command`, {
       method: "POST",

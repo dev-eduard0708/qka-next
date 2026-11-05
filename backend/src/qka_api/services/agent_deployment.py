@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -45,6 +46,12 @@ def _now() -> datetime:
 
 def _hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def machine_proof_digest(*, token: str, computer_sid: str, computer_guid: str = "") -> str:
+    """HMAC-SHA256(token, sid|guid) — possession of token + claimed machine SID."""
+    msg = f"{(computer_sid or '').strip()}|{(computer_guid or '').strip()}".encode("utf-8")
+    return hmac.new((token or "").encode("utf-8"), msg, hashlib.sha256).hexdigest()
 
 
 def _status_label(status: int) -> str:
@@ -203,15 +210,20 @@ def request_deployments(
         session.flush()
 
         plain_token = secrets.token_urlsafe(32)
+        sid = (ws.object_sid or "").strip()
+        guid = (ws.object_guid or "").strip()
+        # Proof binds token ↔ local computer SID (GUID matched separately when presented).
+        proof = machine_proof_digest(token=plain_token, computer_sid=sid, computer_guid="")
         session.add(
             MachineEnrollmentToken(
                 id=uuid.uuid4(),
                 job_id=job.id,
                 workstation_id=ws.id,
                 qka_user_id=ws.assigned_qka_user_id,
-                ad_computer_sid=(ws.object_sid or "").strip(),
-                ad_computer_guid=(ws.object_guid or "").strip(),
+                ad_computer_sid=sid,
+                ad_computer_guid=guid,
                 token_hash=_hash(plain_token),
+                proof_hash=_hash(proof),
                 expires_at=now + timedelta(hours=max(1, int(settings.agent_enrollment_hours or 24))),
                 created_at=now,
             )
@@ -319,10 +331,17 @@ def consume_machine_enrollment_token(
     token: str,
     ad_computer_sid: str,
     ad_computer_guid: str = "",
+    machine_proof: str = "",
 ) -> tuple[MachineEnrollmentToken, AdWorkstation]:
     sid = (ad_computer_sid or "").strip()
     if not sid:
         raise ValueError("AD computer SID is required for machine-identity enrollment.")
+    proof = (machine_proof or "").strip().lower()
+    if not proof:
+        raise PermissionError(
+            "Machine enrollment proof is required. "
+            "SID/GUID claims alone are not accepted as device identity."
+        )
     row = session.execute(
         select(MachineEnrollmentToken).where(MachineEnrollmentToken.token_hash == _hash(token.strip()))
     ).scalar_one_or_none()
@@ -337,6 +356,11 @@ def consume_machine_enrollment_token(
     guid = (ad_computer_guid or "").strip()
     if row.ad_computer_guid and guid and row.ad_computer_guid.lower() != guid.lower():
         raise PermissionError("Machine GUID does not match the enrollment token.")
+    expected = machine_proof_digest(token=token.strip(), computer_sid=sid, computer_guid="")
+    if not hmac.compare_digest(proof, expected):
+        raise PermissionError("Machine enrollment proof is invalid.")
+    if row.proof_hash and not hmac.compare_digest(_hash(proof), row.proof_hash):
+        raise PermissionError("Machine enrollment proof is invalid.")
     ws = session.get(AdWorkstation, row.workstation_id)
     if ws is None:
         raise LookupError("Workstation inventory row was not found.")

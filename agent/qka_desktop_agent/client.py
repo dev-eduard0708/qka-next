@@ -41,6 +41,13 @@ class AgentClient:
     def report_error(self, message: str, category: str = "agent") -> dict[str, Any]:
         return self._request("POST", "/api/v1/agent/desktop/errors", {"message": message, "category": category})
 
+    def folder_browse_result(self, browse_id: str, *, nodes: list[dict], error: str = "") -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/api/v1/agent/desktop/folder-browse/{browse_id}/result",
+            {"nodes": nodes, "error": error},
+        )
+
     def _request(self, method: str, path: str, body: dict | None = None, *, auth: bool = True) -> dict[str, Any]:
         url = f"{self.base_url}{path}"
         data = None if body is None else json.dumps(body).encode("utf-8")

@@ -37,6 +37,18 @@ See **`docs/10-PILOT-PC-INSTALL.md`** for the one-PC procedure.
 - Default excludes: AppData, browsers, Windows, Program Files, credentials stores.
 - Code signing: production blocker until an approved certificate is configured.
 
+## Folder discovery (Agent Devices UI)
+
+Connected agents fulfill Super Admin browse requests over outbound HTTPS polling:
+
+1. Admin selects employee → registered device → **Browse Folders**.
+2. Server queues `pendingFolderBrowse` on policy; agent resolves the employee profile via AD SID → ProfileList (not `C:\Users\<username>`).
+3. Known folders (Desktop / Documents / Downloads) are resolved on the agent; tree expands under that profile only.
+4. Directory names only — no file contents. Junction/symlink escapes and system paths are rejected.
+5. Super Admin saves approved folders; indexing still requires separate read-only verification (no ACL auto-grants, no LocalSystem write).
+
+**Access design:** Prefer a restricted domain service account with explicit read/list NTFS on target profiles. LocalService/LocalSystem often cannot read employee Documents — do not “fix” by broadening ACLs automatically.
+
 ## Managed deploy (Workstations UI)
 
 1. Super Admin assigns an AD-linked employee to the workstation.
