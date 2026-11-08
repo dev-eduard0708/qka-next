@@ -13,6 +13,8 @@
 param(
   [string]$ShareName = 'QkaAgentTokens',
   [string]$LocalPath = 'C:\QehcAI\QkaAgentTokens',
+  # Unelevated API process identity needs Modify to stage per-SID *.tok files.
+  [string]$ApiAccount = 'QEHC\eduard',
   [switch]$IConfirmCreateShare
 )
 
@@ -31,10 +33,18 @@ Set-Content -Path (Join-Path $LocalPath 'README.txt') -Value 'Per-computer *.tok
 $acl = Get-Acl -LiteralPath $LocalPath
 $acl.SetAccessRuleProtection($true, $false)
 @($acl.Access) | ForEach-Object { [void]$acl.RemoveAccessRule($_) }
-foreach ($r in @(
-    New-Object System.Security.AccessControl.FileSystemAccessRule('BUILTIN\Administrators', 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'),
-    New-Object System.Security.AccessControl.FileSystemAccessRule('NT AUTHORITY\SYSTEM', 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
-  )) { $acl.AddAccessRule($r) }
+$inherit = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+$prop = [System.Security.AccessControl.PropagationFlags]::None
+$allow = [System.Security.AccessControl.AccessControlType]::Allow
+$rules = @(
+  (New-Object System.Security.AccessControl.FileSystemAccessRule('BUILTIN\Administrators', 'FullControl', $inherit, $prop, $allow)),
+  (New-Object System.Security.AccessControl.FileSystemAccessRule('NT AUTHORITY\SYSTEM', 'FullControl', $inherit, $prop, $allow))
+)
+if ($ApiAccount) {
+  # FullControl (not just Modify): API must icacls /inheritance:r and grant per-SID ACEs.
+  $rules += (New-Object System.Security.AccessControl.FileSystemAccessRule($ApiAccount, 'FullControl', $inherit, $prop, $allow))
+}
+foreach ($r in $rules) { [void]$acl.AddAccessRule($r) }
 Set-Acl -LiteralPath $LocalPath -AclObject $acl
 
 $existing = Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue
@@ -52,10 +62,14 @@ if (-not $existing) {
 # Replace prior Read-only share ACE if present (Read blocks Delete of claimed *.tok).
 try { Revoke-SmbShareAccess -Name $ShareName -AccountName 'QEHC\Domain Computers' -Force -ErrorAction SilentlyContinue | Out-Null } catch { }
 Grant-SmbShareAccess -Name $ShareName -AccountName 'QEHC\Domain Computers' -AccessRight Change -Force | Out-Null
+if ($ApiAccount) {
+  Grant-SmbShareAccess -Name $ShareName -AccountName $ApiAccount -AccessRight Change -Force | Out-Null
+}
 
 $unc = "\\$env:COMPUTERNAME\$ShareName"
 Write-Host ("TOKEN_DROP_UNC=" + $unc)
 Write-Host 'SHARE_ACCESS=Domain Computers Change (NTFS per-SID isolates tokens)'
+Write-Host ("API_STAGING_ACCOUNT=" + $ApiAccount)
 Write-Host 'AGENT_IDENTITY=NT AUTHORITY\NETWORK SERVICE (SMB as computer$)'
 Write-Host 'Set QKA_AGENT_TOKEN_DROP_UNC and QKA_AGENT_TOKEN_PROVISIONING=unc_acl_drop, then restart API.'
 Write-Host 'VERIFY: Run Test-QkaTokenDropIsolation.ps1 -PilotComputer WSIT02 (no production share required for local ACL proof).'

@@ -476,7 +476,10 @@ def request_deployments(
     }
 
 
-def cancel_job(session: Session, *, actor: QkaUser, job_id: uuid.UUID) -> dict:
+def cancel_job(session: Session, settings: Settings | None = None, *, actor: QkaUser, job_id: uuid.UUID) -> dict:
+    from qka_shared.config import get_settings
+
+    settings = settings or get_settings()
     job = session.get(AgentDeploymentJob, job_id)
     if job is None:
         raise LookupError("Deployment job was not found.")
@@ -488,6 +491,16 @@ def cancel_job(session: Session, *, actor: QkaUser, job_id: uuid.UUID) -> dict:
     job.last_error = f"Cancelled by {actor.id}"
     session.flush()
     ws = session.get(AdWorkstation, job.workstation_id)
+    # Remove staged token so GPO startup auth-gate will not install after cancel.
+    drop_unc = (getattr(settings, "agent_token_drop_unc", None) or "").strip()
+    sid = (ws.object_sid if ws else "") or ""
+    if drop_unc and sid:
+        try:
+            from qka_api.services import token_drop
+
+            token_drop.remove_token_for_computer(drop_unc=drop_unc, computer_sid=sid)
+        except Exception:
+            pass
     return job_dto(job, ws)
 
 
@@ -517,17 +530,78 @@ def retry_job(session: Session, settings: Settings, *, actor: QkaUser, job_id: u
     job.attempt_count = int(job.attempt_count or 0) + 1
     job.updated_at = _now()
     job.cancelled_at = None
-    if prereq["deployEnabled"]:
-        job.status = DEPLOY_SCHEDULED
-        job.scheduled_at = _now()
-        job.last_error = ""
-        job.engine = "gpo"
-    else:
+    dto = job_dto(job, ws)
+    if not prereq["deployEnabled"]:
         job.status = DEPLOY_WAITING_COMPUTER
         job.last_error = "; ".join(prereq["blockers"])[:2000]
         job.engine = "blocked"
+        session.flush()
+        return job_dto(job, ws)
+
+    # Mint a fresh enrollment token and re-stage (plaintext from a failed stage is gone).
+    now = _now()
+    plain_token = secrets.token_urlsafe(32)
+    guid = (ws.object_guid or "").strip()
+    proof = machine_proof_digest(token=plain_token, computer_sid=sid, computer_guid="")
+    session.add(
+        MachineEnrollmentToken(
+            id=uuid.uuid4(),
+            job_id=job.id,
+            workstation_id=ws.id,
+            qka_user_id=ws.assigned_qka_user_id,
+            ad_computer_sid=sid,
+            ad_computer_guid=guid,
+            token_hash=_hash(plain_token),
+            proof_hash=_hash(proof),
+            expires_at=now + timedelta(hours=max(1, int(settings.agent_enrollment_hours or 24))),
+            created_at=now,
+        )
+    )
     session.flush()
-    return job_dto(job, ws)
+
+    provisioning_mode = (getattr(settings, "agent_token_provisioning", None) or "").strip().lower()
+    drop_unc = (getattr(settings, "agent_token_drop_unc", None) or "").strip()
+    if provisioning_mode in {"unc_acl_drop", "token_drop", "unc_drop"} and drop_unc:
+        from qka_api.services import token_drop
+
+        try:
+            # Replace any prior drop file for this SID.
+            token_drop.remove_token_for_computer(drop_unc=drop_unc, computer_sid=sid)
+            staged_path = token_drop.stage_token_for_computer(
+                drop_unc=drop_unc,
+                computer_sid=sid,
+                computer_name=ws.computer_name,
+                token=plain_token,
+            )
+            job.status = DEPLOY_SCHEDULED
+            job.scheduled_at = now
+            job.last_error = ""
+            job.engine = "gpo"
+            session.flush()
+            dto = job_dto(job, ws)
+            dto["tokenStaged"] = True
+            dto["tokenDropPath"] = staged_path
+            dto["machineEnrollmentToken"] = None
+            return dto
+        except Exception as exc:  # noqa: BLE001
+            job.status = DEPLOY_FAILED
+            job.last_error = f"Token drop staging failed: {exc}"[:2000]
+            job.engine = "gpo"
+            session.flush()
+            dto = job_dto(job, ws)
+            dto["tokenStaged"] = False
+            dto["machineEnrollmentToken"] = None
+            return dto
+
+    job.status = DEPLOY_SCHEDULED
+    job.scheduled_at = now
+    job.last_error = ""
+    job.engine = "gpo"
+    session.flush()
+    dto = job_dto(job, ws)
+    dto["tokenStaged"] = False
+    dto["machineEnrollmentToken"] = plain_token
+    return dto
 
 
 def mark_job_registered(session: Session, *, workstation_id: uuid.UUID, device: DesktopDevice) -> None:

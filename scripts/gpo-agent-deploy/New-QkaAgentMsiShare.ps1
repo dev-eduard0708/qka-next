@@ -11,6 +11,7 @@ param(
   [string]$ShareName = 'QkaAgent',
   [string]$LocalPath = 'C:\QehcAI\QkaAgentShare',
   [string]$MsiSource = 'C:\QehcAI\QKA-Next\agent\dist\QKA-Agent.msi',
+  [string]$ApiAccount = 'QEHC\eduard',
   [switch]$IConfirmCreateShare
 )
 
@@ -32,16 +33,26 @@ Copy-Item -LiteralPath $MsiSource -Destination $dest -Force
 $acl = Get-Acl -LiteralPath $LocalPath
 $acl.SetAccessRuleProtection($true, $false)
 @($acl.Access) | ForEach-Object { [void]$acl.RemoveAccessRule($_) }
-foreach ($r in @(
-    New-Object System.Security.AccessControl.FileSystemAccessRule('BUILTIN\Administrators', 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'),
-    New-Object System.Security.AccessControl.FileSystemAccessRule('NT AUTHORITY\SYSTEM', 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow'),
-    New-Object System.Security.AccessControl.FileSystemAccessRule('QEHC\Domain Computers', 'ReadAndExecute', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
-  )) { $acl.AddAccessRule($r) }
+$inherit = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
+$prop = [System.Security.AccessControl.PropagationFlags]::None
+$allow = [System.Security.AccessControl.AccessControlType]::Allow
+$rules = @(
+  (New-Object System.Security.AccessControl.FileSystemAccessRule('BUILTIN\Administrators', 'FullControl', $inherit, $prop, $allow)),
+  (New-Object System.Security.AccessControl.FileSystemAccessRule('NT AUTHORITY\SYSTEM', 'FullControl', $inherit, $prop, $allow)),
+  (New-Object System.Security.AccessControl.FileSystemAccessRule('QEHC\Domain Computers', 'ReadAndExecute', $inherit, $prop, $allow))
+)
+if ($ApiAccount) {
+  $rules += (New-Object System.Security.AccessControl.FileSystemAccessRule($ApiAccount, 'ReadAndExecute', $inherit, $prop, $allow))
+}
+foreach ($r in $rules) { [void]$acl.AddAccessRule($r) }
 Set-Acl -LiteralPath $LocalPath -AclObject $acl
 
 if (-not (Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue)) {
   New-SmbShare -Name $ShareName -Path $LocalPath -ReadAccess 'QEHC\Domain Computers' -FullAccess 'QEHC\Domain Admins' `
     -Description 'QKA Desktop Agent MSI (no secrets)'
+}
+if ($ApiAccount) {
+  Grant-SmbShareAccess -Name $ShareName -AccountName $ApiAccount -AccessRight Read -Force | Out-Null
 }
 
 $unc = "\\$env:COMPUTERNAME\$ShareName\QKA-Agent.msi"

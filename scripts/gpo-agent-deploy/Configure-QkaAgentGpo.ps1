@@ -11,6 +11,9 @@
   - Registers Machine Startup via GPT.ini version bump + Scripts CSE extension names
     (does not rely on copying scripts.ini alone without CSE/version updates)
   - Startup installs MSI from UNC with QKASERVERURL only — NO enrollment tokens in SYSVOL
+  - Authorization gate: MSI install runs ONLY when a per-SID *.tok exists on the token-drop
+    share for this computer (staged by QKA Deploy Agent). Linking the GPO or pilot-group
+    membership alone never installs.
 
   Does NOT add computers to the pilot group. Does NOT run unless -IConfirmGpoScope.
 #>
@@ -97,6 +100,14 @@ if ($applyNames | Where-Object { $_ -match 'Authenticated Users|Domain Computers
 }
 Write-Host "Security filtering OK — Apply only on $PilotGroup."
 
+# --- Backup existing SYSVOL startup artifacts before rewrite ---
+$backupRoot = Join-Path $env:TEMP ("qka-gpo-backup-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+New-Item -ItemType Directory -Force -Path $backupRoot | Out-Null
+if (Test-Path -LiteralPath $sysvolRoot) {
+  Copy-Item -LiteralPath $sysvolRoot -Destination (Join-Path $backupRoot 'Policies') -Recurse -Force -ErrorAction SilentlyContinue
+  Write-Host ("GPO_BACKUP=" + $backupRoot)
+}
+
 # --- Startup payload (no secrets) ---
 New-Item -ItemType Directory -Force -Path $startupDir | Out-Null
 $ps1Name = 'Install-QkaAgentFromUnc.ps1'
@@ -106,6 +117,8 @@ $cmdPath = Join-Path $startupDir $cmdName
 
 $ps1 = @"
 # QKA Agent MSI bootstrap — NO enrollment secrets. Pilot-group GPO only.
+# AUTH GATE: install only when Deploy Agent staged a per-SID *.tok for THIS computer.
+# Linking the GPO or pilot-group membership alone must never install.
 `$ErrorActionPreference = 'Stop'
 `$msi = '$MsiUnc'
 `$url = '$ServerUrl'
@@ -114,11 +127,46 @@ $ps1 = @"
 New-Item -ItemType Directory -Force -Path `$logDir | Out-Null
 `$log = Join-Path `$logDir 'gpo-install.log'
 function Write-Log([string]`$m) { Add-Content -Path `$log -Value ("{0} {1}" -f (Get-Date -Format o), `$m) }
+function Get-LocalComputerSid {
+  `$acct = New-Object System.Security.Principal.NTAccount(`$env:USERDOMAIN, (`$env:COMPUTERNAME + '$'))
+  return `$acct.Translate([System.Security.Principal.SecurityIdentifier]).Value
+}
+function Get-TokenDropFileName([string]`$sid) {
+  # Must match qka_api.services.token_drop.sid_to_filename
+  return ((`$sid -replace '[^0-9A-Za-z\-]', '_') + '.tok')
+}
 # Non-secret path only (token files are ACL-bound per computer on that share).
 `$reg = 'HKLM:\SOFTWARE\QKA\DesktopAgent'
 New-Item -Path `$reg -Force | Out-Null
 New-ItemProperty -Path `$reg -Name 'TokenDropUnc' -Value `$tokenDrop -PropertyType String -Force | Out-Null
 if (Get-Service -Name 'QkaDesktopAgent' -ErrorAction SilentlyContinue) { Write-Log 'already_installed'; exit 0 }
+
+# --- Authorization gate (Deploy Agent must have staged this computer's token) ---
+try {
+  `$computerSid = Get-LocalComputerSid
+} catch {
+  Write-Log ('auth_gate_skip sid_resolve_failed ' + `$_.Exception.Message)
+  exit 0
+}
+`$tokName = Get-TokenDropFileName `$computerSid
+`$tokPath = Join-Path `$tokenDrop.TrimEnd('\') `$tokName
+if (-not (Test-Path -LiteralPath `$tokPath)) {
+  Write-Log ('auth_gate_skip no_token_for_sid file=' + `$tokName + ' — Deploy Agent not clicked / cancelled / expired')
+  exit 0
+}
+# Confirm file is non-empty without logging contents (SYSTEM can read; filename is the install gate).
+try {
+  `$len = (Get-Item -LiteralPath `$tokPath).Length
+  if (`$len -lt 8) {
+    Write-Log 'auth_gate_skip token_empty_or_invalid'
+    exit 0
+  }
+} catch {
+  Write-Log ('auth_gate_skip token_stat_failed ' + `$_.Exception.Message)
+  exit 0
+}
+Write-Log ('auth_gate_ok sid_token_present len=' + `$len)
+
 if (-not (Test-Path -LiteralPath `$msi)) { Write-Log ("msi_missing " + `$msi); exit 1 }
 `$msiLog = Join-Path `$logDir 'msiexec.log'
 `$arg = "/i ``"`$msi``" /qn /norestart QKASERVERURL=`$url /L*v ``"`$msiLog``""
@@ -136,13 +184,40 @@ Set-Content -Path $ps1Path -Value $ps1 -Encoding UTF8
   'exit /b %ERRORLEVEL%'
 ) | Set-Content -Path $cmdPath -Encoding ASCII
 
-# scripts.ini for Machine Startup (CMD entry)
+# scripts.ini for Machine Startup — merge QKA entry; preserve unrelated startup scripts.
 $scriptsIni = Join-Path $scriptsDir 'scripts.ini'
-@"
-[Startup]
-0CmdLine=$cmdName
-0Parameters=
-"@ | Set-Content -Path $scriptsIni -Encoding ASCII
+$startupEntries = New-Object System.Collections.Generic.List[object]
+if (Test-Path -LiteralPath $scriptsIni) {
+  $rawIni = Get-Content -LiteralPath $scriptsIni
+  $inStartup = $false
+  $pendingCmd = $null
+  foreach ($line in $rawIni) {
+    if ($line -match '^\s*\[Startup\]\s*$') { $inStartup = $true; continue }
+    if ($line -match '^\s*\[.+\]\s*$') { $inStartup = $false; continue }
+    if (-not $inStartup) { continue }
+    if ($line -match '^\s*\d+CmdLine=(.+)\s*$') {
+      $pendingCmd = $Matches[1].Trim()
+    } elseif ($line -match '^\s*\d+Parameters=(.*)\s*$' -and $null -ne $pendingCmd) {
+      $startupEntries.Add([pscustomobject]@{ Cmd = $pendingCmd; Params = $Matches[1] })
+      $pendingCmd = $null
+    }
+  }
+}
+# Drop prior QKA install entries, then append current.
+$kept = New-Object System.Collections.Generic.List[object]
+foreach ($e in $startupEntries) {
+  if ($e.Cmd -notmatch 'Install-QkaAgentFromUnc') { [void]$kept.Add($e) }
+}
+[void]$kept.Add([pscustomobject]@{ Cmd = $cmdName; Params = '' })
+$startupEntries = $kept
+$iniLines = New-Object System.Collections.Generic.List[string]
+[void]$iniLines.Add('[Startup]')
+for ($i = 0; $i -lt $startupEntries.Count; $i++) {
+  [void]$iniLines.Add(('{0}CmdLine={1}' -f $i, $startupEntries[$i].Cmd))
+  [void]$iniLines.Add(('{0}Parameters={1}' -f $i, $startupEntries[$i].Params))
+}
+$iniLines | Set-Content -Path $scriptsIni -Encoding ASCII
+Write-Host ("Startup entries registered: " + $startupEntries.Count)
 
 # --- Register Scripts CSE on GPO object + bump computer GPT version ---
 # Scripts CSE pair: tool {42B5FAAE-6536-11D2-AE5A-0000F87571E3} CSE {40B6664F-4972-11D1-A7CA-0000F87571E3}

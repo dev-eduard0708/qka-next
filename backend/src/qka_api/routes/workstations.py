@@ -267,7 +267,7 @@ def cancel_deploy(
 
     actor = _require_super_admin(request, settings, session, mutating=True)
     try:
-        result = deploy_svc.cancel_job(session, actor=actor, job_id=job_id)
+        result = deploy_svc.cancel_job(session, settings, actor=actor, job_id=job_id)
         session.commit()
         return result
     except ValueError as exc:
