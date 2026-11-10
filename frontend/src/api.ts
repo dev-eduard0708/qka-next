@@ -97,8 +97,11 @@ export type DesktopDevice = {
   qkaUserId: string | null;
   employeeAssigned?: boolean;
   employeeName: string;
+  employeeEmail?: string;
   computerName: string;
+  workstationHostname?: string;
   domainJoinedName: string;
+  workstationId?: string | null;
   deviceFingerprint: string;
   agentVersion: string;
   status: string;
@@ -123,7 +126,63 @@ export type DesktopDevice = {
   employeeAdSid?: string;
   folderBrowseAvailable?: boolean;
   folderBrowseBlockedReason?: string;
+  inventorySummary?: {
+    hostname?: string;
+    osEdition?: string;
+    ramBytes?: number;
+    volumesSyncedAt?: string | null;
+    hardwareSyncedAt?: string | null;
+    hardwareStale?: boolean;
+    volumesStale?: boolean;
+    volumeCount?: number;
+  } | null;
+  availableAgentVersion?: string;
+  upgradeAvailable?: boolean;
+  upgradeJob?: {
+    id: string;
+    status: string;
+    fromVersion?: string;
+    targetVersion?: string;
+    lastError?: string;
+    lastResult?: string;
+  } | null;
   gpoDeployment?: { supported: boolean; status: string; note: string };
+};
+
+export type DesktopDeviceInventory = {
+  deviceId: string;
+  workstationId?: string | null;
+  hostname: string;
+  domainName: string;
+  osEdition: string;
+  osVersion: string;
+  osBuild: string;
+  manufacturer: string;
+  model: string;
+  serialNumber: string;
+  cpuModel: string;
+  cpuPhysicalCores: number;
+  cpuLogicalProcessors: number;
+  ramBytes: number;
+  agentVersion: string;
+  disks: Array<Record<string, unknown>>;
+  volumes: Array<{
+    letter?: string;
+    rootPath?: string;
+    label?: string;
+    fileSystem?: string;
+    capacityBytes?: number;
+    freeBytes?: number;
+    usedBytes?: number;
+    accessible?: boolean;
+  }>;
+  knownFolders: FolderBrowseNode[];
+  hardwareSyncedAt?: string | null;
+  volumesSyncedAt?: string | null;
+  hardwareStale?: boolean;
+  volumesStale?: boolean;
+  refreshRequestedAt?: string | null;
+  updatedAt?: string | null;
 };
 
 export type FolderBrowseNode = {
@@ -133,6 +192,9 @@ export type FolderBrowseNode = {
   accessible: boolean;
   hasChildren: boolean;
   detail?: string;
+  capacityBytes?: number;
+  freeBytes?: number;
+  usedBytes?: number;
 };
 
 export type FolderBrowseResult = {
@@ -184,21 +246,30 @@ export type Workstation = {
     note: string;
     pilotGroupMember?: boolean;
     pilotGroup?: string;
+    membershipStatus?: string;
+    taskReadiness?: string;
+    taskDistributionMode?: string;
+    gpoReadinessNote?: string;
     prerequisites?: {
       httpsConfigured: boolean;
       gpoEngineAvailable: boolean;
       msiPresent: boolean;
       tlsTrust: string;
       machineIdentityEnrollmentReady: boolean;
+      noRebootCentralDeployReady?: boolean;
     };
   };
   deploymentJob?: {
-    id: string;
+    id: string | null;
     status: string;
-    statusCode: number;
+    statusCode: number | null;
+    displayStatus?: string;
     attemptCount: number;
     lastError: string;
+    lastResult?: string;
     msiVersion: string;
+    msiExitCode?: number | null;
+    restartRequired?: boolean;
     engine: string;
     enrollmentMode: string;
     desktopDeviceId: string | null;
@@ -206,6 +277,8 @@ export type Workstation = {
     updatedAt: string | null;
     approvedAt: string | null;
     scheduledAt: string | null;
+    installStartedAt?: string | null;
+    msiCompletedAt?: string | null;
     installedAt: string | null;
     cancelledAt: string | null;
   } | null;
@@ -232,6 +305,9 @@ export type DeployPrerequisites = {
   maxBulk: number;
   realPcDeployAllowed: boolean;
   note: string;
+  taskDistributionMode?: string;
+  noRebootCentralDeployReady?: boolean;
+  taskDistributionNote?: string;
 };
 
 export type WorkstationOuTreeNode = {
@@ -743,6 +819,40 @@ export const api = {
     }),
   getDesktopFolderBrowse: (deviceId: string, browseId: string) =>
     request<FolderBrowseResult>(`/api/v1/admin/desktop-devices/${deviceId}/folder-browse/${browseId}`),
+  desktopDeviceInventory: (deviceId: string) =>
+    request<{ inventory: DesktopDeviceInventory | null; note?: string }>(
+      `/api/v1/admin/desktop-devices/${deviceId}/inventory`,
+    ),
+  refreshDesktopDeviceInventory: (deviceId: string) =>
+    request<{ ok: boolean; refreshRequestedAt?: string }>(
+      `/api/v1/admin/desktop-devices/${deviceId}/inventory/refresh`,
+      { method: "POST" },
+    ),
+  desktopBrowseRoots: (deviceId: string) =>
+    request<{
+      deviceId: string;
+      online: boolean;
+      folderBrowseAvailable?: boolean;
+      inventory: DesktopDeviceInventory | null;
+      nodes: FolderBrowseNode[];
+      syncedAt?: string | null;
+      stale?: boolean;
+      cacheHit?: boolean;
+    }>(`/api/v1/admin/desktop-devices/${deviceId}/browse-roots`),
+  desktopFolderCache: (deviceId: string, parentPath = "") => {
+    const q = parentPath ? `?parentPath=${encodeURIComponent(parentPath)}` : "";
+    return request<{
+      cache: {
+        deviceId: string;
+        parentPath: string;
+        nodes: FolderBrowseNode[];
+        error: string;
+        syncedAt?: string | null;
+        stale?: boolean;
+      } | null;
+      online: boolean;
+    }>(`/api/v1/admin/desktop-devices/${deviceId}/folder-cache${q}`);
+  },
   desktopDeviceCommand: (deviceId: string, command: "start" | "pause" | "resume") =>
     request<DesktopDevice>(`/api/v1/admin/desktop-devices/${deviceId}/command`, {
       method: "POST",
@@ -750,6 +860,19 @@ export const api = {
     }),
   revokeDesktopDevice: (deviceId: string) =>
     request<DesktopDevice>(`/api/v1/admin/desktop-devices/${deviceId}/revoke`, { method: "POST" }),
+  upgradeDesktopDevice: (deviceId: string) =>
+    request<{
+      id: string;
+      status: string;
+      fromVersion?: string;
+      targetVersion?: string;
+      note?: string;
+      lastError?: string;
+    }>(`/api/v1/admin/desktop-devices/${deviceId}/upgrade`, { method: "POST" }),
+  cancelDesktopDeviceUpgrade: (jobId: string) =>
+    request<{ id: string; status: string }>(`/api/v1/admin/desktop-devices/upgrades/${jobId}/cancel`, {
+      method: "POST",
+    }),
   workstations: (params?: {
     search?: string;
     ou?: string;
@@ -916,6 +1039,36 @@ export const api = {
       `/api/v1/admin/workstations/deploy/${jobId}/retry`,
       { method: "POST", body: "{}" },
     ),
+  changePilotMembership: (body: { workstationIds: string[]; operation: "add" | "remove" }) =>
+    request<{
+      operation: string;
+      pilotGroup: string;
+      succeeded: number;
+      failed: number;
+      partial: boolean;
+      allSucceeded: boolean;
+      anySucceeded: boolean;
+      results: Array<{
+        workstationId: string;
+        computerName?: string;
+        objectSid?: string;
+        ok: boolean;
+        result: string;
+        detail: string;
+        pilotGroupMember?: boolean;
+        pilotGroup?: string;
+        agentInstalled?: boolean;
+        gpoReadinessNote?: string;
+        adSamAccountName?: string;
+        adDistinguishedName?: string;
+      }>;
+      workstations: Workstation[];
+      prerequisites?: DeployPrerequisites;
+      note: string;
+    }>("/api/v1/admin/workstations/deploy/pilot-membership", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   sourceFolderTree: (approvedShareId: string, rootPrefix?: string | null) => {
     const q = new URLSearchParams({ approvedShareId });
     // "" / omitted → entire share; otherwise scoped prefix

@@ -1,0 +1,399 @@
+// QKA shared control styling for Employee Computers (Agent Devices + Workstations).
+// Opt-in via .qka-ctrl-* classes only — does not restyle unrelated pages.
+
+$qka-ctrl-h: 36px
+$qka-ctrl-radius: 8px
+$qka-ctrl-ease: 160ms ease
+$qka-ctrl-font: 13px
+$qka-ctrl-icon: 16px
+$qka-blue: #0f4c81
+$qka-blue-soft: rgba(15, 76, 129, 0.08)
+$qka-blue-soft-strong: rgba(15, 76, 129, 0.14)
+$qka-border: rgba(16, 32, 51, 0.14)
+$qka-border-dark: rgba(232, 238, 244, 0.16)
+$qka-hover: rgba(16, 32, 51, 0.04)
+$qka-hover-dark: rgba(232, 238, 244, 0.06)
+$qka-menu-w: 232px
+$qka-row-h: 38px
+
+.qka-ctrl-toolbar
+  display: flex
+  flex-wrap: wrap
+  align-items: center
+  gap: 8px
+  margin-bottom: 12px
+
+.qka-ctrl-search
+  width: 270px
+  max-width: 100%
+  flex: 0 1 270px
+
+.qka-ctrl-select--employee
+  width: 180px
+  max-width: 100%
+  flex: 0 1 180px
+
+.qka-ctrl-select--compact
+  width: 155px
+  max-width: 100%
+  flex: 0 1 155px
+
+.qka-ctrl-toolbar-actions
+  display: flex
+  flex-wrap: wrap
+  align-items: center
+  gap: 4px
+  margin-left: auto
+
+.qka-ctrl-field
+  font-size: $qka-ctrl-font
+
+  .q-field__control
+    height: $qka-ctrl-h
+    min-height: $qka-ctrl-h
+    border-radius: $qka-ctrl-radius
+    padding-left: 8px
+    padding-right: 4px
+
+  // Resting outline only — Quasar owns focus via :after + .q-field--highlighted.
+  &.q-field--outlined .q-field__control:before,
+  &.q-field--outlined .q-field__control:after
+    border-radius: $qka-ctrl-radius
+
+  &.q-field--outlined .q-field__control:before
+    border-color: $qka-border
+
+  &.q-field--outlined:not(.q-field--highlighted) .q-field__control:hover:before
+    border-color: rgba(15, 76, 129, 0.45)
+
+  // Hide resting border while Quasar draws the single focus ring on :after.
+  &.q-field--highlighted.q-field--outlined .q-field__control:before
+    border-color: transparent
+
+  // Compact filters never use floating labels — keep value on one centered line.
+  .q-field__label
+    display: none
+
+  .q-field__native,
+  .q-field__input,
+  .q-field__prefix,
+  .q-field__suffix
+    min-height: $qka-ctrl-h
+    height: $qka-ctrl-h
+    padding-top: 0
+    padding-bottom: 0
+    line-height: $qka-ctrl-h
+    font-size: $qka-ctrl-font
+
+  .q-field__marginal
+    height: $qka-ctrl-h
+    min-height: $qka-ctrl-h
+
+  .q-field__control-container
+    padding-top: 0
+    padding-bottom: 0
+
+  .q-field__append,
+  .q-field__prepend
+    height: $qka-ctrl-h
+    min-height: $qka-ctrl-h
+    padding: 0
+
+  .q-field__prepend
+    padding-right: 6px
+
+  .q-field__append
+    padding-left: 2px
+
+  .q-field__append .q-icon,
+  .q-field__prepend .q-icon
+    font-size: $qka-ctrl-icon
+    color: rgba(16, 32, 51, 0.55)
+    transition: color $qka-ctrl-ease
+
+  &.q-field--highlighted .q-field__append .q-icon,
+  &.q-field--highlighted .q-field__prepend .q-icon
+    color: $qka-blue
+
+  .q-select__dropdown-icon
+    font-size: $qka-ctrl-icon
+    opacity: 0.7
+    transition: transform $qka-ctrl-ease, opacity $qka-ctrl-ease
+
+  &.q-field--highlighted .q-select__dropdown-icon
+    opacity: 1
+
+  .q-field__focusable-action
+    opacity: 0.55
+    transition: opacity $qka-ctrl-ease
+    margin-left: 0
+
+  .q-field__focusable-action:hover
+    opacity: 1
+
+  // Keep selected / placeholder text from colliding with clear + caret.
+  .q-field__native,
+  .q-field__native span,
+  .q-field__input,
+  .q-placeholder
+    overflow: hidden
+    text-overflow: ellipsis
+    white-space: nowrap
+
+  .q-placeholder
+    color: rgba(16, 32, 51, 0.55)
+    opacity: 1
+
+  // Avoid flash of native text-selection highlight when fill-input focuses.
+  .q-field__input::selection
+    background: transparent
+    color: inherit
+
+.body--dark .qka-ctrl-field
+  &.q-field--outlined .q-field__control:before
+    border-color: $qka-border-dark
+
+  &.q-field--outlined:not(.q-field--highlighted) .q-field__control:hover:before
+    border-color: rgba(90, 156, 214, 0.55)
+
+  .q-field__append .q-icon,
+  .q-field__prepend .q-icon
+    color: rgba(232, 238, 244, 0.62)
+
+  &.q-field--highlighted .q-field__append .q-icon,
+  &.q-field--highlighted .q-field__prepend .q-icon
+    color: #6eb0e4
+
+  .q-placeholder
+    color: rgba(232, 238, 244, 0.55)
+
+.qka-ctrl-menu
+  min-width: $qka-menu-w
+  max-width: 280px
+  border-radius: 8px
+  padding: 4px 0
+  box-shadow: 0 8px 24px rgba(16, 32, 51, 0.12), 0 1px 2px rgba(16, 32, 51, 0.06)
+  border: 1px solid $qka-border
+
+  .q-item
+    min-height: $qka-row-h
+    padding: 0 10px
+    border-radius: 6px
+    margin: 1px 4px
+    transition: background-color $qka-ctrl-ease
+
+  .q-item__section--avatar
+    min-width: 24px
+    padding-right: 8px
+
+  .q-item__section--side
+    padding-left: 6px
+
+  .q-icon
+    font-size: $qka-ctrl-icon
+
+  .q-item__label
+    font-size: $qka-ctrl-font
+    font-weight: 500
+    letter-spacing: 0.01em
+
+  .q-item__label--caption
+    font-size: 12px
+    font-weight: 400
+    opacity: 0.72
+
+  .q-item--clickable:hover,
+  .q-item--active,
+  .q-manual-focusable--focused
+    background: $qka-blue-soft
+
+  .q-item.qka-ctrl-menu__active
+    background: $qka-blue-soft-strong
+    color: $qka-blue
+
+  .q-item.qka-ctrl-menu__active .q-icon
+    color: $qka-blue
+
+  .q-item--disabled
+    opacity: 0.45
+
+  .q-separator
+    margin: 4px 10px
+
+  .qka-ctrl-menu__danger .q-item__label,
+  .qka-ctrl-menu__danger .q-icon
+    color: #b42318
+
+.body--dark .qka-ctrl-menu
+  border-color: $qka-border-dark
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45), 0 1px 2px rgba(0, 0, 0, 0.35)
+
+  .q-item--clickable:hover,
+  .q-item--active,
+  .q-manual-focusable--focused
+    background: rgba(110, 176, 228, 0.12)
+
+  .q-item.qka-ctrl-menu__active
+    background: rgba(110, 176, 228, 0.18)
+    color: #8ec5ee
+
+  .q-item.qka-ctrl-menu__active .q-icon
+    color: #8ec5ee
+
+  .qka-ctrl-menu__danger .q-item__label,
+  .qka-ctrl-menu__danger .q-icon
+    color: #f07167
+
+.qka-ctrl-chip.q-chip
+  height: 24px
+  border-radius: 6px
+  font-size: 12px
+  font-weight: 600
+  letter-spacing: 0.01em
+  padding: 0 8px
+  box-shadow: none
+
+  .q-icon,
+  .q-chip__icon
+    font-size: 14px
+    margin-right: 2px
+
+.qka-ctrl-chip--online
+  background: rgba(31, 122, 77, 0.12)
+  color: #1f7a4d
+
+.qka-ctrl-chip--offline
+  background: rgba(16, 32, 51, 0.08)
+  color: rgba(16, 32, 51, 0.62)
+
+.qka-ctrl-chip--paused
+  background: rgba(183, 121, 31, 0.14)
+  color: #9a6514
+
+.qka-ctrl-chip--indexing
+  background: rgba(15, 76, 129, 0.12)
+  color: $qka-blue
+
+.qka-ctrl-chip--failed
+  background: rgba(180, 35, 24, 0.12)
+  color: #b42318
+
+.qka-ctrl-chip--neutral
+  background: rgba(16, 32, 51, 0.06)
+  color: rgba(16, 32, 51, 0.7)
+
+.qka-ctrl-chip--outline
+  background: transparent
+  border: 1px solid currentColor
+
+.body--dark .qka-ctrl-chip--online
+  background: rgba(61, 168, 112, 0.18)
+  color: #6dca97
+
+.body--dark .qka-ctrl-chip--offline
+  background: rgba(232, 238, 244, 0.08)
+  color: rgba(232, 238, 244, 0.62)
+
+.body--dark .qka-ctrl-chip--paused
+  background: rgba(214, 158, 46, 0.18)
+  color: #e0b45a
+
+.body--dark .qka-ctrl-chip--indexing
+  background: rgba(110, 176, 228, 0.16)
+  color: #8ec5ee
+
+.body--dark .qka-ctrl-chip--failed
+  background: rgba(240, 113, 103, 0.16)
+  color: #f07167
+
+.body--dark .qka-ctrl-chip--neutral
+  background: rgba(232, 238, 244, 0.08)
+  color: rgba(232, 238, 244, 0.72)
+
+.qka-ctrl-table
+  .q-table__top,
+  .q-table__bottom
+    padding: 8px 12px
+
+  thead tr th
+    font-size: 12px
+    font-weight: 650
+    letter-spacing: 0.03em
+    text-transform: uppercase
+    color: rgba(16, 32, 51, 0.58)
+    padding: 10px 12px
+    height: 40px
+    border-bottom: 1px solid $qka-border
+
+  tbody tr td
+    padding: 10px 12px
+    height: 52px
+    font-size: 13.5px
+    border-bottom: 1px solid rgba(16, 32, 51, 0.06)
+    transition: background-color $qka-ctrl-ease
+    vertical-align: middle
+
+  tbody tr:hover td
+    background: $qka-hover
+
+  .qka-ctrl-table__primary
+    font-weight: 600
+    color: #102033
+    line-height: 1.3
+
+  .qka-ctrl-table__secondary
+    font-size: 12px
+    color: rgba(16, 32, 51, 0.55)
+    line-height: 1.3
+    margin-top: 2px
+
+  // Soft sticky seam — avoid a hard double-border look next to Actions.
+  th.qka-ctrl-table__sticky,
+  td.qka-ctrl-table__sticky,
+  th:last-child,
+  td:last-child
+    box-shadow: -4px 0 6px -6px rgba(16, 32, 51, 0.12)
+
+.body--dark .qka-ctrl-table
+  thead tr th
+    color: rgba(232, 238, 244, 0.58)
+    border-bottom-color: $qka-border-dark
+
+  tbody tr td
+    border-bottom-color: rgba(232, 238, 244, 0.06)
+
+  tbody tr:hover td
+    background: $qka-hover-dark
+
+  .qka-ctrl-table__primary
+    color: #e8eef4
+
+  .qka-ctrl-table__secondary
+    color: rgba(232, 238, 244, 0.55)
+
+  th:last-child,
+  td:last-child
+    box-shadow: -4px 0 6px -6px rgba(0, 0, 0, 0.35)
+
+.qka-ctrl-actions-trigger
+  width: 34px
+  height: 34px
+  border-radius: 8px
+  transition: background-color $qka-ctrl-ease
+
+  &:hover
+    background: $qka-blue-soft
+
+.body--dark .qka-ctrl-actions-trigger:hover
+  background: rgba(110, 176, 228, 0.12)
+
+@media (max-width: 1023px)
+  .qka-ctrl-search,
+  .qka-ctrl-select--employee,
+  .qka-ctrl-select--compact
+    flex: 1 1 150px
+    width: auto
+
+  .qka-ctrl-toolbar-actions
+    margin-left: 0
+    width: 100%

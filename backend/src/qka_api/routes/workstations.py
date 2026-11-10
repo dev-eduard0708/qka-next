@@ -51,6 +51,13 @@ class DeployBody(BaseModel):
     approve: bool = True
 
 
+class PilotMembershipBody(BaseModel):
+    """Group name is NEVER accepted from the client — server locks to QKA-Agent-Pilot-Computers."""
+
+    workstationIds: list[uuid.UUID] = Field(default_factory=list)
+    operation: str = Field(description="add | remove")
+
+
 def _require_super_admin(request: Request, settings: Settings, session: Session, *, mutating: bool):
     if mutating:
         require_csrf(request)
@@ -254,6 +261,36 @@ def request_deploy(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/deploy/pilot-membership")
+def change_pilot_membership(
+    body: PilotMembershipBody,
+    request: Request,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings_dep),
+):
+    """Add/remove computers from QKA-Agent-Pilot-Computers only. Does not deploy the agent."""
+    from qka_api.services import pilot_membership as pilot_svc
+
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    op = (body.operation or "").strip().lower()
+    if op not in {"add", "remove"}:
+        raise HTTPException(status_code=400, detail="operation must be add or remove.")
+    try:
+        result = pilot_svc.change_pilot_membership(
+            session,
+            settings,
+            actor=actor,
+            workstation_ids=body.workstationIds,
+            operation=op,  # type: ignore[arg-type]
+        )
+        session.commit()
+        return result
+    except pilot_svc.PilotMembershipError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/deploy/{job_id}/cancel")

@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScheduledTasks clsid="{CC63F200-7309-4ba0-B154-A71CD118DBCC}" disabled="0">
+  <TaskV2 clsid="{D8896631-B747-47a7-84A6-C155337F3BC8}" name="QKA-Agent-Install" image="3" changed="@@CHANGED@@" uid="{@@UID@@}" bypassErrors="0" userContext="0" removePolicy="0">
+    <Properties action="R" name="QKA-Agent-Install" runAs="NT AUTHORITY\SYSTEM" logonType="S4U">
+      <Task version="1.2">
+        <RegistrationInfo>
+          <Author>QKA</Author>
+          <Description>Install QKA Agent only after a fresh uncancelled enrollment authorization. No reboot.</Description>
+        </RegistrationInfo>
+        <Triggers>
+          <TimeTrigger>
+            <Repetition>
+              <Interval>PT2M</Interval>
+              <StopAtDurationEnd>false</StopAtDurationEnd>
+            </Repetition>
+            <StartBoundary>2026-01-01T00:00:00</StartBoundary>
+            <Enabled>true</Enabled>
+          </TimeTrigger>
+        </Triggers>
+        <Principals>
+          <Principal id="Author">
+            <UserId>S-1-5-18</UserId>
+            <RunLevel>HighestAvailable</RunLevel>
+          </Principal>
+        </Principals>
+        <Settings>
+          <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+          <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+          <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+          <AllowHardTerminate>true</AllowHardTerminate>
+          <StartWhenAvailable>true</StartWhenAvailable>
+          <RunOnlyIfNetworkAvailable>true</RunOnlyIfNetworkAvailable>
+          <IdleSettings>
+            <StopOnIdleEnd>true</StopOnIdleEnd>
+            <RestartOnIdle>false</RestartOnIdle>
+          </IdleSettings>
+          <AllowStartOnDemand>true</AllowStartOnDemand>
+          <Enabled>true</Enabled>
+          <Hidden>false</Hidden>
+          <RunOnlyIfIdle>false</RunOnlyIfIdle>
+          <WakeToRun>false</WakeToRun>
+          <ExecutionTimeLimit>PT1H</ExecutionTimeLimit>
+          <Priority>7</Priority>
+        </Settings>
+        <Actions Context="Author">
+          <Exec>
+            <Command>powershell.exe</Command>
+            <Arguments>-NoProfile -ExecutionPolicy Bypass -File "@@SCRIPT_UNC@@"</Arguments>
+          </Exec>
+        </Actions>
+      </Task>
+    </Properties>
+  </TaskV2>
+</ScheduledTasks>

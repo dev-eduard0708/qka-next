@@ -900,6 +900,7 @@ DEPLOY_INSTALLING = 4
 DEPLOY_INSTALLED_REGISTERED = 5
 DEPLOY_FAILED = 6
 DEPLOY_CANCELLED = 7
+DEPLOY_TIMED_OUT = 8
 
 
 class AgentDeploymentJob(Base):
@@ -930,6 +931,10 @@ class AgentDeploymentJob(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    install_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    msi_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    msi_exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_result: Mapped[str] = mapped_column(String(256), default="")
     installed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -983,6 +988,45 @@ class DesktopFolderBrowse(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+# Agent upgrade jobs (explicit per-device; never fleet-wide).
+UPGRADE_SCHEDULED = 0
+UPGRADE_UPGRADING = 1
+UPGRADE_VERIFYING = 2
+UPGRADE_COMPLETED = 3
+UPGRADE_FAILED = 4
+UPGRADE_CANCELLED = 5
+
+
+class DesktopAgentUpgradeJob(Base):
+    """Super Admin–approved in-place agent upgrade for one registered device."""
+
+    __tablename__ = "qka_next_desktop_agent_upgrade_job"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    device_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    workstation_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True, index=True)
+    requested_by_user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    status: Mapped[int] = mapped_column(Integer, default=UPGRADE_SCHEDULED, index=True)
+    from_version: Mapped[str] = mapped_column(String(64), default="")
+    target_version: Mapped[str] = mapped_column(String(64), default="")
+    msi_version: Mapped[str] = mapped_column(String(64), default="")
+    last_error: Mapped[str] = mapped_column(String(2000), default="")
+    msi_exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_result: Mapped[str] = mapped_column(String(256), default="")
+    token_hash: Mapped[str] = mapped_column(String(128), default="", index=True)
+    proof_hash: Mapped[str] = mapped_column(String(128), default="")
+    ad_computer_sid: Mapped[str] = mapped_column(String(256), default="", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    upgrading_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    verifying_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    failed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class DesktopDeviceFolder(Base):
     __tablename__ = "qka_next_desktop_device_folder"
 
@@ -991,6 +1035,54 @@ class DesktopDeviceFolder(Base):
     path_normalized: Mapped[str] = mapped_column(String(2048))
     include_subfolders: Mapped[bool] = mapped_column(Boolean, default=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class DesktopDeviceInventory(Base):
+    """Cached hardware / volume inventory for a registered desktop agent device."""
+
+    __tablename__ = "qka_next_desktop_device_inventory"
+
+    device_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    workstation_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True, index=True)
+    hostname: Mapped[str] = mapped_column(String(256), default="")
+    domain_name: Mapped[str] = mapped_column(String(256), default="")
+    os_edition: Mapped[str] = mapped_column(String(256), default="")
+    os_version: Mapped[str] = mapped_column(String(128), default="")
+    os_build: Mapped[str] = mapped_column(String(64), default="")
+    manufacturer: Mapped[str] = mapped_column(String(256), default="")
+    model: Mapped[str] = mapped_column(String(256), default="")
+    serial_number: Mapped[str] = mapped_column(String(256), default="")
+    cpu_model: Mapped[str] = mapped_column(String(512), default="")
+    cpu_physical_cores: Mapped[int] = mapped_column(Integer, default=0)
+    cpu_logical_processors: Mapped[int] = mapped_column(Integer, default=0)
+    ram_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    agent_version: Mapped[str] = mapped_column(String(64), default="")
+    disks_json: Mapped[str] = mapped_column(Text, default="[]")
+    volumes_json: Mapped[str] = mapped_column(Text, default="[]")
+    known_folders_json: Mapped[str] = mapped_column(Text, default="[]")
+    hardware_hash: Mapped[str] = mapped_column(String(128), default="")
+    volumes_hash: Mapped[str] = mapped_column(String(128), default="")
+    hardware_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    volumes_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    refresh_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class DesktopFolderCache(Base):
+    """Authorized directory listing cache for Super Admin browse UI."""
+
+    __tablename__ = "qka_next_desktop_folder_cache"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True)
+    device_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), index=True)
+    parent_path: Mapped[str] = mapped_column(String(2048), default="")
+    nodes_json: Mapped[str] = mapped_column(Text, default="[]")
+    error: Mapped[str] = mapped_column(String(2000), default="")
+    content_hash: Mapped[str] = mapped_column(String(128), default="")
+    synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 

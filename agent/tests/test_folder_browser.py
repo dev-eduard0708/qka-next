@@ -46,15 +46,13 @@ def test_known_folders_from_test_profile(monkeypatch):
     assert by_name["Downloads"].accessible is True
 
 
-def test_browse_rejects_outside_profile(monkeypatch):
-    tmp_path = _profile_root(monkeypatch)
-    (tmp_path / "Documents").mkdir()
-    outside = Path(r"C:\QehcAI\Temp\qka_browse_other_user")
-    outside.mkdir(parents=True, exist_ok=True)
+def test_browse_rejects_non_fixed_volume_paths(monkeypatch):
+    _profile_root(monkeypatch)
     sid = "S-1-5-21-1-2-3-3104"
-    nodes, err = browse_children(employee_sid=sid, parent_path=str(outside))
+    # UNC / non-fixed paths remain blocked (admin browse is local fixed volumes + profile).
+    nodes, err = browse_children(employee_sid=sid, parent_path=r"\\no-such-host\share\path")
     assert nodes == []
-    assert "outside" in err.lower() or "profile" in err.lower()
+    assert err
 
 
 def test_browse_children_lists_dirs_only(monkeypatch):
@@ -69,3 +67,53 @@ def test_browse_children_lists_dirs_only(monkeypatch):
     names = {n.name for n in nodes}
     assert names == {"ProjectA"}
     assert "secret.txt" not in names
+
+
+def test_known_folder_access_denied_does_not_raise(monkeypatch):
+    """Inaccessible Desktop must become accessible=false — not abort drive roots."""
+    tmp_path = _profile_root(monkeypatch)
+    desktop = tmp_path / "Desktop"
+    desktop.mkdir()
+    docs = tmp_path / "Documents"
+    docs.mkdir()
+    downs = tmp_path / "Downloads"
+    downs.mkdir()
+
+    real_exists = Path.exists
+
+    def exists_deny_desktop(self: Path) -> bool:
+        if self.name == "Desktop" and "qka_browse_fixture" in str(self):
+            raise PermissionError(5, "Access is denied", str(self))
+        return real_exists(self)
+
+    monkeypatch.setattr(Path, "exists", exists_deny_desktop)
+    sid = "S-1-5-21-1-2-3-3104"
+    nodes, err = resolve_known_folders(sid)
+    assert err == ""
+    by_name = {n.name: n for n in nodes}
+    assert by_name["Desktop"].accessible is False
+    assert "Access denied" in (by_name["Desktop"].detail or "")
+    assert by_name["Documents"].accessible is True
+    assert by_name["Downloads"].accessible is True
+
+
+def test_browse_skips_entries_that_fail_stat(monkeypatch):
+    """Mixed ACLs: one child that cannot be stated must not fail sibling folders."""
+    tmp_path = _profile_root(monkeypatch)
+    docs = tmp_path / "Documents"
+    docs.mkdir()
+    (docs / "Visible").mkdir()
+    (docs / "locked.txt").write_text("x", encoding="utf-8")
+    sid = "S-1-5-21-1-2-3-3104"
+
+    real_is_dir = Path.is_dir
+
+    def is_dir_deny_locked(self: Path) -> bool:
+        if self.name == "locked.txt" and "qka_browse_fixture" in str(self):
+            raise PermissionError(5, "Access is denied", str(self))
+        return real_is_dir(self)
+
+    monkeypatch.setattr(Path, "is_dir", is_dir_deny_locked)
+    nodes, err = browse_children(employee_sid=sid, parent_path=str(docs))
+    assert err == ""
+    assert {n.name for n in nodes} == {"Visible"}

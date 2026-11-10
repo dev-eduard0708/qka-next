@@ -19,19 +19,33 @@ def default_data_dir() -> Path:
 
 
 def _registry_value(name: str) -> str:
-    """Read HKLM\\Software\\QKA\\DesktopAgent\\<name> (MSI / policy)."""
+    """Read HKLM\\Software\\QKA\\DesktopAgent\\<name> (MSI / policy).
+
+    32-bit MSI writes under WOW6432Node; 64-bit agent must open that view explicitly
+    or ServerBaseUrl appears missing and the service loop exits immediately.
+    """
     if os.name != "nt":
         return ""
     try:
         import winreg
     except ImportError:
         return ""
-    try:
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"Software\QKA\DesktopAgent") as key:
-            raw, _ = winreg.QueryValueEx(key, name)
-        return str(raw or "").strip()
-    except OSError:
-        return ""
+    path = r"Software\QKA\DesktopAgent"
+    access_views = (
+        winreg.KEY_READ | getattr(winreg, "KEY_WOW64_32KEY", 0),
+        winreg.KEY_READ | getattr(winreg, "KEY_WOW64_64KEY", 0),
+        winreg.KEY_READ,
+    )
+    for access in access_views:
+        try:
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path, 0, access) as key:
+                raw, _ = winreg.QueryValueEx(key, name)
+            value = str(raw or "").strip()
+            if value:
+                return value
+        except OSError:
+            continue
+    return ""
 
 
 def _registry_server_base_url() -> str:
@@ -158,7 +172,9 @@ def load_config() -> AgentConfig:
     cfg_path = data_dir / "agent.config.json"
     values: dict = {}
     if cfg_path.exists():
-        values = json.loads(cfg_path.read_text(encoding="utf-8"))
+        # PowerShell Set-Content -Encoding UTF8 may write a BOM; strip it.
+        raw = cfg_path.read_text(encoding="utf-8-sig")
+        values = json.loads(raw) if raw.strip() else {}
     # Precedence: env → JSON → MSI/policy registry. Never log secrets.
     server = (
         os.environ.get("QKA_AGENT_SERVER_URL")

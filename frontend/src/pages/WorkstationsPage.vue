@@ -51,6 +51,11 @@
             <li v-for="(b, i) in deployPrereqs?.blockers || []" :key="i">{{ b }}</li>
           </ul>
         </div>
+        <div class="q-mb-sm">
+          <div class="text-subtitle2">{{ t("workstations.deployMethodLabel") }}</div>
+          <div class="text-body2">{{ t("workstations.deployMethodValue") }}</div>
+          <div class="text-caption text-grey-7">{{ t("workstations.deployMethodHint") }}</div>
+        </div>
         <div class="text-caption text-grey-7">{{ deployPrereqs?.note || t("workstations.deployNote") }}</div>
         <div class="text-caption text-grey-6 q-mt-xs">{{ t("workstations.deployBrowseNote") }}</div>
       </div>
@@ -180,76 +185,182 @@
 
       <!-- Main inventory -->
       <div class="col-12" :class="ouSidebarCollapsed ? 'col-md' : 'col-md-9'">
-        <div class="row q-col-gutter-sm q-mb-sm items-center">
-          <div class="col-12 col-md-3">
-            <q-input v-model="search" dense outlined clearable :label="t('workstations.search')" @keyup.enter="() => reload({ page: 1 })" />
-          </div>
-          <div class="col-6 col-md-2">
-            <q-select
-              v-model="accountStatus"
-              :options="accountOptions"
-              dense
-              outlined
-              clearable
-              emit-value
-              map-options
-              :label="t('workstations.accountStatus')"
-            />
-          </div>
-          <div class="col-6 col-md-2">
-            <q-select
-              v-model="agentStatus"
-              :options="agentOptions"
-              dense
-              outlined
-              clearable
-              emit-value
-              map-options
-              :label="t('workstations.agentStatus')"
-            />
-          </div>
-          <div class="col-6 col-md-2">
-            <q-select
-              v-model="reachability"
-              :options="reachOptions"
-              dense
-              outlined
-              clearable
-              emit-value
-              map-options
-              :label="t('workstations.reachability')"
-            />
-          </div>
-          <div class="col-6 col-md-2">
-            <q-select
-              v-model="assigned"
-              :options="assignedOptions"
-              dense
-              outlined
-              clearable
-              emit-value
-              map-options
-              :label="t('workstations.assignedFilter')"
-            />
-          </div>
-          <div class="col-6 col-md-2">
-            <q-select
-              v-model="deployStatus"
-              :options="deployStatusOptions"
-              dense
-              outlined
-              clearable
-              emit-value
-              map-options
-              :label="t('workstations.deployStatusFilter')"
-            />
-          </div>
-          <div class="col-auto">
+        <div class="qka-ctrl-toolbar">
+          <q-input
+            v-model="search"
+            class="qka-ctrl-field qka-ctrl-search"
+            dense
+            outlined
+            clearable
+            hide-bottom-space
+            :placeholder="t('workstations.search')"
+            :aria-label="t('workstations.search')"
+            @keyup.enter="() => reload({ page: 1 })"
+          >
+            <template #prepend>
+              <q-icon name="search" size="16px" />
+            </template>
+          </q-input>
+          <q-select
+            v-model="accountStatus"
+            class="qka-ctrl-field qka-ctrl-select--compact"
+            :options="accountOptions"
+            dense
+            outlined
+            clearable
+            hide-bottom-space
+            emit-value
+            map-options
+            options-dense
+            :display-value="wsFilterDisplay(accountStatus, accountOptions, t('workstations.accountStatus'))"
+            :aria-label="t('workstations.accountStatus')"
+            popup-content-class="qka-ctrl-menu"
+          >
+            <template #prepend>
+              <q-icon name="badge" size="16px" />
+            </template>
+            <template #option="scope">
+              <q-item v-bind="scope.itemProps" :class="{ 'qka-ctrl-menu__active': scope.selected }">
+                <q-item-section avatar>
+                  <q-icon :name="scope.opt.value === 'enabled' ? 'check_circle' : 'block'" size="16px" />
+                </q-item-section>
+                <q-item-section>
+                  <q-item-label>{{ scope.opt.label }}</q-item-label>
+                </q-item-section>
+              </q-item>
+            </template>
+          </q-select>
+          <q-select
+            v-model="agentStatus"
+            class="qka-ctrl-field qka-ctrl-select--compact"
+            :options="agentOptions"
+            dense
+            outlined
+            clearable
+            hide-bottom-space
+            emit-value
+            map-options
+            options-dense
+            :display-value="wsFilterDisplay(agentStatus, agentOptions, t('workstations.agentStatus'))"
+            :aria-label="t('workstations.agentStatus')"
+            popup-content-class="qka-ctrl-menu"
+          >
+            <template #prepend>
+              <q-icon name="devices" size="16px" />
+            </template>
+            <template #option="scope">
+              <q-item v-bind="scope.itemProps" :class="{ 'qka-ctrl-menu__active': scope.selected }">
+                <q-item-section avatar>
+                  <q-icon
+                    :name="
+                      scope.opt.value === 'connected'
+                        ? 'wifi'
+                        : scope.opt.value === 'registered_offline'
+                          ? 'wifi_off'
+                          : scope.opt.value === 'registered'
+                            ? 'dns'
+                            : 'phonelink_off'
+                    "
+                    size="16px"
+                  />
+                </q-item-section>
+                <q-item-section>
+                  <q-item-label>{{ scope.opt.label }}</q-item-label>
+                </q-item-section>
+              </q-item>
+            </template>
+          </q-select>
+          <q-select
+            v-model="reachability"
+            class="qka-ctrl-field qka-ctrl-select--compact"
+            :options="reachOptions"
+            dense
+            outlined
+            clearable
+            hide-bottom-space
+            emit-value
+            map-options
+            options-dense
+            :display-value="wsFilterDisplay(reachability, reachOptions, t('workstations.reachability'))"
+            :aria-label="t('workstations.reachability')"
+            popup-content-class="qka-ctrl-menu"
+          >
+            <template #prepend>
+              <q-icon name="network_check" size="16px" />
+            </template>
+            <template #option="scope">
+              <q-item v-bind="scope.itemProps" :class="{ 'qka-ctrl-menu__active': scope.selected }">
+                <q-item-section avatar>
+                  <q-icon name="network_check" size="16px" />
+                </q-item-section>
+                <q-item-section>
+                  <q-item-label>{{ scope.opt.label }}</q-item-label>
+                </q-item-section>
+              </q-item>
+            </template>
+          </q-select>
+          <q-select
+            v-model="assigned"
+            class="qka-ctrl-field qka-ctrl-select--compact"
+            :options="assignedOptions"
+            dense
+            outlined
+            clearable
+            hide-bottom-space
+            emit-value
+            map-options
+            options-dense
+            :display-value="wsFilterDisplay(assigned, assignedOptions, t('workstations.assignedFilter'))"
+            :aria-label="t('workstations.assignedFilter')"
+            popup-content-class="qka-ctrl-menu"
+          >
+            <template #prepend>
+              <q-icon name="group" size="16px" />
+            </template>
+            <template #option="scope">
+              <q-item v-bind="scope.itemProps" :class="{ 'qka-ctrl-menu__active': scope.selected }">
+                <q-item-section avatar>
+                  <q-icon :name="scope.opt.value === 'yes' ? 'person' : 'person_off'" size="16px" />
+                </q-item-section>
+                <q-item-section>
+                  <q-item-label>{{ scope.opt.label }}</q-item-label>
+                </q-item-section>
+              </q-item>
+            </template>
+          </q-select>
+          <q-select
+            v-model="deployStatus"
+            class="qka-ctrl-field qka-ctrl-select--compact"
+            :options="deployStatusOptions"
+            dense
+            outlined
+            clearable
+            hide-bottom-space
+            emit-value
+            map-options
+            options-dense
+            :display-value="wsFilterDisplay(deployStatus, deployStatusOptions, t('workstations.deployStatusFilter'))"
+            :aria-label="t('workstations.deployStatusFilter')"
+            popup-content-class="qka-ctrl-menu"
+          >
+            <template #prepend>
+              <q-icon name="system_update_alt" size="16px" />
+            </template>
+            <template #option="scope">
+              <q-item v-bind="scope.itemProps" :class="{ 'qka-ctrl-menu__active': scope.selected }">
+                <q-item-section avatar>
+                  <q-icon name="system_update_alt" size="16px" />
+                </q-item-section>
+                <q-item-section>
+                  <q-item-label>{{ scope.opt.label }}</q-item-label>
+                </q-item-section>
+              </q-item>
+            </template>
+          </q-select>
+          <div class="qka-ctrl-toolbar-actions">
             <q-btn color="primary" flat dense :label="t('workstations.applyFilters')" @click="() => reload({ page: 1 })" />
-          </div>
-          <div class="col-auto">
-            <q-btn-dropdown dense flat color="primary" :label="t('workstations.columns')">
-              <q-list dense>
+            <q-btn-dropdown dense flat color="primary" :label="t('workstations.columns')" menu-self="top right">
+              <q-list dense class="qka-ctrl-menu" style="min-width: 220px; box-shadow: none; border: none; padding: 0">
                 <q-item v-for="col in columnDefs" :key="col.name" tag="label" clickable>
                   <q-item-section side>
                     <q-checkbox v-model="visibleColumns" :val="col.name" dense :disable="col.required" />
@@ -268,6 +379,24 @@
             <div class="col-auto text-body2">{{ t("workstations.selectedCount", { n: selectedRows.length }) }}</div>
             <q-space />
             <q-btn flat dense color="white" :loading="probing" :label="t('workstations.bulkPing')" @click="bulkPing" />
+            <q-btn
+              flat
+              dense
+              color="white"
+              :disable="!canBulkAddPilot"
+              :loading="pilotBusy"
+              :label="t('workstations.pilotAddSelected')"
+              @click="openPilotMembership('add', selectedRows)"
+            />
+            <q-btn
+              flat
+              dense
+              color="white"
+              :disable="!canBulkRemovePilot"
+              :loading="pilotBusy"
+              :label="t('workstations.pilotRemoveSelected')"
+              @click="openPilotMembership('remove', selectedRows)"
+            />
             <q-btn
               flat
               dense
@@ -300,7 +429,7 @@
           bordered
           dense
           row-key="id"
-          class="qka-ws-table"
+          class="qka-ws-table qka-ctrl-table"
           :rows="rows"
           :columns="visibleColumnDefs"
           :loading="loading && !rows.length"
@@ -315,72 +444,238 @@
         >
           <template #body-cell-computerName="props">
             <q-td :props="props">
-              <a href="#" class="text-primary" @click.prevent="openDetails(props.row)">{{ props.value }}</a>
+              <a href="#" class="qka-ctrl-table__primary text-primary" @click.prevent="openDetails(props.row)">{{ props.value }}</a>
+              <div v-if="props.row.assignedEmployeeName" class="qka-ctrl-table__secondary">
+                {{ props.row.assignedEmployeeName }}
+              </div>
             </q-td>
           </template>
           <template #body-cell-ou="props">
             <q-td :props="props">
-              <span>{{ props.row.ouBreadcrumb || shortOu(props.row.ou) }}</span>
+              <span class="qka-ctrl-table__secondary">{{ props.row.ouBreadcrumb || shortOu(props.row.ou) }}</span>
               <q-tooltip>{{ props.row.ou }}</q-tooltip>
             </q-td>
           </template>
           <template #body-cell-accountStatus="props">
             <q-td :props="props">
-              <q-chip dense square :color="props.row.accountEnabled ? 'positive' : 'grey-5'" text-color="white" :label="props.value" />
+              <q-chip
+                dense
+                class="qka-ctrl-chip"
+                :class="props.row.accountEnabled ? 'qka-ctrl-chip--online' : 'qka-ctrl-chip--neutral'"
+                :label="props.value"
+              />
             </q-td>
           </template>
           <template #body-cell-reachabilityStatus="props">
             <q-td :props="props">
-              <q-chip dense square :color="reachColor(props.row.reachabilityStatus)" text-color="white" :label="reachLabel(props.row.reachabilityStatus)" />
+              <q-chip
+                dense
+                class="qka-ctrl-chip"
+                :class="wsReachChipClass(props.row.reachabilityStatus)"
+                :label="reachLabel(props.row.reachabilityStatus)"
+              />
             </q-td>
           </template>
           <template #body-cell-agentStatusLabel="props">
             <q-td :props="props">
-              <q-chip dense square outline :color="agentColor(props.row.agentStatus)" :label="props.value" />
+              <q-chip
+                dense
+                class="qka-ctrl-chip qka-ctrl-chip--outline"
+                :class="wsAgentChipClass(props.row.agentStatus)"
+                :label="agentDisplayLabel(props.row)"
+              />
+            </q-td>
+          </template>
+          <template #body-cell-pilotMembership="props">
+            <q-td :props="props">
+              <q-chip
+                dense
+                class="qka-ctrl-chip qka-ctrl-chip--outline"
+                :class="props.row.deployAgent?.pilotGroupMember ? 'qka-ctrl-chip--indexing' : 'qka-ctrl-chip--neutral'"
+                :label="pilotMembershipLabel(props.row)"
+              />
             </q-td>
           </template>
           <template #body-cell-deployStatus="props">
             <q-td :props="props">
-              <div>{{ props.value }}</div>
-              <div v-if="props.row.deploymentJob?.lastError" class="text-caption text-negative">
-                {{ props.row.deploymentJob.lastError }}
-              </div>
-              <div v-else-if="props.row.deployAgent?.note && !props.row.deployAgent.enabled" class="text-caption text-grey-7">
-                {{ props.row.deployAgent.note }}
+              <div class="qka-ws-deploy-status">
+                <div class="qka-ws-deploy-status__line">
+                  <q-chip
+                    dense
+                    square
+                    class="qka-ws-deploy-status__chip"
+                    :outline="deployStatusOutline(rowDisplayStatus(props.row))"
+                    :color="deployStatusColor(rowDisplayStatus(props.row))"
+                    :text-color="deployStatusOutline(rowDisplayStatus(props.row)) ? undefined : 'white'"
+                    :label="primaryDeployLabel(props.row)"
+                  >
+                    <q-spinner
+                      v-if="rowDisplayStatus(props.row) === 'in_progress'"
+                      size="12px"
+                      class="q-mr-xs"
+                      color="white"
+                    />
+                  </q-chip>
+                </div>
+                <div
+                  v-for="timeInfo in [deployStatusTimeInfo(props.row)]"
+                  v-show="timeInfo"
+                  :key="timeInfo?.iso || 'no-time'"
+                  class="qka-ws-deploy-status__time text-caption text-grey-7"
+                >
+                  <template v-if="timeInfo">
+                    {{ timeInfo.label }}
+                    <q-tooltip anchor="top middle" self="bottom middle">
+                      {{ timeInfo.absolute }}
+                    </q-tooltip>
+                  </template>
+                </div>
+                <div
+                  v-if="props.row.deploymentJob?.restartRequired && rowDisplayStatus(props.row) === 'in_progress'"
+                  class="text-caption text-warning"
+                >
+                  {{ t("workstations.deployDetailRestartRequired") }}
+                </div>
+                <div
+                  v-if="
+                    props.row.deploymentJob?.lastError &&
+                    (rowDisplayStatus(props.row) === 'failed' || rowDisplayStatus(props.row) === 'timed_out')
+                  "
+                  class="text-caption text-negative ellipsis-2-lines"
+                >
+                  {{ props.row.deploymentJob.lastError }}
+                </div>
+                <div
+                  v-else-if="props.row.deployAgent?.note && !canDeployRow(props.row) && !isActiveDeployJob(props.row)"
+                  class="text-caption text-grey-7 ellipsis-2-lines"
+                >
+                  {{ props.row.deployAgent.note }}
+                </div>
               </div>
             </q-td>
           </template>
           <template #body-cell-actions="props">
-            <q-td :props="props" @click.stop>
-              <q-btn dense flat color="primary" :label="t('workstations.details')" @click="openDetails(props.row)" />
-              <q-btn dense flat color="primary" :label="t('workstations.ping')" :loading="probingId === props.row.id" @click="pingOne(props.row)" />
-              <q-btn dense flat color="primary" :label="t('workstations.assign')" @click="openAssign(props.row)" />
-              <q-btn
-                v-if="canRetryJob(props.row)"
-                dense
-                flat
-                color="primary"
-                :label="t('workstations.retryDeploy')"
-                :loading="jobBusyId === props.row.deploymentJob?.id"
-                @click="retryDeploy(props.row)"
-              />
-              <q-btn
-                v-if="canCancelJob(props.row)"
-                dense
-                flat
-                color="negative"
-                :label="t('workstations.cancelDeploy')"
-                :loading="jobBusyId === props.row.deploymentJob?.id"
-                @click="cancelDeploy(props.row)"
-              />
-              <q-btn
-                v-if="props.row.desktopDeviceId"
-                dense
-                flat
-                color="primary"
-                :label="t('workstations.openAgent')"
-                :to="{ name: 'employee-computers', query: { deviceId: props.row.desktopDeviceId } }"
-              />
+            <q-td :props="props" class="qka-ws-actions-cell" @click.stop>
+              <div class="row no-wrap items-center justify-end">
+                <q-btn
+                  dense
+                  flat
+                  round
+                  color="primary"
+                  icon="more_vert"
+                  class="qka-ctrl-actions-trigger"
+                  aria-label="Actions"
+                >
+                  <q-menu anchor="bottom right" self="top right" class="qka-ctrl-menu" auto-close>
+                    <q-list dense>
+                      <q-item v-close-popup clickable @click="openDetails(props.row)">
+                        <q-item-section avatar>
+                          <q-icon name="monitor" size="18px" />
+                        </q-item-section>
+                        <q-item-section>{{ t("workstations.details") }}</q-item-section>
+                      </q-item>
+                      <q-item
+                        v-close-popup
+                        clickable
+                        :disable="probingId === props.row.id"
+                        @click="pingOne(props.row)"
+                      >
+                        <q-item-section avatar>
+                          <q-icon name="wifi_tethering" size="18px" />
+                        </q-item-section>
+                        <q-item-section>{{ t("workstations.ping") }}</q-item-section>
+                      </q-item>
+                      <q-item v-close-popup clickable @click="openAssign(props.row)">
+                        <q-item-section avatar>
+                          <q-icon name="person_add" size="18px" />
+                        </q-item-section>
+                        <q-item-section>{{ t("workstations.assign") }}</q-item-section>
+                      </q-item>
+                      <q-item
+                        v-if="props.row.desktopDeviceId"
+                        v-close-popup
+                        clickable
+                        :to="{ name: 'employee-computers', query: { deviceId: props.row.desktopDeviceId } }"
+                      >
+                        <q-item-section avatar>
+                          <q-icon name="devices" size="18px" />
+                        </q-item-section>
+                        <q-item-section>{{ t("workstations.openAgent") }}</q-item-section>
+                      </q-item>
+                      <q-separator
+                        v-if="
+                          canAddPilot(props.row) ||
+                          canRemovePilot(props.row) ||
+                          canDeployRow(props.row) ||
+                          canCancelJob(props.row) ||
+                          canRetryJob(props.row)
+                        "
+                      />
+                      <q-item
+                        v-if="canAddPilot(props.row)"
+                        v-close-popup
+                        clickable
+                        :disable="pilotBusy"
+                        @click="openPilotMembership('add', [props.row])"
+                      >
+                        <q-item-section avatar>
+                          <q-icon name="person_add_alt" size="18px" />
+                        </q-item-section>
+                        <q-item-section>{{ t("workstations.pilotAdd") }}</q-item-section>
+                      </q-item>
+                      <q-item
+                        v-if="canRemovePilot(props.row)"
+                        v-close-popup
+                        clickable
+                        :disable="pilotBusy"
+                        @click="openPilotMembership('remove', [props.row])"
+                      >
+                        <q-item-section avatar>
+                          <q-icon name="person_remove" size="18px" />
+                        </q-item-section>
+                        <q-item-section>{{ t("workstations.pilotRemove") }}</q-item-section>
+                      </q-item>
+                      <q-item
+                        v-if="canDeployRow(props.row)"
+                        v-close-popup
+                        clickable
+                        :disable="deploying"
+                        @click="deploySingle(props.row)"
+                      >
+                        <q-item-section avatar>
+                          <q-icon name="system_update_alt" size="18px" />
+                        </q-item-section>
+                        <q-item-section>{{ t("workstations.deployAgent") }}</q-item-section>
+                      </q-item>
+                      <q-item
+                        v-if="canCancelJob(props.row)"
+                        v-close-popup
+                        clickable
+                        class="qka-ctrl-menu__danger"
+                        :disable="jobBusyId === props.row.deploymentJob?.id"
+                        @click="cancelDeploy(props.row)"
+                      >
+                        <q-item-section avatar>
+                          <q-icon name="block" size="18px" />
+                        </q-item-section>
+                        <q-item-section>{{ t("workstations.cancelDeploy") }}</q-item-section>
+                      </q-item>
+                      <q-item
+                        v-if="canRetryJob(props.row)"
+                        v-close-popup
+                        clickable
+                        :disable="isActiveDeployJob(props.row) || deploying || jobBusyId === props.row.deploymentJob?.id"
+                        @click="retryDeploy(props.row)"
+                      >
+                        <q-item-section avatar>
+                          <q-icon name="refresh" size="18px" />
+                        </q-item-section>
+                        <q-item-section>{{ t("workstations.retryDeploy") }}</q-item-section>
+                      </q-item>
+                    </q-list>
+                  </q-menu>
+                </q-btn>
+              </div>
             </q-td>
           </template>
         </q-table>
@@ -413,33 +708,87 @@
               <q-item-label class="text-wrap">{{ detailsRow.distinguishedName || "—" }}</q-item-label>
             </q-item-section>
           </q-item>
-          <q-item><q-item-section><q-item-label caption>{{ t("workstations.colAgent") }}</q-item-label><q-item-label>{{ detailsRow.agentStatusLabel }}</q-item-label></q-item-section></q-item>
+          <q-item><q-item-section><q-item-label caption>{{ t("workstations.colAgent") }}</q-item-label><q-item-label>{{ agentDisplayLabel(detailsRow) }}</q-item-label></q-item-section></q-item>
           <q-item><q-item-section><q-item-label caption>{{ t("workstations.colAgentVersion") }}</q-item-label><q-item-label>{{ detailsRow.agentVersion || "—" }}</q-item-label></q-item-section></q-item>
           <q-item><q-item-section><q-item-label caption>{{ t("workstations.colHeartbeat") }}</q-item-label><q-item-label>{{ detailsRow.lastHeartbeatAt || "—" }}</q-item-label></q-item-section></q-item>
-          <q-item><q-item-section><q-item-label caption>{{ t("workstations.colDeployStatus") }}</q-item-label><q-item-label>{{ detailsRow.deploymentJob?.status || detailsRow.deployAgent?.status || "—" }}</q-item-label></q-item-section></q-item>
+          <q-item>
+            <q-item-section>
+              <q-item-label caption>{{ t("workstations.colDeployStatus") }}</q-item-label>
+              <q-item-label>{{ primaryDeployLabel(detailsRow) }}</q-item-label>
+              <q-item-label v-if="deployHistoryCaption(detailsRow)" caption>{{ deployHistoryCaption(detailsRow) }}</q-item-label>
+              <q-item-label caption>{{ t("workstations.deployMethodValue") }}</q-item-label>
+            </q-item-section>
+          </q-item>
           <q-item v-if="detailsRow.deploymentJob">
             <q-item-section>
               <q-item-label caption>{{ t("workstations.deployHistory") }}</q-item-label>
+              <q-item-label caption>{{ t("workstations.deployDetailRequested") }}: {{ detailsRow.deploymentJob.scheduledAt || detailsRow.deploymentJob.createdAt || "—" }}</q-item-label>
+              <q-item-label caption>{{ t("workstations.deployDetailStarted") }}: {{ detailsRow.deploymentJob.installStartedAt || "—" }}</q-item-label>
+              <q-item-label caption>{{ t("workstations.deployDetailMsiCompleted") }}: {{ detailsRow.deploymentJob.msiCompletedAt || "—" }}</q-item-label>
+              <q-item-label caption>{{ t("workstations.deployDetailInstalled") }}: {{ detailsRow.deploymentJob.installedAt || "—" }}</q-item-label>
+              <q-item-label caption>{{ t("workstations.deployDetailLastResult") }}: {{ detailsRow.deploymentJob.lastResult || detailsRow.deploymentJob.status || "—" }}</q-item-label>
+              <q-item-label caption>{{ t("workstations.colAgentVersion") }}: {{ detailsRow.agentVersion || "—" }}</q-item-label>
+              <q-item-label caption>{{ t("workstations.colHeartbeat") }}: {{ detailsRow.lastHeartbeatAt || "—" }}</q-item-label>
               <q-item-label caption>attempts: {{ detailsRow.deploymentJob.attemptCount }}</q-item-label>
-              <q-item-label caption>created: {{ detailsRow.deploymentJob.createdAt || "—" }}</q-item-label>
-              <q-item-label caption>updated: {{ detailsRow.deploymentJob.updatedAt || "—" }}</q-item-label>
-              <q-item-label caption>scheduled: {{ detailsRow.deploymentJob.scheduledAt || "—" }}</q-item-label>
-              <q-item-label caption>installed: {{ detailsRow.deploymentJob.installedAt || "—" }}</q-item-label>
+              <q-item-label v-if="detailsRow.deploymentJob.restartRequired" class="text-warning" caption>
+                {{ t("workstations.deployDetailRestartRequired") }}
+              </q-item-label>
               <q-item-label v-if="detailsRow.deploymentJob.lastError" class="text-negative">{{ detailsRow.deploymentJob.lastError }}</q-item-label>
             </q-item-section>
           </q-item>
           <q-item>
             <q-item-section>
-              <q-item-label caption>Pilot group</q-item-label>
-              <q-item-label>
-                {{ detailsRow.deployAgent?.pilotGroupMember ? "member" : "not a member" }}
-                ({{ detailsRow.deployAgent?.pilotGroup || "—" }})
-              </q-item-label>
+              <q-item-label caption>{{ t("workstations.pilotGroupLabel") }}</q-item-label>
+              <q-item-label>{{ pilotMembershipLabel(detailsRow) }} ({{ detailsRow.deployAgent?.pilotGroup || "—" }})</q-item-label>
               <q-item-label caption>{{ detailsRow.deployAgent?.note }}</q-item-label>
+              <q-item-label v-if="detailsRow.deployAgent?.gpoReadinessNote" caption class="text-warning">
+                {{ detailsRow.deployAgent.gpoReadinessNote }}
+              </q-item-label>
             </q-item-section>
           </q-item>
         </q-list>
         <div class="q-mt-md row q-gutter-sm">
+          <q-btn
+            v-if="canAddPilot(detailsRow)"
+            color="primary"
+            outline
+            :label="t('workstations.pilotAdd')"
+            :loading="pilotBusy"
+            @click="openPilotMembership('add', [detailsRow])"
+          />
+          <q-btn
+            v-if="canRemovePilot(detailsRow)"
+            color="warning"
+            outline
+            :label="t('workstations.pilotRemove')"
+            :loading="pilotBusy"
+            @click="openPilotMembership('remove', [detailsRow])"
+          />
+          <q-btn
+            v-if="canDeployRow(detailsRow)"
+            color="primary"
+            unelevated
+            :label="t('workstations.deployAgent')"
+            :disable="deploying"
+            @click="deploySingle(detailsRow)"
+          />
+          <q-btn
+            v-if="canCancelJob(detailsRow)"
+            outline
+            color="negative"
+            :label="t('workstations.cancelDeploy')"
+            :loading="jobBusyId === detailsRow.deploymentJob?.id"
+            @click="cancelDeploy(detailsRow)"
+          />
+          <q-btn
+            v-if="canRetryJob(detailsRow)"
+            outline
+            color="primary"
+            :label="t('workstations.retryDeploy')"
+            :loading="jobBusyId === detailsRow.deploymentJob?.id"
+            :disable="deploying"
+            @click="retryDeploy(detailsRow)"
+          />
           <q-btn outline color="primary" :label="t('workstations.ping')" :loading="probingId === detailsRow.id" @click="pingOne(detailsRow)" />
           <q-btn outline color="primary" :label="t('workstations.assign')" @click="openAssign(detailsRow)" />
         </div>
@@ -558,7 +907,78 @@
       </q-card>
     </q-dialog>
 
-    <q-dialog v-model="deployOpen" persistent>
+    <q-dialog v-model="pilotOpen" persistent>
+      <q-card style="min-width: 480px; max-width: 640px">
+        <q-card-section class="text-h6">
+          {{ pilotOperation === "add" ? t("workstations.pilotAddTitle") : t("workstations.pilotRemoveTitle") }}
+        </q-card-section>
+        <q-card-section>
+          <div class="text-body2 q-mb-sm">
+            {{
+              pilotOperation === "add"
+                ? t("workstations.pilotAddHint", { group: pilotTargets[0]?.deployAgent?.pilotGroup || "QKA-Agent-Pilot-Computers", n: pilotTargets.length })
+                : t("workstations.pilotRemoveHint", { group: pilotTargets[0]?.deployAgent?.pilotGroup || "QKA-Agent-Pilot-Computers", n: pilotTargets.length })
+            }}
+          </div>
+          <div v-if="pilotOperation === 'add'" class="text-caption text-grey-7 q-mb-md">
+            {{ t("workstations.pilotAddNoInstall") }}
+          </div>
+          <div v-if="pilotOperation === 'remove'" class="text-caption text-warning q-mb-md">
+            {{ t("workstations.pilotRemoveNoUninstall") }}
+          </div>
+          <q-list bordered dense class="rounded-borders">
+            <q-item v-for="row in pilotTargets" :key="row.id">
+              <q-item-section>
+                <q-item-label>{{ row.computerName }}</q-item-label>
+                <q-item-label caption>
+                  {{ t("workstations.pilotAdAccount") }}: {{ (row.computerName || "").replace(/\$$/, "") }}$
+                </q-item-label>
+                <q-item-label caption>SID: {{ row.objectSid || "—" }}</q-item-label>
+                <q-item-label v-if="pilotOperation === 'remove' && (row.desktopDeviceId || isActiveDeployJob(row))" caption class="text-warning">
+                  {{
+                    isActiveDeployJob(row)
+                      ? t("workstations.pilotRemoveBlockedActive")
+                      : t("workstations.pilotRemoveWarnAgent")
+                  }}
+                </q-item-label>
+              </q-item-section>
+            </q-item>
+          </q-list>
+          <div class="text-caption q-mt-sm">
+            {{ t("workstations.pilotTargetGroup") }}:
+            <strong>{{ pilotTargets[0]?.deployAgent?.pilotGroup || "QKA-Agent-Pilot-Computers" }}</strong>
+          </div>
+          <div v-if="pilotResultNote" class="q-mt-md text-body2" :class="pilotResultOk ? 'text-positive' : 'text-negative'">
+            {{ pilotResultNote }}
+          </div>
+          <q-list v-if="pilotResultLines.length" dense class="q-mt-sm">
+            <q-item v-for="(line, i) in pilotResultLines" :key="i">
+              <q-item-section>
+                <q-item-label caption>{{ line }}</q-item-label>
+              </q-item-section>
+            </q-item>
+          </q-list>
+        </q-card-section>
+        <q-card-actions align="right">
+          <q-btn
+            flat
+            :label="t(`workstations.${pilotDialogDismissKey(pilotPhase)}`)"
+            @click="closePilotMembershipDialog"
+          />
+          <q-btn
+            v-if="pilotDialogShowConfirmAction(pilotPhase)"
+            color="primary"
+            unelevated
+            :loading="pilotBusy"
+            :disable="pilotOperation === 'remove' && pilotTargets.some((r) => isActiveDeployJob(r))"
+            :label="pilotOperation === 'add' ? t('workstations.pilotConfirmAdd') : t('workstations.pilotConfirmRemove')"
+            @click="confirmPilotMembership"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
+    <q-dialog v-model="deployOpen" persistent @hide="onDeployDialogHide">
       <q-card style="min-width: 480px; max-width: 640px">
         <q-card-section class="text-h6">{{ t("workstations.deployTitle") }}</q-card-section>
         <q-card-section>
@@ -574,16 +994,57 @@
             v-model="deployConfirmation"
             dense
             outlined
-            :label="t('workstations.deployConfirmLabel', { phrase: deployPrereqs?.confirmationPhrase || 'DEPLOY SELECTED' })"
+            :disable="deployPhase !== 'idle'"
+            :label="t('workstations.deployConfirmLabel', { phrase: deployPrereqs?.confirmationPhrase || 'DEPLOY' })"
+            :placeholder="deployPrereqs?.confirmationPhrase || 'DEPLOY'"
+            autocomplete="off"
+            spellcheck="false"
           />
+          <div class="text-caption text-grey-7 q-mt-sm">
+            {{ t("workstations.deployConfirmLabel", { phrase: deployPrereqs?.confirmationPhrase || "DEPLOY" }) }}
+            — {{ t("workstations.deployMethodValue") }}
+          </div>
+
+          <div v-if="deployPhase !== 'idle'" class="q-mt-md">
+            <div class="row items-center q-mb-xs">
+              <div class="col text-body2">{{ deployProgressLabel }}</div>
+              <div class="col-auto text-weight-medium">{{ deployProgress }}%</div>
+            </div>
+            <q-linear-progress
+              size="10px"
+              rounded
+              :value="deployProgress / 100"
+              :color="deployPhase === 'error' ? 'negative' : deployPhase === 'done' ? 'positive' : 'primary'"
+              track-color="grey-3"
+            />
+            <div v-if="deployPhase === 'done'" class="text-positive text-caption q-mt-sm">
+              {{ deployFinishNote || t("workstations.deployScheduledNote") }}
+            </div>
+            <div v-if="deployPhase === 'error'" class="text-negative text-caption q-mt-sm">
+              {{ deployFinishNote || t("workstations.deployError") }}
+            </div>
+          </div>
         </q-card-section>
         <q-card-actions align="right">
-          <q-btn flat :label="t('workstations.cancel')" v-close-popup />
           <q-btn
+            v-if="deployPhase === 'idle'"
+            flat
+            :label="t('workstations.cancel')"
+            @click="closeDeployDialog"
+          />
+          <q-btn
+            v-if="deployPhase === 'done' || deployPhase === 'error'"
+            color="primary"
+            unelevated
+            :label="t('workstations.deployClose')"
+            @click="closeDeployDialog"
+          />
+          <q-btn
+            v-if="deployPhase === 'idle' || deployPhase === 'running'"
             color="negative"
             unelevated
             :loading="deploying"
-            :disable="deployConfirmation.trim() !== (deployPrereqs?.confirmationPhrase || '')"
+            :disable="deployPhase === 'running' || deployConfirmation !== (deployPrereqs?.confirmationPhrase || 'DEPLOY')"
             :label="t('workstations.deployConfirm')"
             @click="confirmDeploy"
           />
@@ -623,21 +1084,57 @@ import {
   type Workstation,
   type WorkstationOuTreeNode,
 } from "@/api";
+import {
+  pilotDialogDismissKey,
+  pilotDialogPhaseAfterAttempt,
+  pilotDialogShowConfirmAction,
+  type PilotDialogPhase,
+} from "@/pilotMembershipDialog";
 
-const VIEW_KEY = "qka.workstations.view.v3";
-const { t } = useI18n();
+const VIEW_KEY = "qka.workstations.view.v4";
+const ACTIVE_DEPLOY_STATUSES = new Set(["pending", "in_progress"]);
+const ACTIVE_JOB_RAW_STATUSES = new Set([
+  "requested",
+  "approved",
+  "scheduled",
+  "waiting_for_computer",
+  "installing",
+]);
+const TERMINAL_HISTORY_STATUSES = new Set(["failed", "cancelled", "timed_out"]);
+const DEPLOY_POLL_MS = 8000;
+const RELATIVE_TICK_MS = 30000;
+const { t, locale } = useI18n();
+/** Ticked so relative deploy timestamps refresh without a full table reload. */
+const relativeNowMs = ref(Date.now());
+let relativeTickTimer: ReturnType<typeof setInterval> | null = null;
 const section = ref("workstations");
 const loading = ref(false);
 const backgroundRefreshing = ref(false);
 /** Suppress filter watchers / QTable @request until the first intentional load finishes. */
 const viewHydrated = ref(false);
 let filterWatchEnabled = false;
+let deployPollTimer: ReturnType<typeof setInterval> | null = null;
 const syncing = ref(false);
 const probing = ref(false);
 const probingId = ref<string | null>(null);
 const busy = ref(false);
 const deploying = ref(false);
+const deployPhase = ref<"idle" | "running" | "done" | "error">("idle");
+const deployProgress = ref(0);
+const deployProgressLabel = ref("");
+const deployFinishNote = ref("");
+const pendingTokenJobs = ref<Array<{ id: string; computerName: string; machineEnrollmentToken: string }>>([]);
+const pendingTokenInstruction = ref("");
+let deployProgressTimer: ReturnType<typeof setInterval> | null = null;
 const jobBusyId = ref<string | null>(null);
+const pilotBusy = ref(false);
+const pilotOpen = ref(false);
+const pilotOperation = ref<"add" | "remove">("add");
+const pilotTargets = ref<Workstation[]>([]);
+const pilotPhase = ref<PilotDialogPhase>("confirm");
+const pilotResultNote = ref("");
+const pilotResultOk = ref(false);
+const pilotResultLines = ref<string[]>([]);
 const error = ref("");
 const loadFailed = ref(false);
 const syncNote = ref("");
@@ -702,6 +1199,7 @@ const PRIMARY_COLUMNS = [
   "assignedEmployeeName",
   "reachabilityStatus",
   "agentStatusLabel",
+  "pilotMembership",
   "deployStatus",
   "actions",
 ];
@@ -745,11 +1243,18 @@ const columnDefs = computed(() => [
   },
   { name: "agentStatusLabel", label: t("workstations.colAgent"), field: "agentStatusLabel", align: "left" as const, required: false },
   {
-    name: "deployStatus",
-    label: t("workstations.colDeployStatus"),
-    field: (r: Workstation) => r.deploymentJob?.status || r.deployAgent?.status || "—",
+    name: "pilotMembership",
+    label: t("workstations.colPilot"),
+    field: (r: Workstation) => pilotMembershipLabel(r),
     align: "left" as const,
     required: false,
+  },
+  {
+    name: "deployStatus",
+    label: t("workstations.colDeployStatus"),
+    field: (r: Workstation) => primaryDeployLabel(r),
+    align: "left" as const,
+    required: true,
   },
   { name: "agentVersion", label: t("workstations.colAgentVersion"), field: (r: Workstation) => r.agentVersion || "—", align: "left" as const, required: false },
   {
@@ -829,9 +1334,19 @@ const deployStatusOptions = [
   { label: t("workstations.deployStatus.ready"), value: "ready" },
   { label: t("workstations.deployStatus.scheduled"), value: "scheduled" },
   { label: t("workstations.deployStatus.waiting_for_computer"), value: "waiting_for_computer" },
+  { label: t("workstations.deployStatus.installing"), value: "installing" },
   { label: t("workstations.deployStatus.failed"), value: "failed" },
   { label: t("workstations.deployStatus.cancelled"), value: "cancelled" },
 ];
+
+function wsFilterDisplay(
+  value: string | null | undefined,
+  options: Array<{ label: string; value: string }>,
+  emptyLabel: string,
+): string {
+  if (!value) return emptyLabel;
+  return options.find((o) => o.value === value)?.label || emptyLabel;
+}
 
 const employeeOptions = computed(() =>
   employees.value
@@ -853,14 +1368,18 @@ const canDeploySelected = computed(() => {
   if (!deployPrereqs.value?.deployEnabled) return false;
   if (!selectedRows.value.length) return false;
   if (selectedRows.value.length > (deployPrereqs.value.maxBulk || 50)) return false;
-  return selectedRows.value.every((r) => r.deployAgent?.enabled);
+  if (deploying.value) return false;
+  return selectedRows.value.every((r) => canDeployRow(r));
 });
 const deployDisabledReason = computed(() => {
   if (!deployPrereqs.value?.deployEnabled) {
     return (deployPrereqs.value?.blockers || []).join(" ") || t("workstations.deployNote");
   }
   if (!selectedRows.value.length) return t("workstations.deploySelectHint");
-  const blocked = selectedRows.value.filter((r) => !r.deployAgent?.enabled);
+  if (selectedRows.value.some((r) => isActiveDeployJob(r))) {
+    return t("workstations.deployActiveJobHint");
+  }
+  const blocked = selectedRows.value.filter((r) => !canDeployRow(r));
   if (blocked.length) {
     return blocked
       .map((r) => {
@@ -883,13 +1402,357 @@ function shortOu(dn: string) {
   return parts.map((p) => p.slice(3)).reverse().join(" / ");
 }
 
-function canRetryJob(row: Workstation) {
-  const st = row.deploymentJob?.status;
-  return st === "failed" || st === "waiting_for_computer" || st === "cancelled";
+function rowDisplayStatus(row: Workstation) {
+  const fromJob = (row.deploymentJob?.displayStatus || "").trim();
+  if (fromJob === "pending") return "in_progress"; // legacy API value → In Progress
+  if (fromJob) return fromJob;
+  const raw = (row.deploymentJob?.status || row.deployAgent?.status || "").trim();
+  if (ACTIVE_JOB_RAW_STATUSES.has(raw) || raw === "installing") {
+    return "in_progress";
+  }
+  if (row.agentStatus === "connected") return "online";
+  if (row.agentStatus === "registered_offline") {
+    return row.lastHeartbeatAt ? "offline" : "installed";
+  }
+  if (row.deployAgent?.enabled) return "ready";
+  if (TERMINAL_HISTORY_STATUSES.has(raw)) return raw;
+  return raw || "none";
 }
-function canCancelJob(row: Workstation) {
+
+function isActiveDeployJob(row: Workstation) {
+  const display = rowDisplayStatus(row);
+  if (ACTIVE_DEPLOY_STATUSES.has(display)) return true;
+  return ACTIVE_JOB_RAW_STATUSES.has(row.deploymentJob?.status || "");
+}
+
+function canDeployRow(row: Workstation) {
+  if (!deployPrereqs.value?.deployEnabled) return false;
+  if (row.desktopDeviceId || row.agentStatus === "connected" || row.agentStatus === "registered_offline") {
+    return false;
+  }
+  if (isActiveDeployJob(row)) return false;
+  return Boolean(row.deployAgent?.enabled);
+}
+
+function canAddPilot(row: Workstation) {
+  if (!row.isPresent || !row.accountEnabled || row.isServerOrDc) return false;
+  if (!row.objectSid) return false;
+  return row.deployAgent?.pilotGroupMember !== true;
+}
+
+function canRemovePilot(row: Workstation) {
+  if (row.deployAgent?.pilotGroupMember !== true) return false;
+  // UI still shows the action; confirm dialog + API block active deployments.
+  return true;
+}
+
+const canBulkAddPilot = computed(() => selectedRows.value.some((r) => canAddPilot(r)));
+const canBulkRemovePilot = computed(() => selectedRows.value.some((r) => canRemovePilot(r)));
+
+function pilotMembershipLabel(row: Workstation) {
+  // Pilot membership is independent of deployment job lifecycle.
+  if (pilotBusy.value && pilotTargets.value.some((t) => t.id === row.id)) {
+    return t("workstations.pilotStatus.updating");
+  }
+  if (!row.deployAgent?.pilotGroupMember) {
+    return t("workstations.pilotStatus.notInPilot");
+  }
+  const readiness = row.deployAgent?.taskReadiness || "";
+  if (readiness === "task_available") {
+    return t("workstations.pilotStatus.taskAvailable");
+  }
+  if (readiness === "gpo_pending" || row.deployAgent?.gpoReadinessNote) {
+    return t("workstations.pilotStatus.gpoPending");
+  }
+  return t("workstations.pilotStatus.inPilot");
+}
+
+function pilotMembershipColor(row: Workstation) {
+  if (!row.deployAgent?.pilotGroupMember) return "grey-6";
+  if (row.deployAgent?.taskReadiness === "task_available") return "primary";
+  if (row.deployAgent?.taskReadiness === "gpo_pending") return "warning";
+  return "info";
+}
+
+function openPilotMembership(operation: "add" | "remove", rowsIn: Workstation[]) {
+  const filtered =
+    operation === "add" ? rowsIn.filter((r) => canAddPilot(r)) : rowsIn.filter((r) => canRemovePilot(r));
+  if (!filtered.length) return;
+  pilotOperation.value = operation;
+  pilotTargets.value = filtered;
+  pilotPhase.value = "confirm";
+  pilotResultNote.value = "";
+  pilotResultOk.value = false;
+  pilotResultLines.value = [];
+  pilotBusy.value = false;
+  pilotOpen.value = true;
+}
+
+function closePilotMembershipDialog() {
+  // Dismiss only — never reverses AD membership changes.
+  pilotOpen.value = false;
+}
+
+async function confirmPilotMembership() {
+  if (!pilotTargets.value.length || pilotBusy.value) return;
+  if (!pilotDialogShowConfirmAction(pilotPhase.value)) return;
+  pilotBusy.value = true;
+  pilotResultNote.value = "";
+  pilotResultLines.value = [];
+  try {
+    const res = await api.changePilotMembership({
+      workstationIds: pilotTargets.value.map((r) => r.id),
+      operation: pilotOperation.value,
+    });
+    if (res.prerequisites) deployPrereqs.value = res.prerequisites;
+    const byId = new Map((res.workstations || []).map((w) => [w.id, w]));
+    rows.value = rows.value.map((r) => byId.get(r.id) || r);
+    selectedRows.value = selectedRows.value.map((r) => byId.get(r.id) || r);
+    if (detailsRow.value && byId.has(detailsRow.value.id)) {
+      detailsRow.value = byId.get(detailsRow.value.id)!;
+    }
+    pilotResultOk.value = Boolean(res.allSucceeded);
+    pilotResultNote.value = res.partial
+      ? t("workstations.pilotPartial", { ok: res.succeeded, fail: res.failed })
+      : res.allSucceeded
+        ? t("workstations.pilotSuccess", { n: res.succeeded })
+        : t("workstations.pilotFailed");
+    if (res.note) pilotResultNote.value = `${pilotResultNote.value} ${res.note}`;
+    pilotResultLines.value = (res.results || []).map((r) => {
+      const name = r.computerName || r.workstationId;
+      const code = r.result || "error";
+      const adMiss =
+        code === "workstation_not_in_inventory" ||
+        code === "missing" ||
+        code === "no_sid" ||
+        code === "disabled";
+      const prefix = adMiss ? "AD/inventory" : code === "error" || code === "verify_failed" ? "AD write" : "Result";
+      return `${name}: [${prefix}] ${code}${r.detail ? ` — ${r.detail}` : ""}`;
+    });
+    pilotPhase.value = pilotDialogPhaseAfterAttempt({
+      allSucceeded: Boolean(res.allSucceeded),
+      partial: Boolean(res.partial),
+      failed: !res.allSucceeded,
+    });
+    syncDeployPolling();
+  } catch (e) {
+    pilotResultOk.value = false;
+    if (e instanceof ApiError) {
+      if (e.status === 404) {
+        pilotResultNote.value = t("workstations.pilotApiNotFound");
+      } else if (e.status === 403) {
+        pilotResultNote.value = t("workstations.pilotApiForbidden");
+      } else if (e.status === 401) {
+        pilotResultNote.value = t("workstations.pilotApiUnauthorized");
+      } else {
+        pilotResultNote.value = t("workstations.pilotApiError", { status: e.status, detail: e.message || "—" });
+      }
+    } else {
+      pilotResultNote.value = t("workstations.pilotError");
+    }
+    pilotPhase.value = pilotDialogPhaseAfterAttempt({ error: true });
+  } finally {
+    pilotBusy.value = false;
+  }
+}
+
+function canRetryJob(row: Workstation) {
+  if (isActiveDeployJob(row) || row.desktopDeviceId) return false;
+  if (!row.deploymentJob?.id) return false;
+  const display = rowDisplayStatus(row);
   const st = row.deploymentJob?.status;
-  return st === "requested" || st === "approved" || st === "scheduled" || st === "waiting_for_computer" || st === "installing";
+  return (
+    display === "failed" ||
+    display === "cancelled" ||
+    display === "timed_out" ||
+    st === "failed" ||
+    st === "cancelled" ||
+    st === "timed_out"
+  );
+}
+
+function canCancelJob(row: Workstation) {
+  // Cancel only before Windows reports install started (raw status still pre-installing).
+  if (!row.deploymentJob?.id) return false;
+  const st = row.deploymentJob?.status || "";
+  return st === "requested" || st === "approved" || st === "scheduled" || st === "waiting_for_computer";
+}
+
+function deployStatusKey(status: string | undefined | null) {
+  const key = (status || "").trim();
+  if (!key) return "none";
+  return key;
+}
+
+function localizeDeployStatus(status: string | undefined | null) {
+  const key = deployStatusKey(status);
+  const path = `workstations.deployStatus.${key}`;
+  const label = t(path);
+  return label === path ? key : label;
+}
+
+function agentDisplayLabel(row: Workstation) {
+  if (row.agentStatus === "connected") return t("workstations.agent.connected");
+  if (row.agentStatus === "registered_offline") return t("workstations.agent.registered_offline");
+  if (row.agentStatus === "not_registered") return t("workstations.agent.not_registered");
+  return row.agentStatusLabel || "—";
+}
+
+function deployHistoryCaption(row: Workstation): string {
+  const job = row.deploymentJob;
+  if (!job?.status) return "";
+  if (isActiveDeployJob(row)) return "";
+  return t("workstations.deployHistoryCaption", { status: localizeDeployStatus(job.status) });
+}
+
+function primaryDeployLabel(row: Workstation) {
+  const display = rowDisplayStatus(row);
+  if (display === "ready" || (row.deployAgent?.enabled && !isActiveDeployJob(row) && !row.desktopDeviceId)) {
+    if (
+      !isActiveDeployJob(row) &&
+      !row.desktopDeviceId &&
+      (display === "none" || display === "cancelled" || display === "failed" || display === "timed_out" || display === "ready")
+    ) {
+      if (row.deployAgent?.enabled || canDeployRow(row)) return localizeDeployStatus("ready");
+    }
+  }
+  if (display === "online") return localizeDeployStatus("online");
+  if (display === "deployed") return localizeDeployStatus("deployed");
+  if (display === "offline") return localizeDeployStatus("offline");
+  if (display === "installed") return localizeDeployStatus("installed");
+  if (display === "in_progress") return localizeDeployStatus("in_progress");
+  if (display === "pending") return localizeDeployStatus("pending");
+  if (display === "failed") return localizeDeployStatus("failed");
+  if (display === "timed_out") return localizeDeployStatus("timed_out");
+  if (display === "cancelled") return localizeDeployStatus("cancelled");
+  if (row.deployAgent?.enabled || canDeployRow(row)) return localizeDeployStatus("ready");
+  return localizeDeployStatus(display || row.deployAgent?.status || "blocked");
+}
+
+function firstValidIso(...candidates: Array<string | null | undefined>): string | null {
+  for (const raw of candidates) {
+    if (!raw) continue;
+    const ms = Date.parse(raw);
+    if (!Number.isNaN(ms)) return raw;
+  }
+  return null;
+}
+
+function formatAbsoluteTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  try {
+    return d.toLocaleString(locale.value || undefined, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  } catch {
+    return d.toLocaleString();
+  }
+}
+
+function formatRelativeTime(iso: string, nowMs: number): string {
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return "";
+  const diffSec = Math.round((nowMs - then) / 1000);
+  const abs = Math.abs(diffSec);
+  if (abs < 45) return t("workstations.relative.justNow");
+  const minutes = Math.round(abs / 60);
+  if (minutes < 60) {
+    return t("workstations.relative.minutesAgo", { n: minutes });
+  }
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) {
+    return t("workstations.relative.hoursAgo", { n: hours });
+  }
+  const days = Math.round(hours / 24);
+  return t("workstations.relative.daysAgo", { n: days });
+}
+
+type DeployStatusTimeInfo = { label: string; absolute: string; iso: string };
+
+function deployStatusTimeInfo(row: Workstation): DeployStatusTimeInfo | null {
+  // Depend on tick so captions refresh in-place.
+  const nowMs = relativeNowMs.value;
+  const display = rowDisplayStatus(row);
+  const job = row.deploymentJob;
+
+  let iso: string | null = null;
+  let kind: "plain" | "completed" | "failed" | "timed_out" | "cancelled" = "plain";
+
+  if (display === "in_progress" || display === "pending") {
+    iso = firstValidIso(job?.installStartedAt, job?.scheduledAt, job?.updatedAt, job?.createdAt);
+    kind = "plain";
+  } else if (display === "online" || display === "deployed" || display === "installed") {
+    iso = firstValidIso(job?.installedAt, job?.msiCompletedAt, job?.updatedAt, row.lastHeartbeatAt);
+    kind = "completed";
+  } else if (display === "failed") {
+    iso = firstValidIso(job?.updatedAt, job?.msiCompletedAt, job?.installStartedAt, job?.createdAt);
+    kind = "failed";
+  } else if (display === "timed_out") {
+    iso = firstValidIso(job?.updatedAt, job?.scheduledAt, job?.createdAt);
+    kind = "timed_out";
+  } else if (display === "cancelled") {
+    iso = firstValidIso(job?.cancelledAt, job?.updatedAt, job?.createdAt);
+    kind = "cancelled";
+  } else if (display === "offline") {
+    iso = firstValidIso(row.lastHeartbeatAt, job?.updatedAt);
+    kind = "plain";
+  } else if (
+    (display === "ready" || display === "none") &&
+    job?.status &&
+    TERMINAL_HISTORY_STATUSES.has(job.status)
+  ) {
+    // Ready again after a terminal job — show when that outcome happened.
+    iso = firstValidIso(job.cancelledAt, job.updatedAt, job.installedAt, job.createdAt);
+    if (job.status === "failed") kind = "failed";
+    else if (job.status === "timed_out") kind = "timed_out";
+    else if (job.status === "cancelled") kind = "cancelled";
+    else kind = "plain";
+  }
+
+  if (!iso) return null;
+  const when = formatRelativeTime(iso, nowMs);
+  if (!when) return null;
+  let label = when;
+  if (kind === "completed") label = t("workstations.relative.completed", { when });
+  else if (kind === "failed") label = t("workstations.relative.failed", { when });
+  else if (kind === "timed_out") label = t("workstations.relative.timedOut", { when });
+  else if (kind === "cancelled") label = t("workstations.relative.cancelled", { when });
+  return { label, absolute: formatAbsoluteTime(iso), iso };
+}
+
+function startRelativeTick() {
+  if (relativeTickTimer) return;
+  relativeNowMs.value = Date.now();
+  relativeTickTimer = setInterval(() => {
+    relativeNowMs.value = Date.now();
+  }, RELATIVE_TICK_MS);
+}
+
+function stopRelativeTick() {
+  if (relativeTickTimer) {
+    clearInterval(relativeTickTimer);
+    relativeTickTimer = null;
+  }
+}
+
+function deployStatusColor(status: string) {
+  if (status === "in_progress") return "primary";
+  if (status === "installed" || status === "online" || status === "deployed") return "positive";
+  if (status === "failed" || status === "timed_out") return "negative";
+  if (status === "offline") return "warning";
+  if (status === "cancelled") return "grey-6";
+  if (status === "pending" || status === "ready") return "grey-7";
+  return "grey-6";
+}
+
+function deployStatusOutline(status: string) {
+  return status === "pending" || status === "ready" || status === "cancelled" || status === "offline";
 }
 
 function reachColor(status: string) {
@@ -905,6 +1768,94 @@ function agentColor(status: string) {
   if (status === "connected") return "positive";
   if (status === "registered_offline") return "warning";
   return "grey";
+}
+function wsReachChipClass(status: string) {
+  if (status === "reachable") return "qka-ctrl-chip--online";
+  if (status === "dns_failed" || status === "probe_error") return "qka-ctrl-chip--failed";
+  if (status === "no_reply") return "qka-ctrl-chip--paused";
+  return "qka-ctrl-chip--neutral";
+}
+function wsAgentChipClass(status: string) {
+  if (status === "connected") return "qka-ctrl-chip--online";
+  if (status === "registered_offline") return "qka-ctrl-chip--paused";
+  if (status === "registered") return "qka-ctrl-chip--indexing";
+  return "qka-ctrl-chip--neutral";
+}
+
+function stopDeployPolling() {
+  if (deployPollTimer) {
+    clearInterval(deployPollTimer);
+    deployPollTimer = null;
+  }
+}
+
+function syncDeployPolling() {
+  const needsPoll = rows.value.some((r) => isActiveDeployJob(r));
+  if (needsPoll) {
+    if (!deployPollTimer) {
+      deployPollTimer = setInterval(() => {
+        void reload({ background: true });
+      }, DEPLOY_POLL_MS);
+    }
+  } else {
+    stopDeployPolling();
+  }
+}
+
+function applyOptimisticJobs(
+  jobs: Array<{
+    id: string;
+    workstationId: string;
+    computerName: string;
+    status: string;
+    lastError: string;
+  }>,
+) {
+  const nowIso = new Date().toISOString();
+  const byWs = new Map(jobs.map((j) => [j.workstationId, j]));
+  const patchRow = (row: Workstation) => {
+    const job = byWs.get(row.id);
+    if (!job) return row;
+    const status = job.status || "scheduled";
+    return {
+      ...row,
+      deployAgent: {
+        ...row.deployAgent,
+        enabled: false,
+        status,
+        note: t("workstations.deployScheduledNote"),
+      },
+      deploymentJob: {
+        id: job.id,
+        status,
+        statusCode: 0,
+        displayStatus: "in_progress",
+        attemptCount: row.deploymentJob?.attemptCount || 1,
+        lastError: job.lastError || "",
+        lastResult: "scheduled",
+        msiVersion: row.deploymentJob?.msiVersion || "",
+        msiExitCode: null,
+        restartRequired: false,
+        engine: row.deploymentJob?.engine || "gpo",
+        enrollmentMode: row.deploymentJob?.enrollmentMode || "machine_identity",
+        desktopDeviceId: row.deploymentJob?.desktopDeviceId || null,
+        createdAt: row.deploymentJob?.createdAt || nowIso,
+        updatedAt: nowIso,
+        approvedAt: nowIso,
+        scheduledAt: nowIso,
+        installStartedAt: null,
+        msiCompletedAt: null,
+        installedAt: null,
+        cancelledAt: null,
+      },
+    };
+  };
+  rows.value = rows.value.map(patchRow);
+  selectedRows.value = selectedRows.value.map(patchRow);
+  if (detailsRow.value) {
+    detailsRow.value = patchRow(detailsRow.value);
+  }
+  syncDeployPolling();
 }
 
 function formatApiFailure(err: unknown, fallback: string): string {
@@ -1033,6 +1984,7 @@ async function reload(opts?: {
     if (detailsRow.value) {
       detailsRow.value = rows.value.find((r) => r.id === detailsRow.value?.id) || detailsRow.value;
     }
+    syncDeployPolling();
     persistView();
   } catch (err) {
     if (seq !== reloadSeq) return;
@@ -1066,8 +2018,8 @@ function clearOuFilters() {
   filterMode.value = "all";
   void reload({ page: 1, background: rows.value.length > 0 });
 }
-function onOuTicked(next: string[]) {
-  tickedOuDns.value = next;
+function onOuTicked(next: readonly string[]) {
+  tickedOuDns.value = [...next];
   // Ticking alone does not change inventory unless Selected OUs mode is already active.
   if (filterMode.value === "selected") {
     if (!next.length) filterMode.value = "all";
@@ -1325,24 +2277,100 @@ async function loadDeployPrereqs() {
   }
 }
 
-function openDeploy() {
-  if (!canDeploySelected.value) return;
+function stopDeployProgressTick() {
+  if (deployProgressTimer) {
+    clearInterval(deployProgressTimer);
+    deployProgressTimer = null;
+  }
+}
+
+function resetDeployDialogState() {
+  stopDeployProgressTick();
+  deploying.value = false;
+  deployPhase.value = "idle";
+  deployProgress.value = 0;
+  deployProgressLabel.value = "";
+  deployFinishNote.value = "";
   deployConfirmation.value = "";
+  pendingTokenJobs.value = [];
+  pendingTokenInstruction.value = "";
+}
+
+function openDeploy() {
+  if (!canDeploySelected.value || deploying.value || deployPhase.value === "running") return;
+  resetDeployDialogState();
   deployOpen.value = true;
+}
+
+function deploySingle(row: Workstation) {
+  if (!canDeployRow(row) || deploying.value) return;
+  selectedRows.value = [row];
+  openDeploy();
+}
+
+function closeDeployDialog() {
+  if (deployPhase.value === "running") return;
+  const openTokens = pendingTokenJobs.value.length > 0;
+  const jobs = [...pendingTokenJobs.value];
+  const instruction = pendingTokenInstruction.value;
+  deployOpen.value = false;
+  resetDeployDialogState();
+  if (openTokens) {
+    tokenJobs.value = jobs;
+    tokenInstruction.value = instruction || t("workstations.tokenHint");
+    tokenOpen.value = true;
+  }
+}
+
+function onDeployDialogHide() {
+  if (deployPhase.value === "running") {
+    // Persistent dialog should not hide mid-run; keep state if somehow closed.
+    return;
+  }
+  if (!deployOpen.value && deployPhase.value !== "idle") {
+    resetDeployDialogState();
+  }
 }
 
 async function confirmDeploy() {
   if (!canDeploySelected.value || !deployPrereqs.value) return;
+  if (deployPhase.value === "running" || deploying.value) return;
+  // Block duplicate submits while an active job already exists for any selection.
+  if (selectedRows.value.some((r) => isActiveDeployJob(r))) {
+    error.value = t("workstations.deployActiveJobHint");
+    return;
+  }
   deploying.value = true;
+  deployPhase.value = "running";
+  deployProgress.value = 5;
+  deployProgressLabel.value = t("workstations.deployProgressValidating");
+  deployFinishNote.value = "";
   error.value = "";
+  pendingTokenJobs.value = [];
+  pendingTokenInstruction.value = "";
+  stopDeployProgressTick();
+  deployProgressTimer = setInterval(() => {
+    if (deployPhase.value !== "running") return;
+    if (deployProgress.value < 15) {
+      deployProgress.value = Math.min(15, deployProgress.value + 2);
+      deployProgressLabel.value = t("workstations.deployProgressValidating");
+    } else if (deployProgress.value < 70) {
+      deployProgress.value = Math.min(70, deployProgress.value + 2);
+      deployProgressLabel.value = t("workstations.deployProgressAuthorizing");
+    }
+  }, 180);
   try {
     const result = await api.deployWorkstationAgents({
       workstationIds: selectedRows.value.map((r) => r.id),
       confirmation: deployConfirmation.value,
       approve: true,
     });
-    deployOpen.value = false;
-    syncNote.value = result.note;
+    stopDeployProgressTick();
+    deployProgress.value = 82;
+    deployProgressLabel.value = t("workstations.deployProgressRefreshing");
+    // Immediate UI: Scheduled / Awaiting Windows Task (no full-page reload).
+    applyOptimisticJobs(result.jobs || []);
+    syncNote.value = result.note || t("workstations.deployScheduledNote");
     const staged = (result.jobs || []).filter((j) => (j as { tokenStaged?: boolean }).tokenStaged);
     const withTokens = (result.jobs || [])
       .filter((j) => j.machineEnrollmentToken)
@@ -1352,17 +2380,28 @@ async function confirmDeploy() {
         machineEnrollmentToken: String(j.machineEnrollmentToken),
       }));
     if (staged.length && !withTokens.length) {
-      syncNote.value = `${result.note} ${result.tokenProvisioning?.instruction || t("workstations.tokenAutoStaged")}`;
+      syncNote.value = `${t("workstations.deployScheduledNote")} ${result.tokenProvisioning?.instruction || t("workstations.tokenAutoStaged")}`;
     } else if (withTokens.length) {
-      tokenJobs.value = withTokens;
-      tokenInstruction.value = result.tokenProvisioning?.instruction || t("workstations.tokenHint");
-      tokenOpen.value = true;
+      pendingTokenJobs.value = withTokens;
+      pendingTokenInstruction.value = result.tokenProvisioning?.instruction || t("workstations.tokenHint");
     }
     await reload({ background: true });
     await loadDeployPrereqs();
+    syncDeployPolling();
+    deployProgress.value = 100;
+    deployProgressLabel.value = t("workstations.deployProgressDone");
+    deployFinishNote.value = syncNote.value || t("workstations.deployScheduledNote");
+    deployPhase.value = "done";
   } catch (err) {
-    error.value = formatApiFailure(err, t("workstations.deployError"));
+    stopDeployProgressTick();
+    const msg = formatApiFailure(err, t("workstations.deployError"));
+    error.value = msg;
+    deployFinishNote.value = msg;
+    deployProgressLabel.value = t("workstations.deployError");
+    deployProgress.value = Math.max(deployProgress.value, 100);
+    deployPhase.value = "error";
   } finally {
+    stopDeployProgressTick();
     deploying.value = false;
   }
 }
@@ -1375,12 +2414,13 @@ function closeTokenDialog() {
 
 async function cancelDeploy(row: Workstation) {
   const jobId = row.deploymentJob?.id;
-  if (!jobId) return;
+  if (!jobId || !canCancelJob(row)) return;
   jobBusyId.value = jobId;
   error.value = "";
   try {
     await api.cancelWorkstationDeploy(jobId);
     await reload({ background: true });
+    syncDeployPolling();
   } catch (err) {
     error.value = formatApiFailure(err, t("workstations.deployError"));
   } finally {
@@ -1390,13 +2430,24 @@ async function cancelDeploy(row: Workstation) {
 
 async function retryDeploy(row: Workstation) {
   const jobId = row.deploymentJob?.id;
-  if (!jobId) return;
+  if (!jobId || !canRetryJob(row) || isActiveDeployJob(row)) return;
   jobBusyId.value = jobId;
   error.value = "";
   try {
-    await api.retryWorkstationDeploy(jobId);
+    const result = await api.retryWorkstationDeploy(jobId);
+    applyOptimisticJobs([
+      {
+        id: result.id || jobId,
+        workstationId: row.id,
+        computerName: row.computerName,
+        status: result.status || "scheduled",
+        lastError: "",
+      },
+    ]);
+    syncNote.value = t("workstations.deployScheduledNote");
     await reload({ background: true });
     await loadDeployPrereqs();
+    syncDeployPolling();
   } catch (err) {
     error.value = formatApiFailure(err, t("workstations.deployError"));
   } finally {
@@ -1431,6 +2482,9 @@ onBeforeRouteLeave(() => {
 onBeforeUnmount(() => {
   persistView();
   if (filterDebounce) clearTimeout(filterDebounce);
+  stopDeployPolling();
+  stopDeployProgressTick();
+  stopRelativeTick();
 });
 
 onMounted(async () => {
@@ -1443,10 +2497,37 @@ onMounted(async () => {
   await Promise.all([reload({ background: false }), loadDeployPrereqs()]);
   viewHydrated.value = true;
   filterWatchEnabled = true;
+  syncDeployPolling();
+  startRelativeTick();
 });
 </script>
 
 <style scoped>
+.qka-ws-deploy-status {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  max-width: 100%;
+}
+.qka-ws-deploy-status__line {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+}
+.qka-ws-deploy-status__chip {
+  max-width: 100%;
+}
+.qka-ws-deploy-status__time {
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  cursor: default;
+}
 .qka-ws-sidebar {
   max-height: calc(100vh - 220px);
   overflow: auto;
@@ -1458,12 +2539,39 @@ onMounted(async () => {
 .qka-ws-table :deep(tbody tr) {
   cursor: pointer;
 }
+.qka-ws-table :deep(table) {
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.qka-ws-table :deep(th:last-child),
+.qka-ws-table :deep(td:last-child) {
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  background: var(--q-card-bg, #fff);
+  box-shadow: -4px 0 6px -6px rgba(16, 32, 51, 0.12);
+}
+.body--dark .qka-ws-table :deep(th:last-child),
+.body--dark .qka-ws-table :deep(td:last-child) {
+  background: var(--q-dark-page, #1d1d1d);
+  box-shadow: -4px 0 6px -6px rgba(0, 0, 0, 0.35);
+}
+.qka-ws-actions-cell {
+  min-width: 48px;
+  width: 56px;
+  white-space: nowrap;
+}
 .qka-ws-drawer .text-wrap {
   word-break: break-all;
   white-space: normal;
 }
 .qka-ws-deploy-action {
   border: 1px solid rgba(255, 255, 255, 0.45);
+}
+.qka-ws-actionbar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
 }
 .body--dark .qka-ws-readiness :deep(.q-item) {
   color: inherit;

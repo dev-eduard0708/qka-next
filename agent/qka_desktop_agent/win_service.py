@@ -1,7 +1,8 @@
 """Windows service host for QKA Desktop Agent.
 
-Prefers pywin32 when available. Falls back to a hidden console loop suitable for
-nssm/sc.exe wrappers used by the silent installer.
+Requires a real SCM start (msiexec/sc start). PyInstaller --onedir is required:
+--onefile bootloaders do not satisfy StartServiceCtrlDispatcher under SCM and
+surface Error 1920 (and local probes show pywintypes 1063).
 """
 
 from __future__ import annotations
@@ -19,11 +20,10 @@ def run_service() -> int:
         import win32service  # type: ignore
         import win32serviceutil  # type: ignore
         import servicemanager  # type: ignore
+        import pywintypes  # type: ignore
     except ImportError:
-        log.warning("pywin32 not available; running foreground loop (use nssm/sc for service)")
-        from qka_desktop_agent.main import run_loop
-
-        return run_loop()
+        log.error("pywin32 not available; cannot host Windows service")
+        return 3
 
     class QkaDesktopAgentService(win32serviceutil.ServiceFramework):
         _svc_name_ = "QkaDesktopAgent"
@@ -53,10 +53,24 @@ def run_service() -> int:
             win32event.WaitForSingleObject(self.stop_event, win32event.INFINITE)
             thread.join(timeout=30)
 
-    if len(sys.argv) == 1:
-        servicemanager.Initialize()
-        servicemanager.PrepareToHostSingle(QkaDesktopAgentService)
-        servicemanager.StartServiceCtrlDispatcher()
+    # WiX ServiceInstall Arguments="service" → ImagePath ends with `…exe service`.
+    # SCM start must host the dispatcher for that argv; HandleCommandLine is only for
+    # manual `install|start|stop|debug`.
+    argv1 = (sys.argv[1].strip().lower() if len(sys.argv) > 1 else "")
+    if len(sys.argv) == 1 or argv1 == "service":
+        try:
+            servicemanager.Initialize()
+            servicemanager.PrepareToHostSingle(QkaDesktopAgentService)
+            servicemanager.StartServiceCtrlDispatcher()
+        except pywintypes.error as exc:
+            # 1063 = not started by SCM (local probe / accidental console launch).
+            if int(getattr(exc, "winerror", 0) or 0) == 1063:
+                log.error(
+                    "StartServiceCtrlDispatcher failed (1063): process was not started by SCM. "
+                    "Use: sc start QkaDesktopAgent / msiexec service start — not bare 'exe service'."
+                )
+                return 1063
+            raise
         return 0
     win32serviceutil.HandleCommandLine(QkaDesktopAgentService)
     return 0

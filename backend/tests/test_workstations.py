@@ -406,7 +406,7 @@ def test_employee_association_requires_ad_user(client):
         if i["computerName"] == "PILOT-PC"
     )
     assert pilot["agentStatus"] == "not_registered"
-    assert pilot["agentStatusLabel"] == "Not Registered / Unknown"
+    assert pilot["agentStatusLabel"] == "Not registered"
     assert pilot["deployAgent"]["enabled"] is False
 
     denied = client.put(

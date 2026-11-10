@@ -23,3 +23,12 @@ scripts/_create_copy.sql
 scripts/_qka_014_frontend_it.dump
 scripts/_session.cookie
 *.cookie
+
+Temp/
+
+
+build/
+dist/
+scripts/gpo-agent-deploy/acl-backups/
+*.cer
+

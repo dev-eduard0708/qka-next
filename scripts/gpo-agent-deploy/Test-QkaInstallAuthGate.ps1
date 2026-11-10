@@ -20,12 +20,20 @@ function Get-TokenDropFileName([string]$sid) {
   return (($sid -replace '[^0-9A-Za-z\-]', '_') + '.tok')
 }
 
-function Test-AuthGate([string]$TokenDrop, [string]$ComputerSid) {
+function Test-AuthGate([string]$TokenDrop, [string]$ComputerSid, [string]$AuthorizedReason) {
+  # Mirrors the scheduled-task gate: file presence alone never installs.
   $tokPath = Join-Path $TokenDrop.TrimEnd('\') (Get-TokenDropFileName $ComputerSid)
   if (-not (Test-Path -LiteralPath $tokPath)) { return 'SKIP_NO_TOKEN' }
   $len = (Get-Item -LiteralPath $tokPath).Length
   if ($len -lt 8) { return 'SKIP_EMPTY' }
-  return 'INSTALL_ALLOWED'
+  switch ($AuthorizedReason) {
+    'ok' { return 'INSTALL_ALLOWED' }
+    'expired' { return 'SKIP_EXPIRED' }
+    'cancelled' { return 'SKIP_CANCELLED' }
+    'foreign_sid' { return 'SKIP_FOREIGN' }
+    'absent' { return 'SKIP_NO_TOKEN' }
+    default { return 'SKIP_DENIED' }
+  }
 }
 
 $pilot = Get-ADComputer -Identity $PilotComputer -ErrorAction Stop
@@ -50,20 +58,28 @@ if ($negPilot -ne 'SKIP_NO_TOKEN' -or $negOther -ne 'SKIP_NO_TOKEN') {
 }
 Write-Host 'NEG_EMPTY_DROP=PASS (link/pilot alone would not install)'
 
-# Positive: only pilot SID file present → pilot allowed, other skipped
+# File present is not enough: API reason must be ok.
 $pilotTok = Join-Path $root (Get-TokenDropFileName $pilotSid)
 Set-Content -LiteralPath $pilotTok -Value 'PLACEHOLDER-NOT-A-REAL-ENROLLMENT-TOKEN' -Encoding ASCII
-$posPilot = Test-AuthGate -TokenDrop $root -ComputerSid $pilotSid
-$posOther = Test-AuthGate -TokenDrop $root -ComputerSid $otherSid
+$fileOnly = Test-AuthGate -TokenDrop $root -ComputerSid $pilotSid -AuthorizedReason 'absent'
+if ($fileOnly -eq 'INSTALL_ALLOWED') { throw 'FAIL file presence alone must not install' }
+$expired = Test-AuthGate -TokenDrop $root -ComputerSid $pilotSid -AuthorizedReason 'expired'
+$cancelled = Test-AuthGate -TokenDrop $root -ComputerSid $pilotSid -AuthorizedReason 'cancelled'
+$foreign = Test-AuthGate -TokenDrop $root -ComputerSid $pilotSid -AuthorizedReason 'foreign_sid'
+if ($expired -ne 'SKIP_EXPIRED' -or $cancelled -ne 'SKIP_CANCELLED' -or $foreign -ne 'SKIP_FOREIGN') {
+  throw "FAIL freshness gate expired=$expired cancelled=$cancelled foreign=$foreign"
+}
+Write-Host 'NEG_STALE_OR_FOREIGN=PASS (expired/cancelled/foreign never install)'
+$posPilot = Test-AuthGate -TokenDrop $root -ComputerSid $pilotSid -AuthorizedReason 'ok'
+$posOther = Test-AuthGate -TokenDrop $root -ComputerSid $otherSid -AuthorizedReason 'ok'
 if ($posPilot -ne 'INSTALL_ALLOWED') { throw "FAIL positive pilot gate: $posPilot" }
 if ($posOther -ne 'SKIP_NO_TOKEN') { throw "FAIL negative other gate: $posOther" }
 Write-Host ("POS_PILOT_ONLY=PASS pilot=" + $pilot.Name + " other=" + $other.Name)
 
-# Cancel/expire simulation: remove token → install blocked again
 Remove-Item -LiteralPath $pilotTok -Force
-$afterCancel = Test-AuthGate -TokenDrop $root -ComputerSid $pilotSid
+$afterCancel = Test-AuthGate -TokenDrop $root -ComputerSid $pilotSid -AuthorizedReason 'ok'
 if ($afterCancel -ne 'SKIP_NO_TOKEN') { throw "FAIL cancel gate: $afterCancel" }
-Write-Host 'NEG_AFTER_CANCEL=PASS (expired/cancelled token never installs)'
+Write-Host 'NEG_AFTER_CANCEL=PASS (removed token never installs)'
 
 Write-Host 'AUTH_GATE=PASS'
 Write-Host ("WORK_ROOT=" + $root)

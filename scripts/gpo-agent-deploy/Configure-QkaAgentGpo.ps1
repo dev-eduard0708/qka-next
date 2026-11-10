@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
   Link existing QKA Agent GPO, scope to pilot computer group, register Machine Startup script properly.
 
@@ -8,11 +8,12 @@
 
   - Links GPO to a pilot OU only (never domain root)
   - Security filtering: GpoApply ONLY for QKA-Agent-Pilot-Computers; Authenticated Users → GpoRead
-  - Registers Machine Startup via GPT.ini version bump + Scripts CSE extension names
-    (does not rely on copying scripts.ini alone without CSE/version updates)
-  - Startup installs MSI from UNC with QKASERVERURL only — NO enrollment tokens in SYSVOL
-  - Authorization gate: MSI install runs ONLY when a per-SID *.tok exists on the token-drop
-    share for this computer (staged by QKA Deploy Agent). Linking the GPO or pilot-group
+  - Install trigger is a GPO Scheduled Task (SYSTEM, about every 2 minutes), not a
+    startup script. No workstation reboot is required after the task is applied.
+  - Removes this product's Machine Startup script entry and preserves unrelated scripts.
+  - Startup/task script installs MSI from UNC with QKASERVERURL only — NO enrollment tokens in SYSVOL
+  - Authorization gate: a per-SID *.tok is required AND the API must confirm the token is
+    unexpired and the deployment job is not cancelled. Linking the GPO or pilot-group
     membership alone never installs.
 
   Does NOT add computers to the pilot group. Does NOT run unless -IConfirmGpoScope.
@@ -56,7 +57,9 @@ $guidBare = $GpoGuid.Trim('{}')
 $gpo = Get-GPO -Guid $guidBare -ErrorAction Stop
 $grp = Get-ADGroup -Identity $PilotGroup -ErrorAction Stop
 $gpoDn = "CN={$guidBare},CN=Policies,CN=System,DC=qehc,DC=edu,DC=sa"
-$sysvolRoot = "\\qehc.edu.sa\SysVol\qehc.edu.sa\Policies\{$guidBare}"
+$pdc = (Get-ADDomain).PDCEmulator
+# Write the authoritative copy on the PDC. SYSVOL DFSR (not a manual copy) distributes it.
+$sysvolRoot = "\\$pdc\SYSVOL\qehc.edu.sa\Policies\{$guidBare}"
 $startupDir = Join-Path $sysvolRoot 'Machine\Scripts\Startup'
 $scriptsDir = Join-Path $sysvolRoot 'Machine\Scripts'
 $gptIni = Join-Path $sysvolRoot 'GPT.INI'
@@ -108,131 +111,107 @@ if (Test-Path -LiteralPath $sysvolRoot) {
   Write-Host ("GPO_BACKUP=" + $backupRoot)
 }
 
-# --- Startup payload (no secrets) ---
+# --- Install payload (no secrets). Scheduled task calls this; startup does not. ---
 New-Item -ItemType Directory -Force -Path $startupDir | Out-Null
 $ps1Name = 'Install-QkaAgentFromUnc.ps1'
-$cmdName = 'Install-QkaAgentFromUnc.cmd'
 $ps1Path = Join-Path $startupDir $ps1Name
-$cmdPath = Join-Path $startupDir $cmdName
-
-$ps1 = @"
-# QKA Agent MSI bootstrap — NO enrollment secrets. Pilot-group GPO only.
-# AUTH GATE: install only when Deploy Agent staged a per-SID *.tok for THIS computer.
-# Linking the GPO or pilot-group membership alone must never install.
-`$ErrorActionPreference = 'Stop'
-`$msi = '$MsiUnc'
-`$url = '$ServerUrl'
-`$tokenDrop = '$TokenDropUnc'
-`$logDir = Join-Path `$env:ProgramData 'QKA\DesktopAgent\logs'
-New-Item -ItemType Directory -Force -Path `$logDir | Out-Null
-`$log = Join-Path `$logDir 'gpo-install.log'
-function Write-Log([string]`$m) { Add-Content -Path `$log -Value ("{0} {1}" -f (Get-Date -Format o), `$m) }
-function Get-LocalComputerSid {
-  `$acct = New-Object System.Security.Principal.NTAccount(`$env:USERDOMAIN, (`$env:COMPUTERNAME + '$'))
-  return `$acct.Translate([System.Security.Principal.SecurityIdentifier]).Value
+$scriptSource = Join-Path $PSScriptRoot 'Install-QkaAgentFromUnc.template.ps1'
+if (-not (Test-Path -LiteralPath $scriptSource)) {
+  throw "Missing install template: $scriptSource"
 }
-function Get-TokenDropFileName([string]`$sid) {
-  # Must match qka_api.services.token_drop.sid_to_filename
-  return ((`$sid -replace '[^0-9A-Za-z\-]', '_') + '.tok')
-}
-# Non-secret path only (token files are ACL-bound per computer on that share).
-`$reg = 'HKLM:\SOFTWARE\QKA\DesktopAgent'
-New-Item -Path `$reg -Force | Out-Null
-New-ItemProperty -Path `$reg -Name 'TokenDropUnc' -Value `$tokenDrop -PropertyType String -Force | Out-Null
-if (Get-Service -Name 'QkaDesktopAgent' -ErrorAction SilentlyContinue) { Write-Log 'already_installed'; exit 0 }
+$clientScriptUnc = "\\qehc.edu.sa\SYSVOL\qehc.edu.sa\Policies\{$guidBare}\Machine\Scripts\Startup\$ps1Name"
+$rendered = Get-Content -LiteralPath $scriptSource -Raw
+$rendered = $rendered.Replace('@@MSI_UNC@@', $MsiUnc).Replace('@@SERVER_URL@@', $ServerUrl).Replace('@@TOKEN_DROP@@', $TokenDropUnc)
+Set-Content -LiteralPath $ps1Path -Value $rendered -Encoding UTF8
+Write-Host ("Install script written: " + $ps1Path)
 
-# --- Authorization gate (Deploy Agent must have staged this computer's token) ---
-try {
-  `$computerSid = Get-LocalComputerSid
-} catch {
-  Write-Log ('auth_gate_skip sid_resolve_failed ' + `$_.Exception.Message)
-  exit 0
-}
-`$tokName = Get-TokenDropFileName `$computerSid
-`$tokPath = Join-Path `$tokenDrop.TrimEnd('\') `$tokName
-if (-not (Test-Path -LiteralPath `$tokPath)) {
-  Write-Log ('auth_gate_skip no_token_for_sid file=' + `$tokName + ' — Deploy Agent not clicked / cancelled / expired')
-  exit 0
-}
-# Confirm file is non-empty without logging contents (SYSTEM can read; filename is the install gate).
-try {
-  `$len = (Get-Item -LiteralPath `$tokPath).Length
-  if (`$len -lt 8) {
-    Write-Log 'auth_gate_skip token_empty_or_invalid'
-    exit 0
-  }
-} catch {
-  Write-Log ('auth_gate_skip token_stat_failed ' + `$_.Exception.Message)
-  exit 0
-}
-Write-Log ('auth_gate_ok sid_token_present len=' + `$len)
-
-if (-not (Test-Path -LiteralPath `$msi)) { Write-Log ("msi_missing " + `$msi); exit 1 }
-`$msiLog = Join-Path `$logDir 'msiexec.log'
-`$arg = "/i ``"`$msi``" /qn /norestart QKASERVERURL=`$url /L*v ``"`$msiLog``""
-Write-Log 'starting_msiexec'
-`$p = Start-Process -FilePath msiexec.exe -ArgumentList `$arg -Wait -PassThru
-Write-Log ("msiexec_exit=" + `$p.ExitCode)
-exit `$p.ExitCode
-"@
-Set-Content -Path $ps1Path -Value $ps1 -Encoding UTF8
-
-# CMD wrapper so classic Scripts CSE registers reliably (not PowerShell-only CSE).
-@(
-  '@echo off',
-  'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Install-QkaAgentFromUnc.ps1"',
-  'exit /b %ERRORLEVEL%'
-) | Set-Content -Path $cmdPath -Encoding ASCII
-
-# scripts.ini for Machine Startup — merge QKA entry; preserve unrelated startup scripts.
+# Remove this product's Machine Startup entry. Keep every unrelated startup script.
 $scriptsIni = Join-Path $scriptsDir 'scripts.ini'
 $startupEntries = New-Object System.Collections.Generic.List[object]
+$otherSections = New-Object System.Collections.Generic.List[string]
 if (Test-Path -LiteralPath $scriptsIni) {
-  $rawIni = Get-Content -LiteralPath $scriptsIni
-  $inStartup = $false
+  $rawIni = @(Get-Content -LiteralPath $scriptsIni)
+  $section = ''
   $pendingCmd = $null
+  $bucket = New-Object System.Collections.Generic.List[string]
   foreach ($line in $rawIni) {
-    if ($line -match '^\s*\[Startup\]\s*$') { $inStartup = $true; continue }
-    if ($line -match '^\s*\[.+\]\s*$') { $inStartup = $false; continue }
-    if (-not $inStartup) { continue }
-    if ($line -match '^\s*\d+CmdLine=(.+)\s*$') {
-      $pendingCmd = $Matches[1].Trim()
-    } elseif ($line -match '^\s*\d+Parameters=(.*)\s*$' -and $null -ne $pendingCmd) {
-      $startupEntries.Add([pscustomobject]@{ Cmd = $pendingCmd; Params = $Matches[1] })
+    if ($line -match '^\s*\[(.+)\]\s*$') {
+      if ($section -and $section -ne 'Startup') {
+        [void]$otherSections.Add("[$section]")
+        foreach ($keptLine in $bucket) { [void]$otherSections.Add($keptLine) }
+      }
+      $section = $Matches[1].Trim()
+      $bucket = New-Object System.Collections.Generic.List[string]
       $pendingCmd = $null
+      continue
+    }
+    if ($section -eq 'Startup') {
+      if ($line -match '^\s*\d+CmdLine=(.+)\s*$') { $pendingCmd = $Matches[1].Trim() }
+      elseif ($line -match '^\s*\d+Parameters=(.*)\s*$' -and $null -ne $pendingCmd) {
+        if ($pendingCmd -notmatch 'Install-QkaAgentFromUnc') {
+          $startupEntries.Add([pscustomobject]@{ Cmd = $pendingCmd; Params = $Matches[1] })
+        }
+        $pendingCmd = $null
+      }
+    } else {
+      [void]$bucket.Add($line)
     }
   }
+  if ($section -and $section -ne 'Startup') {
+    [void]$otherSections.Add("[$section]")
+    foreach ($keptLine in $bucket) { [void]$otherSections.Add($keptLine) }
+  }
 }
-# Drop prior QKA install entries, then append current.
-$kept = New-Object System.Collections.Generic.List[object]
-foreach ($e in $startupEntries) {
-  if ($e.Cmd -notmatch 'Install-QkaAgentFromUnc') { [void]$kept.Add($e) }
-}
-[void]$kept.Add([pscustomobject]@{ Cmd = $cmdName; Params = '' })
-$startupEntries = $kept
 $iniLines = New-Object System.Collections.Generic.List[string]
-[void]$iniLines.Add('[Startup]')
-for ($i = 0; $i -lt $startupEntries.Count; $i++) {
-  [void]$iniLines.Add(('{0}CmdLine={1}' -f $i, $startupEntries[$i].Cmd))
-  [void]$iniLines.Add(('{0}Parameters={1}' -f $i, $startupEntries[$i].Params))
+if ($startupEntries.Count -gt 0) {
+  [void]$iniLines.Add('[Startup]')
+  for ($i = 0; $i -lt $startupEntries.Count; $i++) {
+    [void]$iniLines.Add(('{0}CmdLine={1}' -f $i, $startupEntries[$i].Cmd))
+    [void]$iniLines.Add(('{0}Parameters={1}' -f $i, $startupEntries[$i].Params))
+  }
 }
+foreach ($line in $otherSections) { [void]$iniLines.Add($line) }
+if ($iniLines.Count -eq 0) { [void]$iniLines.Add('; no machine startup scripts') }
 $iniLines | Set-Content -Path $scriptsIni -Encoding ASCII
-Write-Host ("Startup entries registered: " + $startupEntries.Count)
+# Drop the old CMD wrapper so nothing at startup launches the installer.
+$oldCmd = Join-Path $startupDir 'Install-QkaAgentFromUnc.cmd'
+if (Test-Path -LiteralPath $oldCmd) { Remove-Item -LiteralPath $oldCmd -Force }
+Write-Host ("Startup entries preserved (excluding QKA): " + $startupEntries.Count)
 
-# --- Register Scripts CSE on GPO object + bump computer GPT version ---
-# Scripts CSE pair: tool {42B5FAAE-6536-11D2-AE5A-0000F87571E3} CSE {40B6664F-4972-11D1-A7CA-0000F87571E3}
-$scriptsExt = '[{42B5FAAE-6536-11D2-AE5A-0000F87571E3}{40B6664F-4972-11D1-A7CA-0000F87571E3}]'
+# --- GPO Scheduled Task (SYSTEM, every 2 minutes). Not a startup script. ---
+$taskDir = Join-Path $sysvolRoot 'Machine\Preferences\ScheduledTasks'
+New-Item -ItemType Directory -Force -Path $taskDir | Out-Null
+$taskTemplate = Join-Path $PSScriptRoot 'ScheduledTasks.template.xml'
+if (-not (Test-Path -LiteralPath $taskTemplate)) { throw "Missing scheduled task template: $taskTemplate" }
+$taskUidPath = Join-Path $taskDir 'qka-task-uid.txt'
+if (Test-Path -LiteralPath $taskUidPath) {
+  $taskUid = (Get-Content -LiteralPath $taskUidPath -Raw).Trim()
+} else {
+  $taskUid = [guid]::NewGuid().ToString()
+  Set-Content -LiteralPath $taskUidPath -Value $taskUid -Encoding ASCII
+}
+$changed = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss')
+$taskXml = (Get-Content -LiteralPath $taskTemplate -Raw).Replace('@@CHANGED@@', $changed).Replace('@@UID@@', $taskUid).Replace('@@SCRIPT_UNC@@', $clientScriptUnc)
+$taskXmlPath = Join-Path $taskDir 'ScheduledTasks.xml'
+Set-Content -LiteralPath $taskXmlPath -Value $taskXml -Encoding UTF8
+Write-Host ("Scheduled task XML: " + $taskXmlPath)
+
+# Scheduled Tasks CSE must be first in the [{CSE}{tool}] pair (GPSVC walks leading GUIDs).
+# Mirror working GPP Services order; tool-first [{CAB54552}{AADCED64}] is never invoked.
+$schedExt = '[{00000000-0000-0000-0000-000000000000}{CAB54552-DE0E-4C25-A188-0381EF229E1A}][{AADCED64-746C-4633-A97C-D61349046527}{CAB54552-DE0E-4C25-A188-0381EF229E1A}]'
 $gpoAd = Get-ADObject -Identity $gpoDn -Properties gPCMachineExtensionNames, versionNumber, displayName
 $ext = [string]($gpoAd.gPCMachineExtensionNames)
-if ($ext -notmatch '40B6664F-4972-11D1-A7CA-0000F87571E3') {
-  $newExt = if ([string]::IsNullOrWhiteSpace($ext)) { $scriptsExt } else { ($ext.TrimEnd() + $scriptsExt) }
+$hasCseFirst = $ext -match '\[\{AADCED64-746C-4633-A97C-D61349046527\}\{CAB54552-DE0E-4C25-A188-0381EF229E1A\}\]'
+if (-not $hasCseFirst) {
+  # Drop any prior tool-first / incomplete Scheduled Tasks pairs, then append CSE-first form.
+  $cleaned = [regex]::Replace($ext, '\[\{(?:00000000-0000-0000-0000-000000000000|CAB54552-DE0E-4C25-A188-0381EF229E1A|AADCED64-746C-4633-A97C-D61349046527)\}\{(?:00000000-0000-0000-0000-000000000000|CAB54552-DE0E-4C25-A188-0381EF229E1A|AADCED64-746C-4633-A97C-D61349046527)\}\]', '')
+  $newExt = if ([string]::IsNullOrWhiteSpace($cleaned)) { $schedExt } else { ($cleaned.TrimEnd() + $schedExt) }
   Set-ADObject -Identity $gpoDn -Replace @{ gPCMachineExtensionNames = $newExt }
-  Write-Host 'gPCMachineExtensionNames updated to include Scripts CSE.'
+  Write-Host 'gPCMachineExtensionNames updated with CSE-first Scheduled Tasks extension pairs.'
 } else {
-  Write-Host 'Scripts CSE already present on gPCMachineExtensionNames.'
+  Write-Host 'Scheduled Tasks CSE (CSE-first) already present on gPCMachineExtensionNames.'
 }
 
-# GPT.INI: Version = (user << 16) + computer — increment computer (low 16 bits)
 $userVer = 0
 $compVer = 0
 if (Test-Path -LiteralPath $gptIni) {
@@ -251,15 +230,13 @@ $newVer = ($userVer -shl 16) + $compVer
 Version=$newVer
 displayName=$($gpo.DisplayName)
 "@ | Set-Content -Path $gptIni -Encoding ASCII
-
-# Mirror version into AD versionNumber (best-effort)
 try {
   Set-ADObject -Identity $gpoDn -Replace @{ versionNumber = [int]$newVer }
 } catch {
   Write-Warning ("Could not set AD versionNumber (clients still use GPT.INI): " + $_.Exception.Message)
 }
 
-Write-Host ("Startup registered: " + $cmdPath)
 Write-Host ("GPT.INI Version=" + $newVer + " (computer=" + $compVer + " user=" + $userVer + ")")
-Write-Host 'VERIFY on client after link+membership: gpresult /r  and  Event Log → GroupPolicy'
-Write-Host 'Tokens must NEVER be placed in this SYSVOL startup script — use UNC ACL token-drop auto-enrollment.'
+Write-Host 'INSTALL_TRIGGER=scheduled_task_2min_system'
+Write-Host 'STARTUP_SCRIPT=removed'
+Write-Host 'Tokens must NEVER be placed in SYSVOL — the task calls the API install-authorization gate.'

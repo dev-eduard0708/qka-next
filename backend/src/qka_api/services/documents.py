@@ -11,6 +11,7 @@ from qka_shared.allowlist import deny_message, evaluate_user, load_active_user
 from qka_shared.config import Settings
 from qka_shared.models import (
     AllowedEmail,
+    DesktopDevice,
     ExternalIdentity,
     QkaUser,
     SourceGrant,
@@ -24,7 +25,9 @@ from qka_shared.source_access import Capability, authorize_document as source_au
 from qka_shared.source_access import FILE_TYPE_EXTENSIONS
 from qka_shared.source_access import GrantStatus, PathMode, ScopeStatus
 from qka_shared.source_access import acl_needles as _acl_needles  # noqa: F401 — tests import this name
+from qka_shared.source_access import authorize_desktop_source as source_authorize_desktop
 from qka_shared.source_access import classify_extension
+from qka_shared.source_access import evaluate_desktop_source_access
 from qka_shared.source_access import grant_has_capability
 from qka_shared.source_access import is_authorized_managed_scope
 from qka_shared.source_access import normalize_prefix as _prefix_normalized
@@ -191,6 +194,41 @@ def authorize_document(
         capability=capability,
         require_extracted=require_extracted,
     )
+
+
+def authorize_desktop_device_documents(
+    session: Session,
+    user: QkaUser | None,
+    device_id: uuid.UUID,
+    *,
+    capability: str = Capability.VIEW,
+) -> bool:
+    """Server-side gate for search/fetch/preview/chat over a workstation source.
+
+    Default deny when ownership is unclear, login is disabled, or the caller is not the owner.
+    Never treats indexing alone as an access grant.
+    """
+    device = session.get(DesktopDevice, device_id)
+    return source_authorize_desktop(session, user, device, capability=capability)
+
+
+def diagnose_desktop_device_access(
+    session: Session,
+    user: QkaUser | None,
+    device_id: uuid.UUID,
+    *,
+    capability: str = Capability.VIEW,
+) -> dict:
+    device = session.get(DesktopDevice, device_id)
+    decision = evaluate_desktop_source_access(session, user, device, capability=capability)
+    return {
+        "allowed": decision.allowed,
+        "reason": decision.denial_reason,
+        "effective": decision.effective,
+        "qkaGrant": decision.qka_grant,
+        "deviceId": str(device_id),
+        "ownerUserId": str(device.qka_user_id) if device and device.qka_user_id else None,
+    }
 
 
 def _content_hit_inventory_ids(session: Session, query: str, *, limit: int) -> set[uuid.UUID]:

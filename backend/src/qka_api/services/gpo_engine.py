@@ -293,7 +293,8 @@ def probe_gpo_engine(
     elif ad["groupMembers"] == 0:
         hard.append(
             f"AD group '{target_group}' exists but has zero computer members — "
-            "add only the approved pilot computer via Add-QkaPilotComputer.ps1 -IConfirmAddPilotComputer."
+            "add pilot computers from Workstations (Add to Deployment Pilot) or "
+            "Add-QkaPilotComputer.ps1 -IConfirmAddPilotComputer."
         )
     if not ad["gpoExists"]:
         hard.append(f"Dedicated GPO '{gpo_name}' was not found in AD.")

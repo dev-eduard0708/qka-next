@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 from qka_desktop_agent.index_store import FileRecord, LocalIndex, file_sha256
@@ -14,6 +14,66 @@ from qka_desktop_agent.readonly import is_excluded_path, resolve_safe, verify_fo
 log = logging.getLogger("qka.agent.scanner")
 
 SUPPORTED = {"pdf", "docx", "xlsx", "txt", "csv"}
+FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+
+def _is_reparse_point(path: Path) -> bool:
+    """Skip junctions/symlinks (e.g. Documents\\My Music) — do not follow outside approved trees."""
+    if os.name != "nt":
+        try:
+            return path.is_symlink()
+        except OSError:
+            return True
+    try:
+        import ctypes
+
+        attrs = ctypes.windll.kernel32.GetFileAttributesW(str(path))
+        if attrs == -1:
+            return path.is_symlink()
+        return bool(attrs & FILE_ATTRIBUTE_REPARSE_POINT)
+    except Exception:
+        try:
+            return path.is_symlink()
+        except OSError:
+            return True
+
+
+def _iter_files(root: Path, *, include_subfolders: bool) -> Iterator[Path]:
+    """Walk approved folders without following reparse points (Path.glob follows junctions)."""
+    if include_subfolders:
+        stack = [root]
+        while stack:
+            current = stack.pop()
+            try:
+                entries = list(current.iterdir())
+            except PermissionError:
+                log.info("skip_inaccessible_dir path=%s", current)
+                continue
+            except OSError as exc:
+                log.info("skip_dir_error path=%s err=%s", current, exc)
+                continue
+            for child in entries:
+                try:
+                    if _is_reparse_point(child):
+                        continue
+                    if child.is_dir():
+                        stack.append(child)
+                    elif child.is_file():
+                        yield child
+                except OSError:
+                    continue
+        return
+    try:
+        for child in root.iterdir():
+            try:
+                if _is_reparse_point(child):
+                    continue
+                if child.is_file():
+                    yield child
+            except OSError:
+                continue
+    except OSError as exc:
+        log.info("skip_root_list path=%s err=%s", root, exc)
 
 
 def _busy() -> bool:
@@ -73,8 +133,7 @@ def scan_once(
             verified_all = False
             details.append(f"Could not resolve {raw}")
             continue
-        pattern = "**/*" if include_sub else "*"
-        for path in root.glob(pattern):
+        for path in _iter_files(root, include_subfolders=include_sub):
             if should_pause and should_pause():
                 counts = index.counts()
                 counts.update(
@@ -91,8 +150,6 @@ def scan_once(
                 time.sleep(2.0)
                 if should_pause and should_pause():
                     break
-            if not path.is_file():
-                continue
             if is_excluded_path(path):
                 continue
             resolved = resolve_safe(path)

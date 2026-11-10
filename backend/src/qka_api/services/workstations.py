@@ -108,7 +108,7 @@ def _agent_fields(device: DesktopDevice | None) -> dict[str, Any]:
     if device is None:
         return {
             "agentStatus": "not_registered",
-            "agentStatusLabel": "Not Registered / Unknown",
+            "agentStatusLabel": "Not registered",
             "agentVersion": "",
             "lastHeartbeatAt": None,
             "indexingStatus": "unknown",
@@ -132,7 +132,7 @@ def _agent_fields(device: DesktopDevice | None) -> dict[str, Any]:
     status = "connected" if online else "registered_offline"
     return {
         "agentStatus": status,
-        "agentStatusLabel": "Connected" if online else "Registered (offline)",
+        "agentStatusLabel": "Online" if online else "Agent Registered",
         "agentVersion": device.agent_version or "",
         "lastHeartbeatAt": device.last_heartbeat_at.isoformat() if device.last_heartbeat_at else None,
         "indexingStatus": _index_label(device.indexing_state),
@@ -197,12 +197,28 @@ def _deploy_agent_fields(
     )
     # Employee assignment is post-install; deploy needs SID + presence + pilot-group membership.
     can_select = bool(ws.is_present and ws.account_enabled and has_sid and in_pilot)
-    enabled = bool(prereq["deployEnabled"] and can_select and device is None)
-    status = "ready" if enabled else "blocked"
+    job_status = str((job_dto or {}).get("status") or "")
+    display_status = str((job_dto or {}).get("displayStatus") or "")
+    # Active authorization jobs block Deploy; cancelled/failed are history and allow Ready again.
+    active_job = display_status in {"pending", "in_progress"} or job_status in {
+        "requested",
+        "approved",
+        "scheduled",
+        "waiting_for_computer",
+        "installing",
+    }
+    enabled = bool(prereq["deployEnabled"] and can_select and device is None and not active_job)
     if device is not None:
         status = "agent_registered"
-    elif job_dto is not None:
-        status = job_dto.get("status") or "requested"
+    elif active_job:
+        status = display_status or job_status
+    elif enabled:
+        # Prefer readiness over a prior cancelled/failed job label.
+        status = "ready"
+    elif job_status in {"failed", "cancelled"}:
+        status = job_status
+    else:
+        status = "blocked"
     note = ""
     if not has_sid:
         note = "AD objectSid is required for machine-identity enrollment."
@@ -210,25 +226,67 @@ def _deploy_agent_fields(
         note = "Agent already registered for this workstation."
     elif not in_pilot:
         note = (
-            f"Not a member of '{target_group}'. Only the approved pilot computer "
-            f"(WSIT02) may be deployed — add it with Add-QkaPilotComputer.ps1."
+            f"Not a member of '{target_group}'. Use Add to Deployment Pilot in this page "
+            f"(Super Admin), then Deploy Agent after readiness checks pass."
         )
     elif prereq["blockers"]:
         note = "; ".join(prereq["blockers"])
     else:
         note = prereq.get("note") or ""
+    if in_pilot and enabled:
+        membership_status = "ready_to_deploy"
+    elif in_pilot and device is not None:
+        membership_status = "in_pilot_agent_installed"
+    elif in_pilot:
+        membership_status = "in_pilot"
+    else:
+        membership_status = "not_in_pilot"
+    dist_mode = str(prereq.get("taskDistributionMode") or "pilot_group")
+    no_reboot = bool(prereq.get("noRebootCentralDeployReady"))
+    if device is not None:
+        task_readiness = "deployed_or_installed"
+    elif not in_pilot:
+        task_readiness = "not_in_pilot"
+    elif no_reboot or dist_mode == "ou_computers":
+        task_readiness = "task_available"
+    elif active_job and display_status == "in_progress":
+        task_readiness = "gpo_pending"
+    elif in_pilot:
+        task_readiness = "gpo_pending"
+    else:
+        task_readiness = "unknown"
+    gpo_note = ""
+    if in_pilot and device is None:
+        if task_readiness == "task_available":
+            gpo_note = (
+                "Task Available (OU/Domain Computers distribution). Install still waits for "
+                "Super Admin Deploy + SID token authorization — QKA will not reboot."
+            )
+        else:
+            gpo_note = (
+                "GPO Pending: pilot-group GpoApply may not deliver QKA-Agent-Install until the "
+                "computer security context refreshes. QKA will not reboot. Pending jobs time out "
+                "instead of staying Pending forever. Approve Enable-QkaNoRebootTaskDistribution.ps1 "
+                "for fully centralized no-reboot task distribution."
+            )
     return {
         "enabled": enabled,
         "status": status,
+        "displayStatus": display_status or status,
         "note": note,
         "pilotGroupMember": in_pilot,
         "pilotGroup": target_group,
+        "membershipStatus": membership_status,
+        "taskReadiness": task_readiness,
+        "taskDistributionMode": dist_mode,
+        "gpoReadinessNote": gpo_note,
         "prerequisites": {
             "httpsConfigured": bool(prereq.get("httpsConfigured")),
             "gpoEngineAvailable": bool(prereq.get("gpoEngineAvailable")),
             "msiPresent": bool(prereq.get("msiPresent")),
             "tlsTrust": str(prereq.get("tlsTrust") or "blocked"),
             "machineIdentityEnrollmentReady": bool(prereq.get("machineIdentityEnrollmentReady")),
+            "noRebootCentralDeployReady": no_reboot,
         },
     }
 
@@ -258,7 +316,50 @@ def workstation_dto(
         ws.desktop_device_id = device.id
     agent = _agent_fields(device)
     job = deploy_svc.latest_job_for_workstation(session, ws.id)
-    job_payload = deploy_svc.job_dto(job, ws) if job is not None else None
+    has_heartbeat = bool(agent.get("lastHeartbeatAt"))
+    job_payload = (
+        deploy_svc.job_dto(
+            job,
+            ws,
+            agent_online=bool(agent.get("online")),
+            agent_status=str(agent.get("agentStatus") or "not_registered"),
+            has_heartbeat=has_heartbeat,
+        )
+        if job is not None
+        else None
+    )
+    if job_payload is None and agent.get("agentStatus") in {"connected", "registered_offline"}:
+        # No deployment job — still expose Online/Offline/Installed from heartbeat evidence.
+        display = deploy_svc.compute_display_status(
+            job=None,
+            agent_online=bool(agent.get("online")),
+            agent_status=str(agent.get("agentStatus") or "not_registered"),
+            has_heartbeat=has_heartbeat,
+        )
+        job_payload = {
+            "id": None,
+            "status": display,
+            "statusCode": None,
+            "displayStatus": display,
+            "attemptCount": 0,
+            "lastError": "",
+            "lastResult": "",
+            "msiVersion": "",
+            "msiExitCode": None,
+            "restartRequired": False,
+            "engine": "",
+            "enrollmentMode": "",
+            "gpoTargetGroup": "",
+            "desktopDeviceId": agent.get("desktopDeviceId"),
+            "createdAt": None,
+            "updatedAt": None,
+            "approvedAt": None,
+            "scheduledAt": None,
+            "installStartedAt": None,
+            "msiCompletedAt": None,
+            "installedAt": None,
+            "cancelledAt": None,
+        }
     return {
         "id": str(ws.id),
         "connectionId": str(ws.connection_id),
@@ -715,6 +816,8 @@ def list_workstations(
     ``filter_ou_dns`` is a *display* filter only — it never mutates sync OU selection.
     """
     settings = settings or get_settings()
+    # Persist Timed Out transitions before DTO mapping so UI/polling see durable state.
+    deploy_svc.reconcile_stale_deployment_jobs(session, settings)
     page = max(1, int(page))
     page_size = max(1, min(int(page_size), 200))
     active_sync_ous = _saved_sync_ou_dns(session)
@@ -914,6 +1017,21 @@ def associate_employee(
             raise WorkstationValidationError("Assign an AD-linked employee only.")
     ws.assigned_qka_user_id = qka_user_id
     ws.updated_at = _utc_now()
+    # Source ownership follows workstation assignment; preserve device folders/index history.
+    device: DesktopDevice | None = None
+    if ws.desktop_device_id:
+        device = session.get(DesktopDevice, ws.desktop_device_id)
+    if device is None:
+        device = _match_desktop_device(session, ws)
+    if device is not None and device.status != DEVICE_REVOKED:
+        device.qka_user_id = qka_user_id
+        device.updated_at = _utc_now()
+        if qka_user_id is None:
+            device.read_only_detail = (
+                "Employee unassigned — indexed content restricted; approved folders preserved."
+            )
+        if ws.desktop_device_id != device.id:
+            ws.desktop_device_id = device.id
     session.flush()
     return workstation_dto(session, ws)
 

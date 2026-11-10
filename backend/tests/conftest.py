@@ -86,6 +86,12 @@ def seed_db():
     os.environ.pop("QKA_LEGACY_PILOT_USER_ID", None)
     os.environ.pop("QKA_ACL_ALLOW_PRINCIPAL_CONTAINS", None)
     os.environ.pop("QKA_SMB_ALLOWED_HOSTS", None)
+    # Deploy-host .env must not enable live HTTPS/token-drop during unit tests.
+    # Empty strings override pydantic env_file values; pop alone is not enough.
+    os.environ["QKA_AGENT_PUBLIC_BASE_URL"] = ""
+    os.environ["QKA_AGENT_TOKEN_DROP_UNC"] = ""
+    os.environ["QKA_AGENT_TOKEN_PROVISIONING"] = ""
+    os.environ["QKA_AGENT_MSI_UNC"] = ""
     get_settings.cache_clear()
 
     settings = get_settings()
@@ -371,6 +377,30 @@ def seed_db():
             )
         )
         session.execute(text("ALTER TABLE qka_next_agent_deployment_job ALTER COLUMN assigned_qka_user_id DROP NOT NULL"))
+        session.execute(
+            text(
+                "ALTER TABLE qka_next_agent_deployment_job "
+                "ADD COLUMN IF NOT EXISTS install_started_at TIMESTAMPTZ NULL"
+            )
+        )
+        session.execute(
+            text(
+                "ALTER TABLE qka_next_agent_deployment_job "
+                "ADD COLUMN IF NOT EXISTS msi_completed_at TIMESTAMPTZ NULL"
+            )
+        )
+        session.execute(
+            text(
+                "ALTER TABLE qka_next_agent_deployment_job "
+                "ADD COLUMN IF NOT EXISTS msi_exit_code INTEGER NULL"
+            )
+        )
+        session.execute(
+            text(
+                "ALTER TABLE qka_next_agent_deployment_job "
+                "ADD COLUMN IF NOT EXISTS last_result VARCHAR(256) NOT NULL DEFAULT ''"
+            )
+        )
         session.execute(text("ALTER TABLE qka_next_machine_enrollment_token ALTER COLUMN qka_user_id DROP NOT NULL"))
         session.execute(
             text(
@@ -395,12 +425,93 @@ def seed_db():
         session.execute(
             text(
                 """
+                CREATE TABLE IF NOT EXISTS qka_next_desktop_agent_upgrade_job (
+                    id UUID PRIMARY KEY,
+                    device_id UUID NOT NULL,
+                    workstation_id UUID NULL,
+                    requested_by_user_id UUID NOT NULL,
+                    status INTEGER NOT NULL DEFAULT 0,
+                    from_version VARCHAR(64) NOT NULL DEFAULT '',
+                    target_version VARCHAR(64) NOT NULL DEFAULT '',
+                    msi_version VARCHAR(64) NOT NULL DEFAULT '',
+                    last_error VARCHAR(2000) NOT NULL DEFAULT '',
+                    msi_exit_code INTEGER NULL,
+                    last_result VARCHAR(256) NOT NULL DEFAULT '',
+                    token_hash VARCHAR(128) NOT NULL DEFAULT '',
+                    proof_hash VARCHAR(128) NOT NULL DEFAULT '',
+                    ad_computer_sid VARCHAR(256) NOT NULL DEFAULT '',
+                    created_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL,
+                    scheduled_at TIMESTAMPTZ NULL,
+                    upgrading_at TIMESTAMPTZ NULL,
+                    verifying_at TIMESTAMPTZ NULL,
+                    completed_at TIMESTAMPTZ NULL,
+                    failed_at TIMESTAMPTZ NULL,
+                    cancelled_at TIMESTAMPTZ NULL,
+                    expires_at TIMESTAMPTZ NULL
+                )
+                """
+            )
+        )
+        session.execute(
+            text(
+                """
                 CREATE TABLE IF NOT EXISTS qka_next_desktop_device_folder (
                     id UUID PRIMARY KEY,
                     device_id UUID NOT NULL,
                     path_normalized VARCHAR(2048) NOT NULL,
                     include_subfolders BOOLEAN NOT NULL DEFAULT TRUE,
                     enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+        )
+        session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS qka_next_desktop_device_inventory (
+                    device_id UUID PRIMARY KEY,
+                    workstation_id UUID NULL,
+                    hostname VARCHAR(256) NOT NULL DEFAULT '',
+                    domain_name VARCHAR(256) NOT NULL DEFAULT '',
+                    os_edition VARCHAR(256) NOT NULL DEFAULT '',
+                    os_version VARCHAR(128) NOT NULL DEFAULT '',
+                    os_build VARCHAR(64) NOT NULL DEFAULT '',
+                    manufacturer VARCHAR(256) NOT NULL DEFAULT '',
+                    model VARCHAR(256) NOT NULL DEFAULT '',
+                    serial_number VARCHAR(256) NOT NULL DEFAULT '',
+                    cpu_model VARCHAR(512) NOT NULL DEFAULT '',
+                    cpu_physical_cores INTEGER NOT NULL DEFAULT 0,
+                    cpu_logical_processors INTEGER NOT NULL DEFAULT 0,
+                    ram_bytes BIGINT NOT NULL DEFAULT 0,
+                    agent_version VARCHAR(64) NOT NULL DEFAULT '',
+                    disks_json TEXT NOT NULL DEFAULT '[]',
+                    volumes_json TEXT NOT NULL DEFAULT '[]',
+                    known_folders_json TEXT NOT NULL DEFAULT '[]',
+                    hardware_hash VARCHAR(128) NOT NULL DEFAULT '',
+                    volumes_hash VARCHAR(128) NOT NULL DEFAULT '',
+                    hardware_synced_at TIMESTAMPTZ NULL,
+                    volumes_synced_at TIMESTAMPTZ NULL,
+                    refresh_requested_at TIMESTAMPTZ NULL,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL
+                )
+                """
+            )
+        )
+        session.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS qka_next_desktop_folder_cache (
+                    id UUID PRIMARY KEY,
+                    device_id UUID NOT NULL,
+                    parent_path VARCHAR(2048) NOT NULL DEFAULT '',
+                    nodes_json TEXT NOT NULL DEFAULT '[]',
+                    error VARCHAR(2000) NOT NULL DEFAULT '',
+                    content_hash VARCHAR(128) NOT NULL DEFAULT '',
+                    synced_at TIMESTAMPTZ NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL,
                     updated_at TIMESTAMPTZ NOT NULL
                 )
@@ -817,6 +928,9 @@ def seed_db():
         session.execute(text("DELETE FROM google_workspace_account"))
         session.execute(text("DELETE FROM external_identity"))
         session.execute(text("DELETE FROM qka_next_desktop_folder_browse"))
+        session.execute(text("DELETE FROM qka_next_desktop_folder_cache"))
+        session.execute(text("DELETE FROM qka_next_desktop_device_inventory"))
+        session.execute(text("DELETE FROM qka_next_desktop_agent_upgrade_job"))
         session.execute(text("DELETE FROM qka_next_machine_enrollment_token"))
         session.execute(text("DELETE FROM qka_next_agent_deployment_job"))
         session.execute(text("DELETE FROM qka_next_desktop_device_folder"))

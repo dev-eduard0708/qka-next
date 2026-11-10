@@ -18,7 +18,8 @@ from qka_desktop_agent.config import (
     save_credentials,
 )
 from qka_desktop_agent.index_store import LocalIndex
-from qka_desktop_agent.folder_browser import browse_children, nodes_to_json, resolve_known_folders
+from qka_desktop_agent.folder_browser import browse_children, nodes_to_json, resolve_navigation_roots
+from qka_desktop_agent.inventory import collect_inventory
 from qka_desktop_agent.readonly import run_disposable_fixture_negative_write_test
 from qka_desktop_agent.scanner import scan_once
 from qka_desktop_agent.win_identity import local_computer_sid, machine_enrollment_proof
@@ -93,6 +94,17 @@ def ensure_enrolled(client: AgentClient, cfg) -> None:
     save_credentials(cfg, result["deviceId"], result["deviceKey"])
     client.set_credentials(cfg.device_id, cfg.device_key)
     log.info("enrolled device_id=%s", cfg.device_id)
+    try:
+        inv = collect_inventory(
+            include_hardware=True,
+            include_volumes=True,
+            employee_sid="",
+            agent_version=__version__,
+        )
+        client.inventory(inv)
+        log.info("inventory_synced_after_enroll")
+    except Exception as inv_exc:  # noqa: BLE001
+        log.warning("inventory_after_enroll_failed err=%s", inv_exc)
 
 
 def run_loop(stop_flag: list[bool] | None = None) -> int:
@@ -110,8 +122,13 @@ def run_loop(stop_flag: list[bool] | None = None) -> int:
         return 2
 
     client = AgentClient(cfg.server_base_url, verify_tls=cfg.verify_tls)
+    if cfg.device_id and cfg.device_key:
+        client.set_credentials(cfg.device_id, cfg.device_key)
     enrolled = bool(cfg.device_id and cfg.device_key)
-    index: LocalIndex | None = None
+    # Already-enrolled agents must open the local index before the scan loop.
+    index: LocalIndex | None = LocalIndex(cfg.index_path) if enrolled else None
+    if enrolled:
+        log.info("enrollment_ready — entering scan loop (existing credentials)")
     paused = False
     enrollment_failures = 0
 
@@ -174,7 +191,7 @@ def run_loop(stop_flag: list[bool] | None = None) -> int:
                             timeout_seconds=float(browse.get("timeoutSeconds") or 8),
                         )
                     else:
-                        nodes, err = resolve_known_folders(employee_sid)
+                        nodes, err = resolve_navigation_roots(employee_sid)
                     client.folder_browse_result(browse_id, nodes=nodes_to_json(nodes), error=err)
                 except Exception as browse_exc:  # noqa: BLE001
                     log.exception("folder_browse_failed id=%s", browse_id)
@@ -182,6 +199,24 @@ def run_loop(stop_flag: list[bool] | None = None) -> int:
                         client.folder_browse_result(browse_id, nodes=[], error=str(browse_exc)[:500])
                     except Exception:  # noqa: BLE001
                         pass
+
+            # Inventory sync is best-effort and must not block heartbeat/indexing.
+            inv_policy = policy.get("inventory") or {}
+            if inv_policy.get("hardwareDue") or inv_policy.get("volumesDue") or inv_policy.get("forceRefresh"):
+                try:
+                    payload = collect_inventory(
+                        include_hardware=bool(
+                            inv_policy.get("hardwareDue") or inv_policy.get("forceRefresh")
+                        ),
+                        include_volumes=bool(
+                            inv_policy.get("volumesDue") or inv_policy.get("forceRefresh")
+                        ),
+                        employee_sid=str(policy.get("employeeAdSid") or ""),
+                        agent_version=__version__,
+                    )
+                    client.inventory(payload)
+                except Exception as inv_exc:  # noqa: BLE001
+                    log.warning("inventory_sync_failed err=%s", inv_exc)
 
             folders = policy.get("approvedFolders") or []
             if paused:

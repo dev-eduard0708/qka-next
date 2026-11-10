@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 param(
-    [string]$PayloadDir = "C:\QehcAI\QKA-Next\agent\dist\qka-desktop-agent",
+    [string]$PayloadDir = "",
     [string]$OutDir = "C:\QehcAI\QKA-Next\agent\dist",
     [string]$WixBinDir = ""
 )
@@ -24,27 +24,51 @@ function Resolve-WixTool([string]$Name) {
     return $null
 }
 
+if (-not $PayloadDir) {
+    $candidate = Join-Path $OutDir "qka-desktop-agent\qka-desktop-agent"
+    if (Test-Path (Join-Path $candidate "qka-desktop-agent.exe")) {
+        $PayloadDir = $candidate
+    } else {
+        $PayloadDir = Join-Path $OutDir "qka-desktop-agent"
+    }
+}
+
 $candle = Resolve-WixTool "candle.exe"
 $light = Resolve-WixTool "light.exe"
-if (-not $candle -or -not $light) {
+$heat = Resolve-WixTool "heat.exe"
+if (-not $candle -or -not $light -or -not $heat) {
     Write-Host "WIX_MISSING=true"
-    Write-Host "BLOCKER=WiX Toolset (candle/light) is not installed on this build host."
-    Write-Host "FALLBACK=Use Install-QkaAgent.ps1 for pilot silent install until WiX is available."
-    Write-Host "GPO_READY=wxs source prepared; MSI not produced in this environment."
+    Write-Host "BLOCKER=WiX Toolset (candle/light/heat) is not installed on this build host."
     exit 2
 }
-if (-not (Test-Path (Join-Path $PayloadDir "qka-desktop-agent.exe"))) {
-    throw "Missing payload exe. Run build-exe.ps1 first."
-}
+$exe = Join-Path $PayloadDir "qka-desktop-agent.exe"
+$internal = Join-Path $PayloadDir "_internal"
+if (-not (Test-Path $exe)) { throw "Missing payload exe: $exe (run build-exe.ps1 --onedir first)" }
+if (-not (Test-Path $internal)) { throw "Missing onedir _internal folder: $internal (onefile MSI is not supported)" }
+
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+$harvested = Join-Path $OutDir "AgentInternal.wxs"
+$harvestObj = Join-Path $OutDir "AgentInternal.wixobj"
 $wixobj = Join-Path $OutDir "QKA-Agent.wixobj"
-& $candle -nologo "-dPayload=$PayloadDir" -o $wixobj $wxs
-if ($LASTEXITCODE -ne 0) { throw "candle failed" }
+
+# Harvest PyInstaller _internal dependencies into INTERNALFOLDER.
+& $heat dir $internal -nologo -cg AgentInternalComponents -gg -sfrag -srd -scom -sreg `
+    -dr INTERNALFOLDER -var var.Internal -out $harvested
+if ($LASTEXITCODE -ne 0) { throw "heat failed" }
+
+& $candle -nologo "-dPayload=$PayloadDir" "-dInternal=$internal" -o $wixobj $wxs
+if ($LASTEXITCODE -ne 0) { throw "candle (product) failed" }
+& $candle -nologo "-dPayload=$PayloadDir" "-dInternal=$internal" -o $harvestObj $harvested
+if ($LASTEXITCODE -ne 0) { throw "candle (harvest) failed" }
+
 $msi = Join-Path $OutDir "QKA-Agent.msi"
-& $light -nologo -o $msi $wixobj
+& $light -nologo -o $msi $wixobj $harvestObj
 if ($LASTEXITCODE -ne 0) { throw "light failed" }
+
 Write-Host "MSI_OUT=$msi"
-Write-Host "MSI_VERSION=0.1.1.0"
+Write-Host "MSI_VERSION=0.1.3.0"
+Write-Host "MSI_LAYOUT=onedir"
+Write-Host "MSI_SHA256=$((Get-FileHash $msi -Algorithm SHA256).Hash)"
 Write-Host "SERVICE_ACCOUNT=NT AUTHORITY\NETWORK SERVICE"
 Write-Host "SILENT_INSTALL=msiexec /i `"$msi`" /qn QKASERVERURL=https://qka-agent.qehc.edu.sa"
 Write-Host "SILENT_UNINSTALL=msiexec /x `"$msi`" /qn"

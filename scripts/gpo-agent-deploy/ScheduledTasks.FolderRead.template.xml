@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScheduledTasks clsid="{CC63F200-7309-4ba0-B154-A71CD118DBCC}" disabled="0">
+  <TaskV2 clsid="{D8896631-B747-47a7-84A6-C155337F3BC8}" name="QKA-Agent-Folder-Read" image="3" changed="@@CHANGED@@" uid="{@@UID@@}" bypassErrors="0" userContext="0" removePolicy="0" desc="Grant QkaDesktopAgent service SID Read/List on approved profile folders (@@COMPUTER@@).">
+    <Properties action="R" name="QKA-Agent-Folder-Read" runAs="NT AUTHORITY\SYSTEM" logonType="S4U">
+      <Task version="1.2">
+        <RegistrationInfo>
+          <Author>QKA</Author>
+          <Description>Idempotent ReadAndExecute grant for NT SERVICE\QkaDesktopAgent on approved folders only. No write/delete.</Description>
+        </RegistrationInfo>
+        <Triggers>
+          <BootTrigger>
+            <Enabled>true</Enabled>
+          </BootTrigger>
+          <TimeTrigger>
+            <Repetition>
+              <Interval>PT1H</Interval>
+              <StopAtDurationEnd>false</StopAtDurationEnd>
+            </Repetition>
+            <StartBoundary>2026-01-01T00:05:00</StartBoundary>
+            <Enabled>true</Enabled>
+          </TimeTrigger>
+        </Triggers>
+        <Principals>
+          <Principal id="Author">
+            <UserId>S-1-5-18</UserId>
+            <RunLevel>HighestAvailable</RunLevel>
+          </Principal>
+        </Principals>
+        <Settings>
+          <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+          <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+          <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+          <AllowHardTerminate>true</AllowHardTerminate>
+          <StartWhenAvailable>true</StartWhenAvailable>
+          <RunOnlyIfNetworkAvailable>true</RunOnlyIfNetworkAvailable>
+          <IdleSettings>
+            <StopOnIdleEnd>false</StopOnIdleEnd>
+            <RestartOnIdle>false</RestartOnIdle>
+          </IdleSettings>
+          <AllowStartOnDemand>true</AllowStartOnDemand>
+          <Enabled>true</Enabled>
+          <Hidden>false</Hidden>
+          <RunOnlyIfIdle>false</RunOnlyIfIdle>
+          <WakeToRun>false</WakeToRun>
+          <ExecutionTimeLimit>PT15M</ExecutionTimeLimit>
+          <Priority>7</Priority>
+        </Settings>
+        <Actions Context="Author">
+          <Exec>
+            <Command>powershell.exe</Command>
+            <Arguments>-NoProfile -ExecutionPolicy Bypass -File "@@SCRIPT_UNC@@" -ProfileRoot "@@PROFILE_ROOT@@"</Arguments>
+          </Exec>
+        </Actions>
+      </Task>
+    </Properties>
+    <Filters>
+      <FilterComputer bool="AND" not="0" name="@@COMPUTER@@" primaryDNS="@@COMPUTER_DNS@@" type="NETBIOS" />
+    </Filters>
+  </TaskV2>
+</ScheduledTasks>

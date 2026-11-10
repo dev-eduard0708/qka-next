@@ -29,8 +29,8 @@ def test_enrollment_requires_ad_linked_user(client):
     assert "AD-linked" in denied.json()["detail"]
 
 
-def test_install_register_assign_before_indexing(client):
-    """Install → Register Device → Assign User → Approve Folders → Start Indexing."""
+def test_install_register_index_then_assign_ownership(client):
+    """Install → Register → Approve/Index without employee → Assign ownership later."""
     headers = _admin(client)
     issued = client.post(
         "/api/v1/admin/desktop-devices/enrollment-codes",
@@ -74,49 +74,27 @@ def test_install_register_assign_before_indexing(client):
     assert policy.json()["command"] == "pause"
     assert policy.json()["indexingEnabled"] is False
     assert policy.json()["approvedFolders"] == []
-    assert policy.json()["pendingFolderBrowse"] == []
+    assert policy.json()["sourceAccessRestricted"] is True
 
     listed = client.get("/api/v1/admin/desktop-devices", headers=headers)
     row = next(i for i in listed.json()["items"] if i["id"] == device_id)
     assert row["employeeAssigned"] is False
     assert row["employeeName"] == "Unassigned"
-    assert row["indexingState"] == "disabled"
-    assert row["folderBrowseAvailable"] is False
+    assert row["sourceAccessRestricted"] is True
+    assert row["folderBrowseAvailable"] is True
+    # Computer column must be the workstation hostname, never domain NetBIOS.
+    assert row["workstationHostname"] == "UNASSIGNED-PC"
+    assert row["computerName"] == "UNASSIGNED-PC"
+    assert row["domainJoinedName"] == "QEHC"
+    assert row["computerName"].upper() != "QEHC"
 
-    # Folders / start blocked while unassigned
-    folders_denied = client.put(
-        f"/api/v1/admin/desktop-devices/{device_id}/folders",
-        headers=headers,
-        json={"folders": [{"path": r"C:\Users\eduard\Documents"}]},
-    )
-    assert folders_denied.status_code == 400
+    # Start without folders still blocked; folders/index allowed while unassigned.
     start_denied = client.post(
         f"/api/v1/admin/desktop-devices/{device_id}/command",
         headers=headers,
         json={"command": "start"},
     )
     assert start_denied.status_code == 400
-    browse_denied = client.post(
-        f"/api/v1/admin/desktop-devices/{device_id}/folder-browse",
-        headers=headers,
-        json={"parentPath": ""},
-    )
-    assert browse_denied.status_code == 400
-
-    assigned = client.post(
-        f"/api/v1/admin/desktop-devices/{device_id}/assign-employee",
-        headers=headers,
-        json={"qkaUserId": str(ALLOWED_USER)},
-    )
-    assert assigned.status_code == 200, assigned.text
-    assert assigned.json()["employeeAssigned"] is True
-    assert assigned.json()["qkaUserId"] == str(ALLOWED_USER)
-    assert assigned.json()["employeeAdSid"]
-
-    policy2 = client.get("/api/v1/agent/desktop/policy", headers=auth)
-    assert policy2.json()["employeeAssigned"] is True
-    # Still no folders — indexing not auto-started
-    assert policy2.json()["indexingEnabled"] is False
 
     folders = client.put(
         f"/api/v1/admin/desktop-devices/{device_id}/folders",
@@ -132,6 +110,25 @@ def test_install_register_assign_before_indexing(client):
     )
     assert started.status_code == 200
     assert started.json()["indexingState"] == "running"
+    assert started.json()["sourceAccessRestricted"] is True
+
+    assigned = client.post(
+        f"/api/v1/admin/desktop-devices/{device_id}/assign-employee",
+        headers=headers,
+        json={"qkaUserId": str(ALLOWED_USER)},
+    )
+    assert assigned.status_code == 200, assigned.text
+    assert assigned.json()["employeeAssigned"] is True
+    assert assigned.json()["qkaUserId"] == str(ALLOWED_USER)
+    assert assigned.json()["employeeAdSid"]
+    # Ownership does not wipe approved folders / index command state.
+    assert assigned.json()["folders"]
+    assert assigned.json()["indexingState"] == "running"
+
+    policy2 = client.get("/api/v1/agent/desktop/policy", headers=auth)
+    assert policy2.json()["employeeAssigned"] is True
+    assert policy2.json()["sourceAccessRestricted"] is False
+    assert policy2.json()["indexingEnabled"] is True
 
 
 def test_enroll_heartbeat_policy_progress_and_revoke(client):
@@ -260,6 +257,90 @@ def test_enroll_heartbeat_policy_progress_and_revoke(client):
 def test_non_admin_cannot_manage_devices(client):
     listed = client.get("/api/v1/admin/desktop-devices", cookies=auth_cookies(ALLOWED_USER))
     assert listed.status_code == 403
+
+
+def test_device_dto_prefers_ad_workstation_hostname(client):
+    """Computer column uses verified AD workstation name; never domain NetBIOS."""
+    from datetime import datetime, timezone
+
+    from qka_api.services.desktop_agent import DEVICE_ACTIVE, INDEX_IDLE, device_dto
+    from qka_shared.models import AdWorkstation, DesktopDevice
+
+    now = datetime.now(timezone.utc)
+    ws_id = uuid.uuid4()
+    device_id = uuid.uuid4()
+    with client.app.state.session_factory() as session:
+        session.add(
+            AdWorkstation(
+                id=ws_id,
+                connection_id=uuid.uuid4(),
+                object_guid=str(uuid.uuid4()),
+                object_sid="S-1-5-21-TEST-WSIT04",
+                computer_name="WSIT04",
+                dns_hostname="WSIT04.qehealth.local",
+                is_present=True,
+                created_at=now,
+                updated_at=now,
+                last_seen_at=now,
+            )
+        )
+        session.add(
+            DesktopDevice(
+                id=device_id,
+                qka_user_id=None,
+                device_key_hash="hash",
+                computer_name="QEHC",
+                device_fingerprint="wsit04-fp",
+                workstation_id=ws_id,
+                domain_joined_name="QEHC",
+                agent_version="0.1.0",
+                status=DEVICE_ACTIVE,
+                indexing_state=INDEX_IDLE,
+                enrolled_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.commit()
+        device = session.get(DesktopDevice, device_id)
+        dto = device_dto(session, device)
+
+    assert dto["workstationHostname"] == "WSIT04"
+    assert dto["computerName"] == "WSIT04"
+    assert dto["domainJoinedName"] == "QEHC"
+    assert dto["computerName"].upper() != "QEHC"
+
+
+def test_device_dto_blank_hostname_when_only_domain_netbios(client):
+    from datetime import datetime, timezone
+
+    from qka_api.services.desktop_agent import DEVICE_ACTIVE, INDEX_IDLE, device_dto
+    from qka_shared.models import DesktopDevice
+
+    now = datetime.now(timezone.utc)
+    device_id = uuid.uuid4()
+    with client.app.state.session_factory() as session:
+        session.add(
+            DesktopDevice(
+                id=device_id,
+                qka_user_id=None,
+                device_key_hash="hash2",
+                computer_name="QEHC",
+                device_fingerprint="domain-only-fp",
+                domain_joined_name="QEHC",
+                agent_version="0.1.0",
+                status=DEVICE_ACTIVE,
+                indexing_state=INDEX_IDLE,
+                enrolled_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.commit()
+        dto = device_dto(session, session.get(DesktopDevice, device_id))
+
+    assert dto["workstationHostname"] == ""
+    assert dto["computerName"] == ""
 
 
 def test_agent_readonly_module_unit():

@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
 
 
-def sid_to_filename(computer_sid: str) -> str:
+def sid_to_filename(computer_sid: str, *, suffix: str = ".tok") -> str:
     sid = (computer_sid or "").strip()
     safe = re.sub(r"[^0-9A-Za-z\-]", "_", sid)
     if not safe:
         raise ValueError("computer SID is required for token drop filename.")
-    return f"{safe}.tok"
+    ext = suffix if suffix.startswith(".") else f".{suffix}"
+    return f"{safe}{ext}"
+
+
+def sid_to_upgrade_filename(computer_sid: str) -> str:
+    """Per-computer upgrade authorization drop (distinct from first-install *.tok)."""
+    return sid_to_filename(computer_sid, suffix=".upg")
 
 
 def drop_dir(settings_unc: str) -> Path:
@@ -24,10 +31,16 @@ def drop_dir(settings_unc: str) -> Path:
 
 
 def _prefer_local_path(root: Path) -> Path:
-    """Prefer a local filesystem path when the UNC points at this host."""
-    text = str(root).lower().rstrip("\\/")
+    """Prefer a local filesystem path only when the UNC host is this computer."""
+    text = str(root).replace("/", "\\")
+    if not text.startswith("\\\\"):
+        return root
+    host = text[2:].split("\\", 1)[0].split(".", 1)[0].lower()
+    me = (os.environ.get("COMPUTERNAME") or "").lower()
+    if not me or host != me:
+        return root
     local_token = Path(r"C:\QehcAI\QkaAgentTokens")
-    if local_token.is_dir() and text.endswith("qkaagenttokens"):
+    if local_token.is_dir() and text.lower().rstrip("\\").endswith("qkaagenttokens"):
         return local_token
     return root
 
@@ -100,6 +113,7 @@ def stage_token_for_computer(
     computer_sid: str,
     computer_name: str,
     token: str,
+    suffix: str = ".tok",
 ) -> str:
     """Write token file and grant only that computer SID Read+Delete (plus Admins/SYSTEM).
 
@@ -107,7 +121,14 @@ def stage_token_for_computer(
     """
     root = _prefer_local_path(drop_dir(drop_unc))
     root.mkdir(parents=True, exist_ok=True)
-    dest = root / sid_to_filename(computer_sid)
+    name = sid_to_filename(computer_sid, suffix=suffix)
+    dest = root / name
+    # Replace any prior drop first — re-ACLing an existing SID-locked file can require
+    # SeSecurityPrivilege that the API process may not hold under UAC filtering.
+    try:
+        dest.unlink(missing_ok=True)
+    except OSError:
+        pass
     dest.write_text(token, encoding="utf-8")
     try:
         _acl_token_file(dest, computer_sid)
@@ -118,17 +139,17 @@ def stage_token_for_computer(
             pass
         raise RuntimeError(f"Failed to ACL token drop for {computer_name}: {exc}") from exc
     unc_root = (drop_unc or "").strip().rstrip("\\/")
-    return f"{unc_root}\\{sid_to_filename(computer_sid)}"
+    return f"{unc_root}\\{name}"
 
 
-def remove_token_for_computer(*, drop_unc: str, computer_sid: str) -> bool:
-    """Delete a staged *.tok so cancelled/expired deploy never triggers GPO install.
+def remove_token_for_computer(*, drop_unc: str, computer_sid: str, suffix: str = ".tok") -> bool:
+    """Delete a staged token/upgrade drop so cancelled jobs never trigger GPO action.
 
     Returns True when a file was removed. Missing file is success (already gone).
     Never logs token contents.
     """
     root = _prefer_local_path(drop_dir(drop_unc))
-    dest = root / sid_to_filename(computer_sid)
+    dest = root / sid_to_filename(computer_sid, suffix=suffix)
     if not dest.is_file():
         return False
     dest.unlink(missing_ok=True)

@@ -1,8 +1,9 @@
 """Outbound folder discovery for QKA admin browse requests.
 
 Lists directory names only — never file contents. Resolves known folders from
-the assigned employee's ProfileList SID mapping. Rejects escapes outside the
-employee profile / approved roots. Does not modify NTFS ACLs.
+the assigned employee's ProfileList SID mapping. Drive roots come from live
+volume discovery (not hardcoded). Does not modify NTFS ACLs. Does not recursively
+enumerate whole drives unless the admin expands folders on demand.
 """
 
 from __future__ import annotations
@@ -30,14 +31,20 @@ TIMEOUT_SECONDS_DEFAULT = 8.0
 class BrowseNode:
     name: str
     path: str
-    kind: str  # known_folder | directory
+    kind: str  # known_folder | directory | volume
     accessible: bool
     hasChildren: bool
     detail: str = ""
 
 
 def _norm(path: Path) -> str:
-    return str(path).replace("/", "\\").rstrip("\\")
+    text = str(path).replace("/", "\\")
+    # Keep drive-root trailing slash so "C:" and "C:\" stay distinct for clients.
+    if len(text) == 2 and text[1] == ":":
+        return text + "\\"
+    if len(text) >= 3 and text[1] == ":" and text[2] == "\\" and text.rstrip("\\") == text[:2]:
+        return text[:3]
+    return text.rstrip("\\")
 
 
 def _is_within(child: Path, root: Path) -> bool:
@@ -54,24 +61,31 @@ def _list_dir_names(folder: Path, *, deadline: float, remaining: int) -> tuple[l
     if time.monotonic() > deadline:
         return [], "Browse timeout."
     try:
-        entries = []
-        for child in folder.iterdir():
-            if time.monotonic() > deadline:
-                return entries, "Browse timeout."
-            if not child.is_dir():
-                continue
-            if child.is_symlink() or _is_reparse_point(child):
-                continue
-            if is_excluded_path(child):
-                continue
-            entries.append(child)
-            if len(entries) >= remaining:
-                break
-        return entries, ""
+        iterator = folder.iterdir()
     except PermissionError:
         return [], "Access denied (NTFS). Scanner identity cannot list this folder."
     except OSError as exc:
         return [], f"Cannot list folder: {exc}"
+
+    entries: list[Path] = []
+    for child in iterator:
+        if time.monotonic() > deadline:
+            return entries, "Browse timeout."
+        # Per-entry stat failures must not fail the whole listing (mixed ACLs / locked files).
+        # Check reparse/junction before is_dir — profile "My Music" style junctions deny listing.
+        try:
+            if child.is_symlink() or _is_reparse_point(child):
+                continue
+            if not child.is_dir():
+                continue
+        except (PermissionError, OSError):
+            continue
+        if is_excluded_path(child):
+            continue
+        entries.append(child)
+        if len(entries) >= remaining:
+            break
+    return entries, ""
 
 
 def _is_reparse_point(path: Path) -> bool:
@@ -105,13 +119,29 @@ def resolve_known_folders(employee_sid: str) -> tuple[list[BrowseNode], str]:
     nodes: list[BrowseNode] = []
     for label, candidates in KNOWN_RELATIVE.items():
         found: Path | None = None
+        access_denied = False
+        access_detail = ""
         for rel in candidates:
             candidate = profile.profile_path / rel
             safe = resolve_safe(candidate)
             if safe is None or not _is_within(safe, profile.profile_path):
                 continue
-            if safe.exists() and safe.is_dir() and not is_excluded_path(safe):
+            if is_excluded_path(safe):
+                continue
+            try:
+                if safe.exists() and safe.is_dir():
+                    found = safe
+                    break
+            except PermissionError:
+                # Path is known but this identity cannot stat/list it — keep browsing other roots.
                 found = safe
+                access_denied = True
+                access_detail = "Access denied."
+                break
+            except OSError as exc:
+                found = safe
+                access_denied = True
+                access_detail = str(exc)[:200]
                 break
         if found is None:
             nodes.append(
@@ -125,24 +155,21 @@ def resolve_known_folders(employee_sid: str) -> tuple[list[BrowseNode], str]:
                 )
             )
             continue
-        accessible = True
-        detail = ""
-        try:
-            next(found.iterdir(), None)
-        except PermissionError:
-            accessible = False
-            detail = (
-                "Profile folder exists but the agent identity cannot list it. "
-                "Use a restricted domain service account with explicit read/list NTFS "
-                "(no ACL auto-grant; no LocalSystem)."
-            )
-        except OSError as exc:
-            accessible = False
-            detail = str(exc)
+        accessible = not access_denied
+        detail = access_detail
+        if accessible:
+            try:
+                next(found.iterdir(), None)
+            except PermissionError:
+                accessible = False
+                detail = "Access denied."
+            except OSError as exc:
+                accessible = False
+                detail = str(exc)[:200]
         nodes.append(
             BrowseNode(
                 name=label,
-                path=_norm(found) if accessible else _norm(found),
+                path=_norm(found),
                 kind="known_folder",
                 accessible=accessible,
                 hasChildren=accessible,
@@ -154,12 +181,15 @@ def resolve_known_folders(employee_sid: str) -> tuple[list[BrowseNode], str]:
     root_ok = False
     root_detail = ""
     try:
-        next(root.iterdir(), None)
-        root_ok = True
+        if root.exists() and root.is_dir():
+            next(root.iterdir(), None)
+            root_ok = True
+        else:
+            root_detail = "Profile path does not exist."
     except PermissionError:
-        root_detail = "Agent identity cannot list the employee profile root."
+        root_detail = "Access denied."
     except OSError as exc:
-        root_detail = str(exc)
+        root_detail = str(exc)[:200]
     nodes.insert(
         0,
         BrowseNode(
@@ -174,6 +204,53 @@ def resolve_known_folders(employee_sid: str) -> tuple[list[BrowseNode], str]:
     return nodes, ""
 
 
+def resolve_navigation_roots(employee_sid: str = "") -> tuple[list[BrowseNode], str]:
+    """Drive roots + optional employee known folders. No recursive drive walk."""
+    nodes: list[BrowseNode] = []
+    try:
+        from qka_desktop_agent.inventory import _collect_volumes
+
+        for vol in _collect_volumes():
+            root = str(vol.get("rootPath") or "")
+            if not root:
+                continue
+            letter = str(vol.get("letter") or root[:2])
+            label = str(vol.get("label") or "").strip()
+            name = letter
+            if label:
+                name = f"{letter} ({label})"
+            detail = ""
+            cap = int(vol.get("capacityBytes") or 0)
+            free = int(vol.get("freeBytes") or 0)
+            if cap > 0:
+                detail = f"{max(0, cap - free)}/{cap} bytes · {vol.get('fileSystem') or ''}".strip(" ·")
+            nodes.append(
+                BrowseNode(
+                    name=name,
+                    path=root,
+                    kind="volume",
+                    accessible=bool(vol.get("accessible", False)),
+                    hasChildren=bool(vol.get("accessible", False)),
+                    detail=detail,
+                )
+            )
+    except Exception as exc:  # noqa: BLE001
+        return nodes, f"Volume discovery failed: {exc}"
+
+    if (employee_sid or "").strip():
+        try:
+            known, err = resolve_known_folders(employee_sid.strip())
+            nodes.extend(known)
+            # Known-folder errors must not hide drive roots already discovered.
+            if err and not nodes:
+                return nodes, err
+        except Exception as exc:  # noqa: BLE001
+            # Keep volumes browsable even if profile mapping throws unexpectedly.
+            if not nodes:
+                return nodes, f"Known folder discovery failed: {exc}"
+    return nodes, ""
+
+
 def browse_children(
     *,
     employee_sid: str,
@@ -181,27 +258,35 @@ def browse_children(
     max_entries: int = MAX_ENTRIES_DEFAULT,
     timeout_seconds: float = TIMEOUT_SECONDS_DEFAULT,
 ) -> tuple[list[BrowseNode], str]:
-    profile = profile_for_user_sid(employee_sid)
-    if profile is None:
-        return [], "Employee profile mapping unavailable for browse."
     parent_raw = (parent_path or "").strip()
     if not parent_raw:
-        return resolve_known_folders(employee_sid)
+        return resolve_navigation_roots(employee_sid)
 
     parent = resolve_safe(Path(parent_raw))
     if parent is None or not parent.exists() or not parent.is_dir():
         return [], "Parent folder does not exist."
     if is_excluded_path(parent):
         return [], "Parent folder is excluded (system/credential path)."
-    if not _is_within(parent, profile.profile_path):
-        return [], "Parent folder is outside the assigned employee profile root."
+
+    profile = profile_for_user_sid(employee_sid) if (employee_sid or "").strip() else None
+    # Allow on-demand expansion under fixed drive roots or the mapped employee profile.
+    # Inaccessible children are returned with accessible=false — never fabricated.
+    if not _is_under_fixed_volume(parent) and not (
+        profile is not None and _is_within(parent, profile.profile_path)
+    ):
+        return [], "Parent folder is outside allowed browse roots."
 
     deadline = time.monotonic() + max(1.0, float(timeout_seconds))
     children, err = _list_dir_names(parent, deadline=deadline, remaining=max(1, int(max_entries)))
     nodes: list[BrowseNode] = []
     for child in children:
         safe = resolve_safe(child)
-        if safe is None or not _is_within(safe, profile.profile_path):
+        if safe is None:
+            continue
+        if profile is not None and _is_within(parent, profile.profile_path):
+            if not _is_within(safe, profile.profile_path):
+                continue
+        elif not _is_under_fixed_volume(safe):
             continue
         if is_excluded_path(safe):
             continue
@@ -210,9 +295,12 @@ def browse_children(
         detail = ""
         try:
             for sub in safe.iterdir():
-                if sub.is_dir() and not sub.is_symlink():
-                    has_kids = True
-                    break
+                try:
+                    if sub.is_dir() and not sub.is_symlink() and not _is_reparse_point(sub):
+                        has_kids = True
+                        break
+                except (PermissionError, OSError):
+                    continue
         except PermissionError:
             accessible = False
             detail = "Access denied."
@@ -230,6 +318,17 @@ def browse_children(
             )
         )
     return nodes, err
+
+
+def _is_under_fixed_volume(path: Path) -> bool:
+    try:
+        text = str(path.resolve(strict=False)).replace("/", "\\")
+    except OSError:
+        text = str(path).replace("/", "\\")
+    if len(text) < 3 or text[1] != ":" or text[2] != "\\":
+        return False
+    # Reject UNC and relative escapes; fixed local drive only.
+    return text[0].isalpha()
 
 
 def nodes_to_json(nodes: list[BrowseNode]) -> list[dict]:

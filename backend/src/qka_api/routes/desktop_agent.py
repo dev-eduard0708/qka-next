@@ -18,6 +18,21 @@ agent_router = APIRouter(prefix="/api/v1/agent/desktop", tags=["desktop-agent"])
 admin_router = APIRouter(prefix="/api/v1/admin/desktop-devices", tags=["desktop-agent-admin"])
 
 
+class InstallAuthorizationBody(BaseModel):
+    token: str = ""
+    adComputerSid: str = ""
+    machineProof: str = ""
+
+
+class InstallProgressBody(BaseModel):
+    token: str = ""
+    adComputerSid: str = ""
+    machineProof: str = ""
+    phase: str = ""
+    msiExitCode: int | None = None
+    detail: str = ""
+
+
 class EnrollBody(BaseModel):
     enrollmentCode: str = ""
     machineEnrollmentToken: str = ""
@@ -38,6 +53,16 @@ class FolderBrowseResultBody(BaseModel):
 
 class FolderBrowseRequestBody(BaseModel):
     parentPath: str = ""
+
+
+class InventoryBody(BaseModel):
+    agentVersion: str = ""
+    includeHardware: bool = True
+    includeVolumes: bool = True
+    hardware: dict = Field(default_factory=dict)
+    disks: list[dict] = Field(default_factory=list)
+    volumes: list[dict] = Field(default_factory=list)
+    knownFolders: list[dict] = Field(default_factory=list)
 
 
 class HeartbeatBody(BaseModel):
@@ -114,6 +139,67 @@ def _device_auth(
         return svc.authenticate_device(session, device_id, device_key)
     except PermissionError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+
+@agent_router.post("/install-authorization")
+def install_authorization(body: InstallAuthorizationBody, session: Session = Depends(get_session)):
+    """Pre-install gate for the GPO scheduled task. Does not consume the token."""
+    from qka_api.services import agent_deployment as deploy_svc
+
+    return deploy_svc.install_authorization(
+        session,
+        token=body.token,
+        ad_computer_sid=body.adComputerSid,
+        machine_proof=body.machineProof,
+    )
+
+
+@agent_router.post("/install-progress")
+def install_progress(body: InstallProgressBody, session: Session = Depends(get_session)):
+    """Windows Scheduled Task progress — authenticated by token + SID + machineProof."""
+    from qka_api.services import agent_deployment as deploy_svc
+
+    try:
+        return deploy_svc.report_install_progress(
+            session,
+            token=body.token,
+            ad_computer_sid=body.adComputerSid,
+            machine_proof=body.machineProof,
+            phase=body.phase,
+            msi_exit_code=body.msiExitCode,
+            detail=body.detail,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@agent_router.post("/upgrade-authorization")
+def upgrade_authorization(body: InstallAuthorizationBody, session: Session = Depends(get_session)):
+    from qka_api.services import agent_upgrade as upg_svc
+
+    return upg_svc.upgrade_authorization(
+        session,
+        token=body.token,
+        ad_computer_sid=body.adComputerSid,
+        machine_proof=body.machineProof,
+    )
+
+
+@agent_router.post("/upgrade-progress")
+def upgrade_progress(body: InstallProgressBody, session: Session = Depends(get_session)):
+    from qka_api.services import agent_upgrade as upg_svc
+
+    return upg_svc.report_upgrade_progress(
+        session,
+        token=body.token,
+        ad_computer_sid=body.adComputerSid,
+        machine_proof=body.machineProof,
+        phase=body.phase,
+        msi_exit_code=body.msiExitCode,
+        detail=body.detail,
+    )
 
 
 @agent_router.post("/enroll")
@@ -203,6 +289,29 @@ def folder_browse_result(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@agent_router.post("/inventory")
+def post_inventory(
+    body: InventoryBody,
+    device=Depends(_device_auth),
+    session: Session = Depends(get_session),
+):
+    from qka_api.services import desktop_inventory as inv_svc
+
+    return inv_svc.upsert_inventory(
+        session,
+        device,
+        payload={
+            "agentVersion": body.agentVersion,
+            "includeHardware": body.includeHardware,
+            "includeVolumes": body.includeVolumes,
+            "hardware": body.hardware,
+            "disks": body.disks,
+            "volumes": body.volumes,
+            "knownFolders": body.knownFolders,
+        },
+    )
 
 
 @admin_router.get("")
@@ -327,6 +436,82 @@ def get_folder_browse(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@admin_router.get("/{device_id}/inventory")
+def get_inventory(
+    device_id: uuid.UUID,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+):
+    from qka_api.services import desktop_inventory as inv_svc
+    from qka_shared.models import DesktopDevice
+
+    _require_super_admin(request, settings, session, mutating=False)
+    device = session.get(DesktopDevice, device_id)
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device was not found.")
+    inv = inv_svc.inventory_dto(session, device)
+    if inv is None:
+        return {"inventory": None, "note": "No inventory synced yet."}
+    return {"inventory": inv}
+
+
+@admin_router.post("/{device_id}/inventory/refresh")
+def refresh_inventory(
+    device_id: uuid.UUID,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+):
+    from qka_api.services import desktop_inventory as inv_svc
+
+    _require_super_admin(request, settings, session, mutating=True)
+    try:
+        return inv_svc.request_inventory_refresh(session, device_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@admin_router.get("/{device_id}/browse-roots")
+def browse_roots(
+    device_id: uuid.UUID,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+):
+    from qka_api.services import desktop_inventory as inv_svc
+    from qka_shared.models import DesktopDevice
+
+    _require_super_admin(request, settings, session, mutating=False)
+    device = session.get(DesktopDevice, device_id)
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device was not found.")
+    roots = inv_svc.browse_roots_dto(session, device)
+    dto = svc.device_dto(session, device)
+    roots["online"] = bool(dto.get("online"))
+    roots["folderBrowseAvailable"] = bool(dto.get("folderBrowseAvailable"))
+    return roots
+
+
+@admin_router.get("/{device_id}/folder-cache")
+def get_folder_cache(
+    device_id: uuid.UUID,
+    request: Request,
+    parentPath: str = "",
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+):
+    from qka_api.services import desktop_inventory as inv_svc
+    from qka_shared.models import DesktopDevice
+
+    _require_super_admin(request, settings, session, mutating=False)
+    device = session.get(DesktopDevice, device_id)
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device was not found.")
+    cached = inv_svc.get_folder_cache(session, device_id=device_id, parent_path=parentPath)
+    return {"cache": cached, "online": bool(svc.device_dto(session, device).get("online"))}
+
+
 @admin_router.post("/{device_id}/command")
 def command(
     device_id: uuid.UUID,
@@ -356,3 +541,47 @@ def revoke(
         return svc.revoke_device(session, device_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@admin_router.post("/{device_id}/upgrade")
+def schedule_upgrade(
+    device_id: uuid.UUID,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+):
+    """Explicit single-device agent upgrade. Never fleet-wide."""
+    from qka_api.services import agent_upgrade as upg_svc
+
+    actor = _require_super_admin(request, settings, session, mutating=True)
+    try:
+        return upg_svc.schedule_upgrade(
+            session,
+            settings,
+            actor_id=actor.id,
+            device_id=device_id,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@admin_router.post("/upgrades/{job_id}/cancel")
+def cancel_upgrade(
+    job_id: uuid.UUID,
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+    session: Session = Depends(get_session),
+):
+    from qka_api.services import agent_upgrade as upg_svc
+
+    _require_super_admin(request, settings, session, mutating=True)
+    try:
+        return upg_svc.cancel_upgrade(session, settings, job_id=job_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

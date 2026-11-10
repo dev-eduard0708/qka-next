@@ -102,13 +102,27 @@ class Settings(BaseSettings):
     # Windows Desktop Agent (pilot). Employee PCs must use HTTPS internal URL — not loopback.
     agent_public_base_url: str = ""
     agent_enrollment_hours: int = 24
-    agent_min_version: str = "0.1.0"
+    agent_min_version: str = "0.1.3"
+    # Published package version shown in UI / used for upgrade eligibility (MSI ProductVersion).
+    agent_available_version: str = "0.1.3"
     # Computer-readable MSI UNC for GPO Software Installation / startup (no secrets in share).
     agent_msi_unc: str = ""
     # unc_acl_drop (preferred) | hkml_out_of_band (manual fallback). Never SYSVOL/MSI secrets.
     agent_token_provisioning: str = ""
     # Locked-down share for per-computer *.tok files (New-QkaAgentTokenDropShare.ps1).
     agent_token_drop_unc: str = ""
+    # Pending with no install-progress "started": covers background GP refresh
+    # (default ~90m + up to ~30m random offset) before QKA-Agent-Install exists/runs.
+    # Distinct from installing timeout (task already reported started).
+    agent_deploy_pending_timeout_minutes: int = 180
+    # Alias / explicit GPO-provision wait (used when task distribution needs first policy cycle).
+    agent_deploy_gpo_provision_timeout_minutes: int = 180
+    # Installing without agent registration/heartbeat within this window → Timed Out.
+    agent_deploy_installing_timeout_minutes: int = 120
+    # How the GPP Scheduled Task is distributed:
+    #   pilot_group  — GpoApply only on QKA-Agent-Pilot-Computers (PAC refresh/reboot often needed)
+    #   ou_computers — GpoApply on Domain Computers for the linked OU (no-reboot task pre-provision)
+    agent_gpo_task_distribution: str = "pilot_group"
 
     @property
     def cors_origin_list(self) -> list[str]:

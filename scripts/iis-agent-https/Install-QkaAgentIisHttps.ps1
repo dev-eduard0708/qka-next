@@ -130,9 +130,34 @@ Write-Step ("Restore: appcmd restore backup $backupName")
 New-Item -ItemType Directory -Force -Path $SiteRoot | Out-Null
 New-Item -ItemType Directory -Force -Path (Join-Path $SiteRoot 'logs') | Out-Null
 
+# Allow rewrite serverVariables at MACHINE level BEFORE writing rules that set them.
+# Site-scoped adds fail when allowedServerVariables overrideModeDefault=Deny — that left
+# the pilot site returning empty HTTP 500 on /api/v1/agent/desktop/* while /health worked.
+# Rule values overwrite client X-Forwarded-* (proto=https, host={HTTP_HOST}) — no client spoof.
+$proxyPathForVars = 'MACHINE/WEBROOT/APPHOST'
+foreach ($varName in @('HTTP_X_FORWARDED_PROTO', 'HTTP_X_FORWARDED_HOST')) {
+  $exists = $false
+  try {
+    $existingVars = Get-WebConfiguration -pspath $proxyPathForVars `
+      -filter 'system.webServer/rewrite/allowedServerVariables' -ErrorAction SilentlyContinue
+    if ($existingVars) {
+      $exists = @($existingVars.Collection | Where-Object { $_.name -eq $varName }).Count -gt 0
+    }
+  } catch { $exists = $false }
+  if (-not $exists) {
+    Add-WebConfigurationProperty -pspath $proxyPathForVars `
+      -filter 'system.webServer/rewrite/allowedServerVariables' -name '.' `
+      -value @{ name = $varName }
+    Write-Step ("Allowed server variable added (server-level): " + $varName)
+  } else {
+    Write-Step ("Allowed server variable already present (server-level): " + $varName)
+  }
+}
+
 $webConfig = @"
 <?xml version="1.0" encoding="UTF-8"?>
 <!-- QKA Agent HTTPS reverse proxy — agent endpoints only. Do not broaden rules. -->
+<!-- serverVariables overwrite client X-Forwarded-* (anti-spoof). Names must be server-level allowed. -->
 <configuration>
   <system.webServer>
     <rewrite>
@@ -163,6 +188,7 @@ $webConfig = @"
 </configuration>
 "@
 Set-Content -Path (Join-Path $SiteRoot 'web.config') -Value $webConfig -Encoding UTF8
+
 
 # --- ARR proxy (server-wide): enable only if not already on; report change ---
 $proxyPath = 'MACHINE/WEBROOT/APPHOST'
@@ -263,29 +289,7 @@ if (Test-SslCertThumbprint -HostnamePort $hostnamePort -ExpectedThumb $thumb) {
   }
 }
 
-# Allowed server variables (site-scoped; idempotent)
-foreach ($varName in @('HTTP_X_FORWARDED_PROTO', 'HTTP_X_FORWARDED_HOST')) {
-  $exists = $false
-  try {
-    $existingVars = Get-WebConfiguration -pspath "MACHINE/WEBROOT/APPHOST/$SiteName" `
-      -filter 'system.webServer/rewrite/allowedServerVariables' -ErrorAction SilentlyContinue
-    if ($existingVars) {
-      $exists = @($existingVars.Collection | Where-Object { $_.name -eq $varName }).Count -gt 0
-    }
-  } catch { $exists = $false }
-  if (-not $exists) {
-    try {
-      Add-WebConfigurationProperty -pspath "MACHINE/WEBROOT/APPHOST/$SiteName" `
-        -filter 'system.webServer/rewrite/allowedServerVariables' -name '.' `
-        -value @{ name = $varName }
-      Write-Step ("Allowed server variable added: " + $varName)
-    } catch {
-      Write-Warning "Could not add allowedServerVariable ${varName}: $($_.Exception.Message)"
-    }
-  } else {
-    Write-Step ("Allowed server variable already present: " + $varName)
-  }
-}
+# Allowed server variables were ensured at MACHINE/WEBROOT/APPHOST before web.config write.
 
 Start-Website -Name $SiteName -ErrorAction SilentlyContinue
 

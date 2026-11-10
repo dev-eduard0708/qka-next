@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from qka_api.services import gpo_engine
-from qka_shared.config import Settings
+from qka_shared.config import Settings, get_settings
 from qka_shared.models import (
     DEPLOY_APPROVED,
     DEPLOY_CANCELLED,
@@ -24,6 +24,7 @@ from qka_shared.models import (
     DEPLOY_INSTALLED_REGISTERED,
     DEPLOY_REQUESTED,
     DEPLOY_SCHEDULED,
+    DEPLOY_TIMED_OUT,
     DEPLOY_WAITING_COMPUTER,
     AdWorkstation,
     AgentDeploymentJob,
@@ -32,9 +33,27 @@ from qka_shared.models import (
     QkaUser,
 )
 
-CONFIRM_PHRASE = "DEPLOY SELECTED"
+CONFIRM_PHRASE = "DEPLOY"
 
+# Pending + in-progress jobs block duplicate Deploy. Installing is included so a
+# started MSI run cannot be duplicated by another approval.
 _ACTIVE_JOB_STATUSES = {
+    DEPLOY_REQUESTED,
+    DEPLOY_APPROVED,
+    DEPLOY_SCHEDULED,
+    DEPLOY_WAITING_COMPUTER,
+    DEPLOY_INSTALLING,
+}
+
+# Cancel only before the Windows task reports that installation actually started.
+_CANCELABLE_JOB_STATUSES = {
+    DEPLOY_REQUESTED,
+    DEPLOY_APPROVED,
+    DEPLOY_SCHEDULED,
+    DEPLOY_WAITING_COMPUTER,
+}
+
+_PENDING_JOB_STATUSES = {
     DEPLOY_REQUESTED,
     DEPLOY_APPROVED,
     DEPLOY_SCHEDULED,
@@ -77,7 +96,180 @@ def _status_label(status: int) -> str:
         DEPLOY_INSTALLED_REGISTERED: "installed_agent_registered",
         DEPLOY_FAILED: "failed",
         DEPLOY_CANCELLED: "cancelled",
+        DEPLOY_TIMED_OUT: "timed_out",
     }.get(status, "unknown")
+
+
+def _aware(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def compute_display_status(
+    *,
+    job: AgentDeploymentJob | None,
+    agent_online: bool = False,
+    agent_status: str = "not_registered",
+    has_heartbeat: bool = False,
+) -> str:
+    """UI lifecycle: in_progress → deployed (+ failed/timed_out/cancelled).
+
+    Deployed requires agent registration + heartbeat evidence — never MSI/task alone.
+    In Progress covers the whole active job (Deploy/Redeploy click through MSI install),
+    including scheduled / waiting_for_computer / installing — not a separate Pending chip.
+    """
+    registered = agent_status in {"connected", "registered_offline"} or agent_online
+    if job is not None:
+        if job.status in _PENDING_JOB_STATUSES or job.status == DEPLOY_INSTALLING:
+            return "in_progress"
+        if job.status == DEPLOY_INSTALLED_REGISTERED:
+            # Deployed = registered + heartbeat evidence (never MSI/task alone).
+            if agent_online:
+                return "deployed"
+            if registered and has_heartbeat:
+                return "offline"
+            return "installed"
+        if job.status == DEPLOY_FAILED:
+            if registered and (agent_online or has_heartbeat):
+                return "deployed" if agent_online else "offline"
+            if registered:
+                return "installed"
+            return "failed"
+        if job.status == DEPLOY_TIMED_OUT:
+            if registered and (agent_online or has_heartbeat):
+                return "deployed" if agent_online else "offline"
+            if registered:
+                return "installed"
+            return "timed_out"
+        if job.status == DEPLOY_CANCELLED:
+            if registered and (agent_online or has_heartbeat):
+                return "deployed" if agent_online else "offline"
+            if registered:
+                return "installed"
+            return "cancelled"
+    if agent_online or agent_status == "connected":
+        return "deployed"
+    if agent_status == "registered_offline":
+        return "offline" if has_heartbeat else "installed"
+    return "none"
+
+
+def _pending_wait_minutes(settings: Settings) -> tuple[int, str]:
+    """Minutes to wait before timing out a job that has not reported install-progress started.
+
+    Distinguishes initial GPO/task provisioning (background refresh ~90–120m) from the
+    shorter post-start installing window (handled separately).
+    """
+    pending = max(5, int(getattr(settings, "agent_deploy_pending_timeout_minutes", 180) or 180))
+    gpo_wait = max(
+        5,
+        int(getattr(settings, "agent_deploy_gpo_provision_timeout_minutes", 180) or 180),
+    )
+    dist = (getattr(settings, "agent_gpo_task_distribution", None) or "pilot_group").strip().lower()
+    # Until install-progress phase=started, we are waiting for GPO/task provisioning and/or
+    # the first task tick — use the longer GPO-aware window (never shorter than pending).
+    minutes = max(pending, gpo_wait)
+    phase = "gpo_or_task_provision"
+    if dist in {"ou_computers", "domain_computers", "ou"}:
+        phase = "gpo_task_provision_ou"
+    return minutes, phase
+
+
+def reconcile_stale_deployment_jobs(session: Session, settings: Settings | None = None) -> int:
+    """Persist Timed Out for jobs that never progressed within configured deadlines.
+
+    Safe across restarts: idempotent, does not invent success, does not touch GPO/members.
+    Pending timeout (no install_started) uses the GPO-provision window so background
+    policy refresh is not mistaken for a stuck install. Timing out revokes unconsumed
+    tokens and blocks later /install-authorization — keep the window finite but long enough.
+    """
+    settings = settings or get_settings()
+    pending_min, pending_phase = _pending_wait_minutes(settings)
+    installing_min = max(10, int(getattr(settings, "agent_deploy_installing_timeout_minutes", 120) or 120))
+    now = _now()
+    rows = list(
+        session.execute(
+            select(AgentDeploymentJob).where(
+                AgentDeploymentJob.status.in_(
+                    [
+                        DEPLOY_REQUESTED,
+                        DEPLOY_APPROVED,
+                        DEPLOY_SCHEDULED,
+                        DEPLOY_WAITING_COMPUTER,
+                        DEPLOY_INSTALLING,
+                    ]
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    changed = 0
+    for job in rows:
+        if job.status in _PENDING_JOB_STATUSES:
+            # Still awaiting first install-progress "started" (GPO/task may not exist yet).
+            if job.install_started_at is not None:
+                # Defensive: pending status with start timestamp → treat as installing path.
+                anchor = _aware(job.install_started_at)
+                limit_min = installing_min
+                result_code = "timed_out_installing"
+                hint = (
+                    f"Installation had started but the job remained pending without completion "
+                    f"within {limit_min} minutes."
+                )
+            else:
+                anchor = _aware(job.scheduled_at) or _aware(job.created_at)
+                limit_min = pending_min
+                result_code = "timed_out_gpo_wait" if pending_phase.startswith("gpo") else "timed_out_pending"
+                dist = (getattr(settings, "agent_gpo_task_distribution", None) or "pilot_group").strip().lower()
+                if dist in {"ou_computers", "domain_computers", "ou"}:
+                    hint = (
+                        f"No install-progress within {limit_min} minutes while waiting for background "
+                        f"Group Policy to deliver/run QKA-Agent-Install (OU Domain Computers distribution). "
+                        f"Windows background refresh is often ~90 minutes (plus random offset). "
+                        f"Verify the task exists on the PC and the SID token is still staged."
+                    )
+                else:
+                    hint = (
+                        f"No install-progress within {limit_min} minutes (GPO/task provisioning wait). "
+                        f"Pilot-group GpoApply may need computer Kerberos refresh before "
+                        f"QKA-Agent-Install appears."
+                    )
+            if anchor is None:
+                continue
+            if now - anchor < timedelta(minutes=limit_min):
+                continue
+            job.status = DEPLOY_TIMED_OUT
+            job.updated_at = now
+            job.last_result = result_code
+            job.last_error = (
+                f"Timed out ({result_code}): {hint} Token authorization is revoked. Not marked Deployed."
+            )[:2000]
+            _revoke_unconsumed_job_tokens(session, job.id)
+            changed += 1
+            continue
+        if job.status == DEPLOY_INSTALLING:
+            # Task already reported started — shorter window for MSI/register/heartbeat.
+            anchor = _aware(job.install_started_at) or _aware(job.scheduled_at) or _aware(job.created_at)
+            if anchor is None:
+                continue
+            if now - anchor < timedelta(minutes=installing_min):
+                continue
+            job.status = DEPLOY_TIMED_OUT
+            job.updated_at = now
+            job.last_result = "timed_out_installing"
+            job.last_error = (
+                f"Timed out: installation started but agent registration/heartbeat was not confirmed "
+                f"within {installing_min} minutes. Token authorization is revoked."
+            )[:2000]
+            _revoke_unconsumed_job_tokens(session, job.id)
+            changed += 1
+    if changed:
+        session.flush()
+    return changed
 
 
 def deployment_prerequisites(settings: Settings, *, force_refresh: bool = False) -> dict:
@@ -239,6 +431,36 @@ def deployment_prerequisites(settings: Settings, *, force_refresh: bool = False)
         "maxBulk": 50,
         "realPcDeployAllowed": deploy_enabled,
         "tokenDropUnc": drop_unc,
+        "taskDistributionMode": (
+            "ou_computers"
+            if (getattr(settings, "agent_gpo_task_distribution", None) or "").strip().lower()
+            in {"ou_computers", "domain_computers", "ou"}
+            else "pilot_group"
+        ),
+        "noRebootCentralDeployReady": (
+            (getattr(settings, "agent_gpo_task_distribution", None) or "").strip().lower()
+            in {"ou_computers", "domain_computers", "ou"}
+        ),
+        "pendingTimeoutMinutes": _pending_wait_minutes(settings)[0],
+        "gpoProvisionTimeoutMinutes": max(
+            5, int(getattr(settings, "agent_deploy_gpo_provision_timeout_minutes", 180) or 180)
+        ),
+        "installingTimeoutMinutes": max(
+            10, int(getattr(settings, "agent_deploy_installing_timeout_minutes", 120) or 120)
+        ),
+        "pendingTimeoutRevokesToken": True,
+        "taskDistributionNote": (
+            "Task Available: GPP Scheduled Task is intended for OU Domain Computers GpoApply "
+            "(no pilot PAC wait). Install still requires pilot membership + Deploy token."
+            if (getattr(settings, "agent_gpo_task_distribution", None) or "").strip().lower()
+            in {"ou_computers", "domain_computers", "ou"}
+            else (
+                "GPO Pending risk: task Apply is pilot-group scoped — newly added computers may "
+                "lack QKA-Agent-Install until Kerberos refresh. Approve "
+                "scripts/gpo-agent-deploy/Enable-QkaNoRebootTaskDistribution.ps1 for centralized "
+                "no-reboot task distribution."
+            )
+        ),
         "note": (
             "Deploy Agent enables only for selected computers that are members of "
             "QKA-Agent-Pilot-Computers (SID-verified), after HTTPS, MSI UNC, linked "
@@ -253,7 +475,21 @@ def deployment_prerequisites(settings: Settings, *, force_refresh: bool = False)
     return payload
 
 
-def job_dto(job: AgentDeploymentJob, ws: AdWorkstation | None = None) -> dict:
+def job_dto(
+    job: AgentDeploymentJob,
+    ws: AdWorkstation | None = None,
+    *,
+    agent_online: bool = False,
+    agent_status: str = "not_registered",
+    has_heartbeat: bool = False,
+) -> dict:
+    restart_required = job.msi_exit_code == 3010
+    display = compute_display_status(
+        job=job,
+        agent_online=agent_online,
+        agent_status=agent_status,
+        has_heartbeat=has_heartbeat,
+    )
     return {
         "id": str(job.id),
         "workstationId": str(job.workstation_id),
@@ -261,9 +497,13 @@ def job_dto(job: AgentDeploymentJob, ws: AdWorkstation | None = None) -> dict:
         "assignedQkaUserId": str(job.assigned_qka_user_id) if job.assigned_qka_user_id else None,
         "status": _status_label(job.status),
         "statusCode": job.status,
+        "displayStatus": display,
         "attemptCount": job.attempt_count,
         "lastError": job.last_error or "",
+        "lastResult": job.last_result or "",
         "msiVersion": job.msi_version,
+        "msiExitCode": job.msi_exit_code,
+        "restartRequired": restart_required,
         "engine": job.engine,
         "enrollmentMode": job.enrollment_mode,
         "gpoTargetGroup": job.gpo_target_group,
@@ -272,8 +512,17 @@ def job_dto(job: AgentDeploymentJob, ws: AdWorkstation | None = None) -> dict:
         "updatedAt": job.updated_at.isoformat() if job.updated_at else None,
         "approvedAt": job.approved_at.isoformat() if job.approved_at else None,
         "scheduledAt": job.scheduled_at.isoformat() if job.scheduled_at else None,
+        "installStartedAt": job.install_started_at.isoformat() if job.install_started_at else None,
+        "msiCompletedAt": job.msi_completed_at.isoformat() if job.msi_completed_at else None,
         "installedAt": job.installed_at.isoformat() if job.installed_at else None,
         "cancelledAt": job.cancelled_at.isoformat() if job.cancelled_at else None,
+        "timedOut": job.status == DEPLOY_TIMED_OUT,
+        "deadlineHint": (
+            "Pending until the workstation reports install-progress; Timed Out if no start within "
+            "the configured pending timeout."
+            if job.status in _PENDING_JOB_STATUSES
+            else ""
+        ),
     }
 
 
@@ -296,7 +545,7 @@ def request_deployments(
 ) -> dict:
     # Fail-closed: always revalidate readiness + pilot SIDs at submit time (ignore display cache).
     prereq = deployment_prerequisites(settings, force_refresh=True)
-    if (confirmation or "").strip() != CONFIRM_PHRASE:
+    if (confirmation or "") != CONFIRM_PHRASE:
         raise ValueError(f'Confirmation phrase must be exactly "{CONFIRM_PHRASE}".')
     if not approve:
         raise ValueError("Super Admin approval is required for agent deployment.")
@@ -476,6 +725,218 @@ def request_deployments(
     }
 
 
+_INSTALL_OK_STATUSES = {
+    DEPLOY_APPROVED,
+    DEPLOY_SCHEDULED,
+    DEPLOY_WAITING_COMPUTER,
+    DEPLOY_INSTALLING,
+}
+
+
+def _revoke_unconsumed_job_tokens(session: Session, job_id: uuid.UUID) -> int:
+    """Mark one-time tokens consumed so a leftover *.tok cannot authorize install."""
+    rows = session.execute(
+        select(MachineEnrollmentToken).where(
+            MachineEnrollmentToken.job_id == job_id,
+            MachineEnrollmentToken.consumed_at.is_(None),
+        )
+    ).scalars().all()
+    now = _now()
+    for row in rows:
+        row.consumed_at = now
+    if rows:
+        session.flush()
+    return len(rows)
+
+
+def _resolve_install_token(
+    session: Session,
+    *,
+    token: str,
+    ad_computer_sid: str,
+    machine_proof: str = "",
+    require_proof: bool = False,
+) -> tuple[MachineEnrollmentToken | None, AgentDeploymentJob | None, str]:
+    """Bind token → SID (+ optional HMAC proof). Never returns the secret."""
+    sid = (ad_computer_sid or "").strip()
+    raw = (token or "").strip()
+    if not sid or not raw:
+        return None, None, "absent"
+    row = session.execute(
+        select(MachineEnrollmentToken).where(MachineEnrollmentToken.token_hash == _hash(raw))
+    ).scalar_one_or_none()
+    if row is None:
+        return None, None, "absent"
+    if (row.ad_computer_sid or "").strip() != sid:
+        return None, None, "foreign_sid"
+    if row.consumed_at is not None:
+        return None, None, "cancelled"
+    if row.expires_at < _now():
+        return None, None, "expired"
+    proof = (machine_proof or "").strip().lower()
+    expected = machine_proof_digest(token=raw, computer_sid=sid, computer_guid="").lower()
+    if require_proof:
+        if not proof or proof != expected:
+            return None, None, "bad_proof"
+        if row.proof_hash and row.proof_hash not in {_hash(expected), expected}:
+            return None, None, "bad_proof"
+    elif proof and proof != expected:
+        return None, None, "bad_proof"
+    job = session.get(AgentDeploymentJob, row.job_id)
+    if job is None or job.cancelled_at is not None or job.status not in _INSTALL_OK_STATUSES:
+        return None, None, "cancelled"
+    return row, job, "ok"
+
+
+def install_authorization(
+    session: Session,
+    *,
+    token: str,
+    ad_computer_sid: str,
+    machine_proof: str = "",
+) -> dict:
+    """Decide whether a staged token may trigger MSI install.
+
+    A token file by itself is not proof. The caller must present the token and
+    the computer SID; this checks expiry, SID binding, and that the job was not
+    cancelled. Does not consume the token and never returns the secret.
+    """
+    _row, job, reason = _resolve_install_token(
+        session,
+        token=token,
+        ad_computer_sid=ad_computer_sid,
+        machine_proof=machine_proof,
+        require_proof=False,
+    )
+    if reason != "ok" or job is None:
+        return {"authorized": False, "reason": reason}
+    return {
+        "authorized": True,
+        "reason": "ok",
+        "jobId": str(job.id),
+        "expiresAt": _row.expires_at.isoformat() if _row else None,
+    }
+
+
+def report_install_progress(
+    session: Session,
+    *,
+    token: str,
+    ad_computer_sid: str,
+    machine_proof: str,
+    phase: str,
+    msi_exit_code: int | None = None,
+    detail: str = "",
+) -> dict:
+    """Authenticated install progress from the Windows Scheduled Task (pre-enroll).
+
+    Requires token + SID + machineProof = HMAC-SHA256(token, sid|). Never marks
+    In Progress from the Deploy click alone — only from phase=started.
+    """
+    phase_norm = (phase or "").strip().lower()
+    if phase_norm not in {"started", "msi_finished", "failed"}:
+        raise ValueError("phase must be started, msi_finished, or failed.")
+    row, job, reason = _resolve_install_token(
+        session,
+        token=token,
+        ad_computer_sid=ad_computer_sid,
+        machine_proof=machine_proof,
+        require_proof=True,
+    )
+    if reason != "ok" or job is None or row is None:
+        raise PermissionError(f"Install progress rejected ({reason}).")
+
+    now = _now()
+    detail_clean = (detail or "").strip()[:500]
+    ws = session.get(AdWorkstation, job.workstation_id)
+
+    if phase_norm == "started":
+        # Idempotent: already installing / MSI done / registered → acknowledge.
+        if job.status == DEPLOY_INSTALLED_REGISTERED:
+            return {"ok": True, "status": _status_label(job.status), "displayStatus": "installed"}
+        if job.status not in _PENDING_JOB_STATUSES | {DEPLOY_INSTALLING}:
+            raise ValueError(f"Job status {_status_label(job.status)} cannot enter in_progress.")
+        if job.install_started_at is None:
+            job.install_started_at = now
+        job.status = DEPLOY_INSTALLING
+        job.updated_at = now
+        job.last_result = "install_started"
+        if detail_clean:
+            job.last_error = ""
+        session.flush()
+        return {
+            "ok": True,
+            "status": _status_label(job.status),
+            "displayStatus": "in_progress",
+            "jobId": str(job.id),
+            "installStartedAt": job.install_started_at.isoformat() if job.install_started_at else None,
+        }
+
+    if phase_norm == "failed":
+        job.status = DEPLOY_FAILED
+        job.updated_at = now
+        job.msi_completed_at = now
+        if msi_exit_code is not None:
+            job.msi_exit_code = int(msi_exit_code)
+        job.last_result = "msi_failed"
+        job.last_error = (detail_clean or f"MSI failed (exit {msi_exit_code})").strip()[:2000]
+        _revoke_unconsumed_job_tokens(session, job.id)
+        session.flush()
+        return {
+            "ok": True,
+            "status": _status_label(job.status),
+            "displayStatus": "failed",
+            "jobId": str(job.id),
+            "msiExitCode": job.msi_exit_code,
+        }
+
+    # msi_finished — success (0) or restart-required (3010). Not Online/Installed yet.
+    if job.status not in (_PENDING_JOB_STATUSES | {DEPLOY_INSTALLING}):
+        if job.status == DEPLOY_INSTALLED_REGISTERED:
+            return {"ok": True, "status": _status_label(job.status), "displayStatus": "installed"}
+        raise ValueError(f"Job status {_status_label(job.status)} cannot record MSI completion.")
+    code = 0 if msi_exit_code is None else int(msi_exit_code)
+    job.status = DEPLOY_INSTALLING
+    job.updated_at = now
+    job.msi_completed_at = now
+    job.msi_exit_code = code
+    if code == 3010:
+        job.last_result = "msi_ok_restart_required"
+        job.last_error = (detail_clean or "MSI exit 3010 — restart required; waiting for agent registration.").strip()[
+            :2000
+        ]
+    elif code == 0:
+        job.last_result = "msi_ok_waiting_registration"
+        job.last_error = ""
+        if detail_clean:
+            job.last_result = detail_clean[:256] or job.last_result
+    else:
+        job.status = DEPLOY_FAILED
+        job.last_result = "msi_failed"
+        job.last_error = (detail_clean or f"MSI failed (exit {code})").strip()[:2000]
+        _revoke_unconsumed_job_tokens(session, job.id)
+        session.flush()
+        return {
+            "ok": True,
+            "status": _status_label(job.status),
+            "displayStatus": "failed",
+            "jobId": str(job.id),
+            "msiExitCode": job.msi_exit_code,
+        }
+    if job.install_started_at is None:
+        job.install_started_at = now
+    session.flush()
+    return {
+        "ok": True,
+        "status": _status_label(job.status),
+        "displayStatus": "in_progress",
+        "jobId": str(job.id),
+        "msiExitCode": job.msi_exit_code,
+        "restartRequired": code == 3010,
+        "lastResult": job.last_result,
+    }
+
+
 def cancel_job(session: Session, settings: Settings | None = None, *, actor: QkaUser, job_id: uuid.UUID) -> dict:
     from qka_shared.config import get_settings
 
@@ -483,15 +944,19 @@ def cancel_job(session: Session, settings: Settings | None = None, *, actor: Qka
     job = session.get(AgentDeploymentJob, job_id)
     if job is None:
         raise LookupError("Deployment job was not found.")
-    if job.status in {DEPLOY_INSTALLED_REGISTERED, DEPLOY_CANCELLED}:
-        raise ValueError("That job can no longer be cancelled.")
+    if job.status not in _CANCELABLE_JOB_STATUSES:
+        raise ValueError(
+            "Only pending deployments can be cancelled — installation has already started or finished."
+        )
     job.status = DEPLOY_CANCELLED
     job.cancelled_at = _now()
     job.updated_at = _now()
+    job.last_result = "cancelled"
     job.last_error = f"Cancelled by {actor.id}"
+    _revoke_unconsumed_job_tokens(session, job.id)
     session.flush()
     ws = session.get(AdWorkstation, job.workstation_id)
-    # Remove staged token so GPO startup auth-gate will not install after cancel.
+    # Remove staged token so a later scheduled task will not install after cancel.
     drop_unc = (getattr(settings, "agent_token_drop_unc", None) or "").strip()
     sid = (ws.object_sid if ws else "") or ""
     if drop_unc and sid:
@@ -508,8 +973,8 @@ def retry_job(session: Session, settings: Settings, *, actor: QkaUser, job_id: u
     job = session.get(AgentDeploymentJob, job_id)
     if job is None:
         raise LookupError("Deployment job was not found.")
-    if job.status not in {DEPLOY_FAILED, DEPLOY_WAITING_COMPUTER, DEPLOY_CANCELLED}:
-        raise ValueError("Only failed, waiting, or cancelled jobs can be retried.")
+    if job.status not in {DEPLOY_FAILED, DEPLOY_CANCELLED, DEPLOY_TIMED_OUT}:
+        raise ValueError("Only failed, cancelled, or timed-out jobs can be retried.")
     ws = session.get(AdWorkstation, job.workstation_id)
     if ws is None:
         raise LookupError("Workstation for that deployment job was not found.")
@@ -576,6 +1041,11 @@ def retry_job(session: Session, settings: Settings, *, actor: QkaUser, job_id: u
             job.status = DEPLOY_SCHEDULED
             job.scheduled_at = now
             job.last_error = ""
+            job.last_result = "token_restaged"
+            job.install_started_at = None
+            job.msi_completed_at = None
+            job.msi_exit_code = None
+            job.cancelled_at = None
             job.engine = "gpo"
             session.flush()
             dto = job_dto(job, ws)
@@ -586,6 +1056,7 @@ def retry_job(session: Session, settings: Settings, *, actor: QkaUser, job_id: u
         except Exception as exc:  # noqa: BLE001
             job.status = DEPLOY_FAILED
             job.last_error = f"Token drop staging failed: {exc}"[:2000]
+            job.last_result = "token_stage_failed"
             job.engine = "gpo"
             session.flush()
             dto = job_dto(job, ws)
@@ -596,6 +1067,11 @@ def retry_job(session: Session, settings: Settings, *, actor: QkaUser, job_id: u
     job.status = DEPLOY_SCHEDULED
     job.scheduled_at = now
     job.last_error = ""
+    job.last_result = "token_issued"
+    job.install_started_at = None
+    job.msi_completed_at = None
+    job.msi_exit_code = None
+    job.cancelled_at = None
     job.engine = "gpo"
     session.flush()
     dto = job_dto(job, ws)
@@ -605,7 +1081,10 @@ def retry_job(session: Session, settings: Settings, *, actor: QkaUser, job_id: u
 
 
 def mark_job_registered(session: Session, *, workstation_id: uuid.UUID, device: DesktopDevice) -> None:
-    """When agent enrolls with machine identity, promote open job to registered."""
+    """When agent enrolls with machine identity, promote open/timed-out job to registered.
+
+    Registration evidence wins over Timed Out; Deployed display still requires heartbeat.
+    """
     job = session.execute(
         select(AgentDeploymentJob)
         .where(
@@ -616,6 +1095,7 @@ def mark_job_registered(session: Session, *, workstation_id: uuid.UUID, device: 
                     DEPLOY_SCHEDULED,
                     DEPLOY_WAITING_COMPUTER,
                     DEPLOY_INSTALLING,
+                    DEPLOY_TIMED_OUT,
                 ]
             ),
         )
@@ -628,6 +1108,7 @@ def mark_job_registered(session: Session, *, workstation_id: uuid.UUID, device: 
     job.installed_at = _now()
     job.updated_at = _now()
     job.last_error = ""
+    job.last_result = "agent_registered"
     session.flush()
 
 

@@ -20,8 +20,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from qka_shared.acl import SourceAclState, evaluate_needles
-from qka_shared.allowlist import ACCOUNT_ENABLED, LINKED, PROVIDER_AD, PROVIDER_GOOGLE
+from qka_shared.allowlist import ACCOUNT_ENABLED, LINKED, PROVIDER_AD, PROVIDER_GOOGLE, USER_ACTIVE
 from qka_shared.models import (
+    DEVICE_REVOKED,
+    DesktopDevice,
     QkaUser,
     SourceGrant,
     SourceScope,
@@ -474,4 +476,52 @@ def authorize_document(
         content,
         capability=capability,
         require_extracted=require_extracted,
+    ).allowed
+
+
+def evaluate_desktop_source_access(
+    session: Session,
+    user: QkaUser | None,
+    device: DesktopDevice | None,
+    *,
+    capability: str = Capability.VIEW,
+) -> EffectiveAccess:
+    """Authorize retrieval of a workstation agent's indexed source.
+
+    Ownership (device.qka_user_id) is association only — never deploy authority.
+    Default deny when unassigned, revoked, login-disabled, or caller is not the owner.
+    Indexing alone never grants document access. Synology/ACL rules remain separate.
+    """
+    _ = session  # reserved for future grant/ACL overlays on desktop sources
+    _ = capability
+    if device is None or device.status == DEVICE_REVOKED:
+        return _deny(reason="desktop_device_unavailable")
+    if device.qka_user_id is None:
+        return _deny(reason="desktop_source_unassigned")
+    if user is None:
+        return _deny(reason="qka_user_required")
+    if int(getattr(user, "status", -1)) != USER_ACTIVE:
+        return _deny(reason="qka_user_inactive")
+    if not bool(getattr(user, "login_enabled", False)):
+        return _deny(reason="qka_login_disabled")
+    if user.id != device.qka_user_id:
+        return _deny(reason="desktop_source_not_owner")
+    return EffectiveAccess(
+        allowed=True,
+        qka_grant="desktop_owner",
+        source_permission="owner",
+        effective="allow",
+        denial_reason=None,
+    )
+
+
+def authorize_desktop_source(
+    session: Session,
+    user: QkaUser | None,
+    device: DesktopDevice | None,
+    *,
+    capability: str = Capability.VIEW,
+) -> bool:
+    return evaluate_desktop_source_access(
+        session, user, device, capability=capability
     ).allowed

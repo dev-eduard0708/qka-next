@@ -52,7 +52,7 @@ Connected agents fulfill Super Admin browse requests over outbound HTTPS polling
 ## Managed deploy (Workstations UI)
 
 1. Employee assignment is **optional** at deploy time (Install → Register → Assign).
-2. Deploy requires: trusted internal HTTPS (`QKA_AGENT_PUBLIC_BASE_URL`), MSI present, RSAT GPMC + linked/filtered pilot GPO, **secure per-computer** machineEnrollmentToken provisioning (HKLM via computer-targeted GPO — not shared MSI/SYSVOL secrets), confirmation phrase `DEPLOY SELECTED`.
+2. Deploy requires: trusted internal HTTPS (`QKA_AGENT_PUBLIC_BASE_URL`), MSI present, RSAT GPMC + linked/filtered pilot GPO, **secure per-computer** machineEnrollmentToken provisioning (HKLM via computer-targeted GPO — not shared MSI/SYSVOL secrets), confirmation phrase `DEPLOY`.
 3. Jobs persist in Postgres (`requested` → `approved` → `scheduled` → `waiting_for_computer` / `installing` → `installed_agent_registered` | `failed` | `cancelled`).
 4. Evidence of install is **agent registration + heartbeat**, never ping or GPO link alone.
 5. Machine enrollment tokens are bound to AD computer SID + HMAC `machineProof`; SID/GUID claims alone are rejected. This is **not** Kerberos machine auth until that is implemented.

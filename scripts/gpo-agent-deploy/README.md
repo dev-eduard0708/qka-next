@@ -31,7 +31,7 @@ Deploy stages the one-time token to the drop share; the agent as **Network Servi
    Registers Machine Startup via `scripts.ini` **and** Scripts CSE + GPT.INI version bump (not scripts.ini alone).
 5. **One pilot PC** (only when approved): `Add-QkaPilotComputer.ps1 -ComputerName 'PC' -IConfirmAddPilotComputer`
 6. Trust HTTPS CER on that PC; `gpupdate /force`
-7. QKA UI → select that PC → `DEPLOY SELECTED` → tokens auto-stage → agent enrolls + heartbeat
+7. QKA UI → select that PC → type `DEPLOY` → APPROVE & DEPLOY NOW → tokens auto-stage → agent enrolls + heartbeat
 
 Until approval: leave GPO **unlinked** and pilot group **empty**. Use `Test-QkaAgentDeployReadiness.ps1` for read-only checks.
 

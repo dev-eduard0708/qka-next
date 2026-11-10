@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from sqlalchemy import select
+
 from qka_api.services import agent_deployment as deploy_svc
 from qka_api.services import gpo_engine
 from qka_api.services.network_probe import PingResult
@@ -679,6 +681,281 @@ def test_list_marks_non_pilot_ineligible_for_deploy(client, tmp_path):
         assert "QKA-Agent-Pilot-Computers" in by_name["FINANCE-01"]["deployAgent"]["note"]
 
 
+def _ready_prereq(settings: Settings) -> dict:
+    base = deploy_svc.deployment_prerequisites(settings)
+    return {
+        **base,
+        "deployEnabled": True,
+        "httpsConfigured": True,
+        "httpsEndpoint": "https://agent.qehc.internal",
+        "blockers": [],
+        "gpoEngineAvailable": True,
+        "msiPresent": True,
+        "maxBulk": 50,
+        "gpoTargetGroup": "QKA-Agent-Pilot-Computers",
+    }
+
+
+def test_install_authorization_rejects_absent_expired_cancelled_and_foreign_sid(client, tmp_path):
+    """Token file presence is not proof — the API must see a live uncancelled token."""
+    from qka_shared.models import MachineEnrollmentToken
+
+    _install(client)
+    headers = _admin(client)
+    items = _sync_workstations(client, headers)
+    pilot = next(i for i in items if i["computerName"] == "PILOT-PC")
+    msi = tmp_path / "QKA-Agent.msi"
+    msi.write_bytes(b"MZ-fake")
+    ready = gpo_engine.GpoEngineStatus(
+        available=True,
+        reason="ok",
+        target_group="QKA-Agent-Pilot-Computers",
+        msi_path=str(msi),
+        msi_present=True,
+        gpmc_present=True,
+    )
+    settings = Settings(agent_public_base_url="https://agent.qehc.internal")
+    absent = client.post(
+        "/api/v1/agent/desktop/install-authorization",
+        json={"token": "", "adComputerSid": PILOT_SID},
+    )
+    assert absent.status_code == 200
+    assert absent.json()["authorized"] is False
+    assert absent.json()["reason"] == "absent"
+
+    with (
+        patch.object(gpo_engine, "probe_gpo_engine", return_value=ready),
+        patch.object(gpo_engine, "list_pilot_group_member_sids", return_value=frozenset({PILOT_SID})),
+        patch.object(deploy_svc, "deployment_prerequisites", return_value=_ready_prereq(settings)),
+    ):
+        created = client.post(
+            "/api/v1/admin/workstations/deploy",
+            headers=headers,
+            json={
+                "workstationIds": [pilot["id"]],
+                "confirmation": deploy_svc.CONFIRM_PHRASE,
+                "approve": True,
+            },
+        )
+    assert created.status_code == 200, created.text
+    token = created.json()["jobs"][0]["machineEnrollmentToken"]
+    job_id = created.json()["jobs"][0]["id"]
+    assert token
+
+    ok = client.post(
+        "/api/v1/agent/desktop/install-authorization",
+        json={"token": token, "adComputerSid": PILOT_SID},
+    )
+    assert ok.status_code == 200
+    assert ok.json()["authorized"] is True
+    assert ok.json()["reason"] == "ok"
+    assert "token" not in ok.json()
+
+    foreign = client.post(
+        "/api/v1/agent/desktop/install-authorization",
+        json={"token": token, "adComputerSid": FINANCE_SID},
+    )
+    assert foreign.json()["authorized"] is False
+    assert foreign.json()["reason"] == "foreign_sid"
+
+    with client.app.state.session_factory() as session:
+        row = session.execute(
+            select(MachineEnrollmentToken).where(MachineEnrollmentToken.job_id == uuid.UUID(job_id))
+        ).scalar_one()
+        row.expires_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+        session.commit()
+    expired = client.post(
+        "/api/v1/agent/desktop/install-authorization",
+        json={"token": token, "adComputerSid": PILOT_SID},
+    )
+    assert expired.json()["authorized"] is False
+    assert expired.json()["reason"] == "expired"
+
+    with client.app.state.session_factory() as session:
+        row = session.execute(
+            select(MachineEnrollmentToken).where(MachineEnrollmentToken.job_id == uuid.UUID(job_id))
+        ).scalar_one()
+        row.expires_at = datetime.now(timezone.utc) + timedelta(hours=2)
+        session.commit()
+    cancelled = client.post(
+        f"/api/v1/admin/workstations/deploy/{job_id}/cancel",
+        headers=headers,
+    )
+    assert cancelled.status_code == 200
+    after = client.post(
+        "/api/v1/agent/desktop/install-authorization",
+        json={"token": token, "adComputerSid": PILOT_SID},
+    )
+    assert after.json()["authorized"] is False
+    assert after.json()["reason"] == "cancelled"
+
+
+def test_scheduled_task_template_is_system_interval_not_startup():
+    root = Path(__file__).resolve().parents[2] / "scripts" / "gpo-agent-deploy"
+    task = (root / "ScheduledTasks.template.xml").read_text(encoding="utf-8")
+    script = (root / "Install-QkaAgentFromUnc.template.ps1").read_text(encoding="utf-8")
+    assert "PT2M" in task
+    assert "S-1-5-18" in task
+    assert "IgnoreNew" in task
+    assert "install-authorization" in script
+    assert "install-progress" in script
+    assert "Get-MachineProof" in script
+    assert "QkaDesktopAgent" in script
+    assert "norestart" in script
+    assert "3010" in script
+
+
+def _proof(token: str, sid: str) -> str:
+    return deploy_svc.machine_proof_digest(token=token, computer_sid=sid, computer_guid="")
+
+
+def test_install_progress_pending_to_in_progress_to_failed_and_rejects_forged(client, tmp_path):
+    """Approved → In Progress (UI); started → installing; MSI fail → Failed; forged proof rejected."""
+    _install(client)
+    headers = _admin(client)
+    items = _sync_workstations(client, headers)
+    pilot = next(i for i in items if i["computerName"] == "PILOT-PC")
+    msi = tmp_path / "QKA-Agent.msi"
+    msi.write_bytes(b"MZ-fake")
+    ready = gpo_engine.GpoEngineStatus(
+        available=True,
+        reason="ok",
+        target_group="QKA-Agent-Pilot-Computers",
+        msi_path=str(msi),
+        msi_present=True,
+        gpmc_present=True,
+    )
+    settings = Settings(agent_public_base_url="https://agent.qehc.internal")
+    with (
+        patch.object(gpo_engine, "probe_gpo_engine", return_value=ready),
+        patch.object(gpo_engine, "list_pilot_group_member_sids", return_value=frozenset({PILOT_SID})),
+        patch.object(deploy_svc, "deployment_prerequisites", return_value=_ready_prereq(settings)),
+    ):
+        created = client.post(
+            "/api/v1/admin/workstations/deploy",
+            headers=headers,
+            json={
+                "workstationIds": [pilot["id"]],
+                "confirmation": deploy_svc.CONFIRM_PHRASE,
+                "approve": True,
+            },
+        )
+    assert created.status_code == 200, created.text
+    job = created.json()["jobs"][0]
+    token = job["machineEnrollmentToken"]
+    job_id = job["id"]
+    assert job["status"] == "scheduled"
+    assert job["displayStatus"] == "in_progress"
+    assert job.get("installStartedAt") in (None, "")
+
+    # Deploy / redeploy must show In Progress immediately (not Pending).
+    listed = client.get("/api/v1/admin/workstations?scopeOnly=false", headers=headers)
+    row = next(i for i in listed.json()["items"] if i["id"] == pilot["id"])
+    assert row["deploymentJob"]["displayStatus"] == "in_progress"
+
+    forged = client.post(
+        "/api/v1/agent/desktop/install-progress",
+        json={
+            "token": token,
+            "adComputerSid": PILOT_SID,
+            "machineProof": "0" * 64,
+            "phase": "started",
+        },
+    )
+    assert forged.status_code == 403
+
+    started = client.post(
+        "/api/v1/agent/desktop/install-progress",
+        json={
+            "token": token,
+            "adComputerSid": PILOT_SID,
+            "machineProof": _proof(token, PILOT_SID),
+            "phase": "started",
+        },
+    )
+    assert started.status_code == 200, started.text
+    assert started.json()["displayStatus"] == "in_progress"
+    assert started.json()["status"] == "installing"
+
+    # Cannot cancel after install started.
+    cancel = client.post(f"/api/v1/admin/workstations/deploy/{job_id}/cancel", headers=headers)
+    assert cancel.status_code == 400
+
+    failed = client.post(
+        "/api/v1/agent/desktop/install-progress",
+        json={
+            "token": token,
+            "adComputerSid": PILOT_SID,
+            "machineProof": _proof(token, PILOT_SID),
+            "phase": "failed",
+            "msiExitCode": 1603,
+            "detail": "msiexec_exit=1603",
+        },
+    )
+    assert failed.status_code == 200
+    assert failed.json()["displayStatus"] == "failed"
+    assert failed.json()["msiExitCode"] == 1603
+
+
+def test_install_progress_msi_success_stays_in_progress_until_registration(client, tmp_path):
+    """MSI 0 / 3010 → still In Progress (waiting registration), never Online by itself."""
+    _install(client)
+    headers = _admin(client)
+    items = _sync_workstations(client, headers)
+    pilot = next(i for i in items if i["computerName"] == "PILOT-PC")
+    msi = tmp_path / "QKA-Agent.msi"
+    msi.write_bytes(b"MZ-fake")
+    ready = gpo_engine.GpoEngineStatus(
+        available=True,
+        reason="ok",
+        target_group="QKA-Agent-Pilot-Computers",
+        msi_path=str(msi),
+        msi_present=True,
+        gpmc_present=True,
+    )
+    settings = Settings(agent_public_base_url="https://agent.qehc.internal")
+    with (
+        patch.object(gpo_engine, "probe_gpo_engine", return_value=ready),
+        patch.object(gpo_engine, "list_pilot_group_member_sids", return_value=frozenset({PILOT_SID})),
+        patch.object(deploy_svc, "deployment_prerequisites", return_value=_ready_prereq(settings)),
+    ):
+        created = client.post(
+            "/api/v1/admin/workstations/deploy",
+            headers=headers,
+            json={
+                "workstationIds": [pilot["id"]],
+                "confirmation": deploy_svc.CONFIRM_PHRASE,
+                "approve": True,
+            },
+        )
+    token = created.json()["jobs"][0]["machineEnrollmentToken"]
+    proof = _proof(token, PILOT_SID)
+    assert (
+        client.post(
+            "/api/v1/agent/desktop/install-progress",
+            json={"token": token, "adComputerSid": PILOT_SID, "machineProof": proof, "phase": "started"},
+        ).status_code
+        == 200
+    )
+    done = client.post(
+        "/api/v1/agent/desktop/install-progress",
+        json={
+            "token": token,
+            "adComputerSid": PILOT_SID,
+            "machineProof": proof,
+            "phase": "msi_finished",
+            "msiExitCode": 3010,
+            "detail": "msiexec_exit=3010_restart_required",
+        },
+    )
+    assert done.status_code == 200
+    body = done.json()
+    assert body["displayStatus"] == "in_progress"
+    assert body["restartRequired"] is True
+    assert body["msiExitCode"] == 3010
+    assert body["status"] == "installing"
+
+
 def test_wsit02_sid_recognized_as_only_approved_pilot_identity():
     """Document/verify the live WSIT02 objectSid used for pilot authorization."""
     assert WSIT02_SID.startswith("S-1-5-21-")
@@ -691,3 +968,146 @@ def test_wsit02_sid_recognized_as_only_approved_pilot_identity():
     assert not gpo_engine.computer_sid_in_pilot_group(
         "WSIT02", member_sids=frozenset({WSIT02_SID})
     )  # name-only must never authorize
+
+
+def test_compute_display_status_lifecycle_transitions():
+    from types import SimpleNamespace
+
+    from qka_shared.models import (
+        DEPLOY_CANCELLED,
+        DEPLOY_FAILED,
+        DEPLOY_INSTALLING,
+        DEPLOY_INSTALLED_REGISTERED,
+        DEPLOY_SCHEDULED,
+        DEPLOY_TIMED_OUT,
+    )
+
+    def job(status: int) -> SimpleNamespace:
+        return SimpleNamespace(status=status)
+
+    assert deploy_svc.compute_display_status(job=job(DEPLOY_SCHEDULED)) == "in_progress"
+    assert deploy_svc.compute_display_status(job=job(DEPLOY_INSTALLING)) == "in_progress"
+    assert (
+        deploy_svc.compute_display_status(
+            job=job(DEPLOY_INSTALLED_REGISTERED),
+            agent_online=False,
+            agent_status="not_registered",
+            has_heartbeat=False,
+        )
+        == "installed"
+    )
+    assert (
+        deploy_svc.compute_display_status(
+            job=job(DEPLOY_INSTALLED_REGISTERED),
+            agent_online=True,
+            agent_status="connected",
+            has_heartbeat=True,
+        )
+        == "deployed"
+    )
+    assert deploy_svc.compute_display_status(job=job(DEPLOY_FAILED)) == "failed"
+    assert deploy_svc.compute_display_status(job=job(DEPLOY_TIMED_OUT)) == "timed_out"
+    assert deploy_svc.compute_display_status(job=job(DEPLOY_CANCELLED)) == "cancelled"
+    # Registration after timeout still surfaces as deployed when heartbeat exists.
+    assert (
+        deploy_svc.compute_display_status(
+            job=job(DEPLOY_TIMED_OUT),
+            agent_online=True,
+            agent_status="connected",
+            has_heartbeat=True,
+        )
+        == "deployed"
+    )
+
+
+def test_reconcile_stale_pending_job_times_out(client):
+    _install(client)
+    headers = _admin(client)
+    items = _sync_workstations(client, headers)
+    pilot = next(i for i in items if i["computerName"] == "PILOT-PC")
+    now = datetime.now(timezone.utc)
+    from qka_api.db import create_session_factory
+    from qka_shared.config import get_settings
+    from qka_shared.models import DEPLOY_SCHEDULED, DEPLOY_TIMED_OUT, AgentDeploymentJob, MachineEnrollmentToken
+
+    settings = get_settings()
+    _engine, factory = create_session_factory(settings)
+    job_id = uuid.uuid4()
+    tok_id = uuid.uuid4()
+    with factory() as session:
+        session.add(
+            AgentDeploymentJob(
+                id=job_id,
+                workstation_id=uuid.UUID(pilot["id"]),
+                requested_by_user_id=ALLOWED_USER,
+                status=DEPLOY_SCHEDULED,
+                attempt_count=1,
+                engine="gpo",
+                created_at=now - timedelta(hours=2),
+                updated_at=now - timedelta(hours=2),
+                scheduled_at=now - timedelta(hours=2),
+            )
+        )
+        session.add(
+            MachineEnrollmentToken(
+                id=tok_id,
+                job_id=job_id,
+                workstation_id=uuid.UUID(pilot["id"]),
+                ad_computer_sid=PILOT_SID,
+                token_hash="a" * 64,
+                proof_hash="",
+                expires_at=now + timedelta(hours=12),
+                created_at=now - timedelta(hours=2),
+            )
+        )
+        session.commit()
+        # 2h is still inside the default GPO-aware pending window (180m) → must NOT time out.
+        settings_gpo = Settings(
+            agent_gpo_task_distribution="ou_computers",
+            agent_deploy_pending_timeout_minutes=180,
+            agent_deploy_gpo_provision_timeout_minutes=180,
+            agent_deploy_installing_timeout_minutes=120,
+        )
+        assert deploy_svc.reconcile_stale_deployment_jobs(session, settings_gpo) == 0
+        session.refresh(session.get(AgentDeploymentJob, job_id))
+        assert session.get(AgentDeploymentJob, job_id).status == DEPLOY_SCHEDULED
+        assert session.get(MachineEnrollmentToken, tok_id).consumed_at is None
+
+        # Explicit short window still times out and revokes the token.
+        settings_fast = Settings(
+            agent_gpo_task_distribution="ou_computers",
+            agent_deploy_pending_timeout_minutes=30,
+            agent_deploy_gpo_provision_timeout_minutes=30,
+            agent_deploy_installing_timeout_minutes=120,
+        )
+        changed = deploy_svc.reconcile_stale_deployment_jobs(session, settings_fast)
+        assert changed == 1
+        session.commit()
+        row = session.get(AgentDeploymentJob, job_id)
+        assert row is not None
+        assert row.status == DEPLOY_TIMED_OUT
+        assert row.last_result == "timed_out_gpo_wait"
+        assert "Timed out" in (row.last_error or "")
+        assert "revoked" in (row.last_error or "").lower()
+        tok = session.get(MachineEnrollmentToken, tok_id)
+        assert tok is not None and tok.consumed_at is not None
+
+    listed = client.get("/api/v1/admin/workstations?scopeOnly=false", headers=headers)
+    assert listed.status_code == 200
+    row = next(i for i in listed.json()["items"] if i["id"] == pilot["id"])
+    assert row["deploymentJob"]["displayStatus"] == "timed_out"
+    assert row["deploymentJob"]["status"] == "timed_out"
+
+
+def test_pending_wait_covers_background_gpo_refresh():
+    minutes, phase = deploy_svc._pending_wait_minutes(
+        Settings(
+            agent_gpo_task_distribution="ou_computers",
+            agent_deploy_pending_timeout_minutes=180,
+            agent_deploy_gpo_provision_timeout_minutes=180,
+        )
+    )
+    assert minutes >= 180
+    assert phase.startswith("gpo")
+    # Installing window stays separate/shorter than a multi-hour GPO wait default.
+    assert int(Settings().agent_deploy_installing_timeout_minutes) <= minutes
